@@ -10,20 +10,21 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 16
-    max_iterations = 150
-    save_interval = 50
-    experiment_name = "cartpole_direct"
+    num_steps_per_env = 24          # longer rollout horizon for legged locomotion
+    max_iterations = 1500           # 10× more iterations for hexapod (was 150)
+    save_interval = 50              # checkpoint every 50 iters — never lose a run
+    experiment_name = "hexapod_flat"
+
     actor = RslRlMLPModelCfg(
-        hidden_dims=[32, 32],
+        hidden_dims=[256, 128, 64],  # larger network for 63-dim obs / 18-dim action
         activation="elu",
-        obs_normalization=False,
+        obs_normalization=True,      # running-mean normalisation on observations
         distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
     )
     critic = RslRlMLPModelCfg(
-        hidden_dims=[32, 32],
+        hidden_dims=[256, 128, 64],
         activation="elu",
-        obs_normalization=False,
+        obs_normalization=True,
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,

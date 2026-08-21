@@ -76,6 +76,13 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--resume_last",
+    action="store_true",
+    default=False,
+    help="Resume training from the most recent checkpoint in the experiment folder. "
+         "Overrides --resume / --load_run. Omit this flag to start from scratch.",
+)
+parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
@@ -196,6 +203,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             from isaaclab.envs import multi_agent_to_single_agent
 
             env = multi_agent_to_single_agent(env)
+
+        # --resume_last: automatically find the newest run directory and its latest checkpoint.
+        # This lets you pick up a run after changing reward weights without having to
+        # copy-paste a timestamp directory name. Omit the flag for a clean start.
+        if args_cli.resume_last:
+            import glob
+            import re
+
+            run_dirs = sorted(
+                [d for d in glob.glob(os.path.join(log_root_path, "*")) if os.path.isdir(d)]
+            )
+            if run_dirs:
+                agent_cfg.load_run = os.path.basename(run_dirs[-1])
+                agent_cfg.resume = True
+                print(f"[INFO] --resume_last: resuming from '{agent_cfg.load_run}'")
+            else:
+                print("[WARNING] --resume_last: no previous runs found, starting fresh.")
 
         # save resume path before creating a new log_dir
         if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":

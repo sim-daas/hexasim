@@ -5,9 +5,29 @@
 
 __all__ = [
     "joint_pos_target_l2",
+    "forward_velocity",
+    "lateral_velocity_penalty",
+    "ang_vel_xy_penalty",
+    "joint_torque_threshold_penalty",
+    "base_height_penalty",
+    "stand_still_penalty",
+    "foot_clearance_reward",
+    "joint_motion_reward",
+    "base_orientation_penalty",
 ]
 
 # Forward stable MDP terms lazily, then override with environment-specific terms below.
 from isaaclab.envs.mdp import *  # noqa: F401, F403
 
-from .rewards import joint_pos_target_l2
+from .rewards import (  # noqa: F401
+    ang_vel_xy_penalty,
+    base_height_penalty,
+    base_orientation_penalty,
+    foot_clearance_reward,
+    forward_velocity,
+    joint_motion_reward,
+    joint_pos_target_l2,
+    joint_torque_threshold_penalty,
+    lateral_velocity_penalty,
+    stand_still_penalty,
+)
