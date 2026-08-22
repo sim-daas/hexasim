@@ -15,13 +15,14 @@ Reward terms
 + forward_velocity      : velocity-scaled reward for positive x-body-frame speed
 - stand_still           : penalty if v_x < 0.1 m/s (cancels alive bonus)
 - lateral_velocity      : small penalty for sideways drift (y-body-frame)
-- base_height           : penalty if root drops below 0.095 m (weight -60)
+- base_height           : penalty if root drops below 0.13 m (weight -60)
 - ang_vel_xy            : penalise roll/pitch rates — stability proxy
 - base_orientation      : two-zone pitch/roll angle penalty (projected gravity)
 + foot_clearance        : reward each foot for being off the ground (anti-slide)
 + joint_motion          : reward joint speed minus acceleration penalty
 - joint_torque_excess   : penalise torques above threshold (2.5 Nm) — efficiency
 - action_rate           : penalise rapid action changes — smooth control
+- non_foot_body         : penalise femur links approaching ground (bent-knee fix)
 + alive                 : constant bonus each step
 - terminating           : penalty on episode end by fall
 
@@ -229,8 +230,9 @@ class RewardsCfg:
                              so standing/sliding with no leg effort is neutral.
 
     base_height      -60.0   Strong height maintenance. Kicks in if root drops
-                             below 0.095 m (raised from 0.08 m so the penalty
-                             fires before the termination threshold of 0.05 m).
+                             below 0.13 m (raised from 0.095 m — forces legs
+                             to extend fully, directly counteracting bent-knee
+                             local optima).
                              0.1 m height error → -6.0 / step.
 
     ang_vel_xy        -0.5   Stability proxy: penalise roll and pitch rates.
@@ -256,6 +258,12 @@ class RewardsCfg:
                              Below threshold: free. Above: -0.05 × excess Nm.
 
     action_rate       -0.01  Smooth control signal.
+
+    non_foot_body    -30.0   Penalise femur links if their Z-height drops below
+                             0.05 m (ground proximity). Directly targets the
+                             bent-knee pathology where the femur drags.
+                             At ground level: 0.05 m × 30 × 6 = -9.0/step max.
+                             Per single femur: 0.05 × 30 = -1.5/step min.
 
     alive             +1.0   Constant per-step bonus.
     terminating       -5.0   Penalty on episode termination (not timeout).
@@ -289,16 +297,16 @@ class RewardsCfg:
         },
     )
 
-    # (4) Height penalty — only penalise if height drops below 0.095 m.
-    #     Raised from 0.08 m so the penalty fires well before the 0.05 m
-    #     termination threshold, giving the agent time to react.
-    #     Weight increased from -50 to -60 for a stronger corrective signal.
+    # (4) Height penalty — only penalise if height drops below 0.13 m.
+    #     Raised from 0.095 m: forces legs to extend fully at all times,
+    #     directly counteracting bent-knee local optima where the robot
+    #     balances on a folded femur instead of the tibia tip.
     base_height = RewTerm(
         func=hex_mdp.base_height_penalty,
         weight=-60.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "minimum_height": 0.095,
+            "minimum_height": 0.13,
         },
     )
 
@@ -372,10 +380,26 @@ class RewardsCfg:
     # (6) Smooth control signal
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
 
-    # (7) Alive bonus
+    # (7) Non-foot body ground proximity penalty — bent-knee fix.
+    #     Penalises femur links when their Z-height drops below 0.05 m.
+    #     Threshold is tight (= termination floor) so it only fires on
+    #     severe drooping, not during normal leg swing.
+    #     A single femur at z=0: penalty = 0.05 m × weight -30 = -1.5/step
+    #     — enough to overcome foot_clearance + joint_motion gain from the
+    #     broken-leg posture.
+    non_foot_body = RewTerm(
+        func=hex_mdp.non_foot_body_ground_penalty,
+        weight=-30.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=[".*femur.*"]),
+            "minimum_height": 0.05,
+        },
+    )
+
+    # (8) Alive bonus
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
 
-    # (8) Termination penalty
+    # (9) Termination penalty
     terminating = RewTerm(func=mdp.is_terminated, weight=-5.0)
 
 

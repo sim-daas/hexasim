@@ -21,5 +21,6 @@ from .rewards import (  # noqa: E402, F401
     joint_pos_target_l2,
     joint_torque_threshold_penalty,
     lateral_velocity_penalty,
+    non_foot_body_ground_penalty,
     stand_still_penalty,
 )

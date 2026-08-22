@@ -155,3 +155,65 @@ At 15° sustained pitch the orientation penalty already **exceeds the +2.0 forwa
 Also applied in this phase:
 - **`episode_length_s`**: 5 s → **10 s** (500 steps at 50 Hz) — longer episodes let the robot learn longer-horizon stable gaits.
 - **`env_spacing`**: 5 m → **10 m** — reduces inter-robot interference over the longer travel distance.
+
+---
+
+## 7. Phase 7: Bent-Knee Local Optimum (~4500 iterations)
+
+### Observed Behavior
+After ~4500 training iterations with the Phase 6 reward set, **one front leg** developed a persistent pathological posture: the **femur (second-to-last joint) folded completely**, bringing the femur link into contact with the ground rather than the tibia tip. The overall robot motion degraded to a **slant or circular trajectory** — the asymmetric leg load caused a yaw bias that no amount of continued training resolved.
+
+### Why Continued Training Failed to Fix It
+
+This is a classic **RL local optimum** problem, not a data problem. By ~4500 iterations, the policy had converged to a stable attractor state. The gradient signal is insufficient to escape once the value estimates for the broken-leg posture are well-established in the critic. Simply training longer does **not** help — the policy hill-climbs toward the local optimum faster than the reward signal can steer it away.
+
+Key factors that allowed the optimum to persist:
+
+| Factor | Why it enabled the exploit |
+|---|---|
+| `foot_clearance_reward` (+0.8) | Targets tibia bodies — a folded femur can still produce tibia airtime on swing, earning partial clearance reward |
+| `base_height_penalty` (min 0.095 m) | 0.095 m was achievable even with one leg folded — the remaining 5 legs can compensate |
+| No per-link body penalty | Femur dragging on ground had **zero direct penalty** — only indirect cost via `base_orientation` if the torso tilted |
+| Non-deterministic RL init | Different random seeds produce different local optima; this one was unlucky enough to lock in the bent-knee policy |
+
+### General Principle: Reward Shaping vs. Retraining
+
+A common instinct is to retrain from scratch with a different seed. This can work, but is unreliable — the same pathology can re-emerge in another run. **The correct fix is to make the local optimum economically unviable** via targeted reward shaping:
+
+> *If a behaviour persists for thousands of iterations, the reward structure is not making it costly enough. Identify the exact physical state the exploit relies on, and add a direct penalty for that state.*
+
+In this case: the exploit relies on a **femur body being near the ground**. Adding a direct penalty for femur proximity to the ground makes the broken posture unprofitable regardless of seed.
+
+---
+
+## 8. Phase 8: Height Increase + Non-Foot Body Penalty
+
+### Changes Applied
+
+**1. Raise `base_height` minimum: 0.095 m → 0.13 m**
+- At 0.095 m, the robot could maintain sufficient height with one leg folded under.
+- At 0.13 m, **all legs must extend significantly** to clear the threshold. A robot balancing on a folded femur cannot reach this height — the only viable strategy is proper leg extension.
+- Economic impact: height error of 0.03 m (just under threshold) → `-60 × 0.03 = -1.8/step`. Exceeding the threshold is now a near-constant cost for the broken-leg posture.
+
+**2. New `non_foot_body_ground_penalty` (weight `-30.0`)**
+- Uses `body_pos_w` (same API as `foot_clearance_reward`) — **no ContactSensor required**.
+- Targets all 6 femur bodies via `body_names=[".*femur.*"]`.
+- Penalty fires when any femur Z-height drops below `0.05 m` (termination floor).
+- Returns `sum(clamp(0.05 - femur_z, 0))` across all 6 femur links.
+- **Economic analysis for bent-knee posture:**
+
+| State | femur_z | penalty per femur | × weight -30 | vs. benefit |
+|---|---|---|---|---|
+| Normal standing | ~0.08 m | 0 (above threshold) | 0 | — |
+| Mild droop | 0.03 m | 0.02 m | **-0.6/step** | wipes out joint_motion gain |
+| Fully folded (ground) | ~0 m | 0.05 m | **-1.5/step** | far exceeds any leg-planted benefit |
+
+- **Why not `.*coxa.*` too?** Coxa links are the first segment and naturally higher — including them risks spurious penalties during normal motion. Femur is the specific link implicated in the bent-knee pathology.
+
+### Why This Works Where Retraining Might Not
+
+The two changes together close the economic gap from **both sides**:
+- Raising `base_height` to 0.13 m makes maintaining height with a folded leg **mechanically harder** (positive pressure to extend).
+- The femur proximity penalty makes the folded-leg state **directly costly** regardless of height.
+
+A retrain from scratch with these rewards in place will not allow the bent-knee optimum to form — the gradient signal correctly penalises it from the first episode.

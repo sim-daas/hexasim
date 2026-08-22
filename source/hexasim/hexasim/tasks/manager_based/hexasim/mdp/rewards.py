@@ -7,16 +7,17 @@
 
 Functions
 ---------
-joint_pos_target_l2         : penalise joint deviation from a target value.
-forward_velocity            : reward forward body-frame velocity.
-lateral_velocity_penalty    : penalise sideways drift.
-stand_still_penalty         : penalise slow forward motion (cancels alive bonus).
-ang_vel_xy_penalty          : penalise roll/pitch rates.
+joint_pos_target_l2            : penalise joint deviation from a target value.
+forward_velocity               : reward forward body-frame velocity.
+lateral_velocity_penalty       : penalise sideways drift.
+stand_still_penalty            : penalise slow forward motion (cancels alive bonus).
+ang_vel_xy_penalty             : penalise roll/pitch rates.
 joint_torque_threshold_penalty : penalise torques above threshold.
-base_height_penalty         : penalise root height below minimum.
-foot_clearance_reward       : reward feet for being off the ground (anti-slide).
-joint_motion_reward         : reward joint velocity while penalising acceleration.
-base_orientation_penalty    : two-zone roll/pitch angle penalty (projected gravity).
+base_height_penalty            : penalise root height below minimum.
+foot_clearance_reward          : reward feet for being off the ground (anti-slide).
+joint_motion_reward            : reward joint velocity while penalising acceleration.
+base_orientation_penalty       : two-zone roll/pitch angle penalty (projected gravity).
+non_foot_body_ground_penalty   : penalise femur/coxa bodies approaching the ground.
 """
 
 from __future__ import annotations
@@ -333,3 +334,42 @@ def base_orientation_penalty(
     hard_penalty = hard_multiplier * torch.clamp(tilt_sq - threshold_sin_sq, min=0.0)
 
     return soft_penalty + hard_penalty  # (N,), weight must be negative
+
+
+# ---------------------------------------------------------------------------
+# Non-foot body ground proximity penalty
+# ---------------------------------------------------------------------------
+
+def non_foot_body_ground_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    minimum_height: float = 0.05,
+) -> torch.Tensor:
+    """Penalise femur or coxa links when they approach the ground plane.
+
+    Targets the **bent-knee pathology**: if the femur (second-to-last leg
+    segment) hyper-flexes and drags near the ground, it is penalised just
+    like the base-height penalty — no ContactSensor required.
+
+    Select the bodies to monitor via ``asset_cfg.body_names``, e.g.
+    ``body_names=[".*femur.*"]`` for all six femur links, or include
+    ``".*coxa.*"`` if coxa drag is also observed.
+
+    Returns ``sum(clamp(minimum_height - body_z, 0))`` over selected bodies.
+    Weight must be negative.
+
+    Args:
+        env:            The RL environment instance.
+        asset_cfg:      SceneEntityCfg with body_names selecting the links
+                        to monitor (femur, coxa, etc.).
+        minimum_height: Z threshold (m) below which the penalty fires.
+                        Default 0.05 m — just above the episode termination
+                        floor, so it only fires on severe drooping.
+
+    Shape: (num_envs,)
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    # body_pos_w: (N, num_bodies, 3) — same API used by foot_clearance_reward
+    body_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :]  # (N, B, 3)
+    body_z = body_pos_w[:, :, 2]                                   # (N, B)
+    return torch.clamp(minimum_height - body_z, min=0.0).sum(dim=-1)  # (N,)
