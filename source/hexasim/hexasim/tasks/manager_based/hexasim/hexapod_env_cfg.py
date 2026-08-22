@@ -433,7 +433,7 @@ class HexapodEnvCfg(ManagerBasedRLEnvCfg):
 
     # Scene
     scene: HexapodSceneCfg = HexapodSceneCfg(
-        num_envs=64,
+        num_envs=3072,
         env_spacing=10.0,   # 10 m between robots — room for 10 s episodes
     )
 
