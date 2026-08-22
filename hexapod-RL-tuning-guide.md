@@ -217,3 +217,31 @@ The two changes together close the economic gap from **both sides**:
 - The femur proximity penalty makes the folded-leg state **directly costly** regardless of height.
 
 A retrain from scratch with these rewards in place will not allow the bent-knee optimum to form — the gradient signal correctly penalises it from the first episode.
+
+---
+
+## 9. Phase 9: Airborne Leg Exploit & Yaw Drift (~1000 iterations)
+
+### Observed Behavior
+With the height and bent-knee fixes in place, the hexapod learned a near-tripod gait very quickly (~1000 iterations). However, two new issues emerged:
+1. **Permanently Airborne Leg**: The back-left leg remained stuck in the air, with the back-right leg barely moving.
+2. **Yaw Drift**: The robot slowly rotated as it walked due to the asymmetric gait, meaning it traveled in a wide arc instead of a straight line.
+
+### Issue 1: The "Hanging Toe" Local Optimum
+The `foot_clearance_reward` used a pure position-based signal: `clamp(foot_z, 0, 0.02m)`. The agent discovered that simply lifting one leg and keeping it permanently at `>0.02m` earned maximum reward every single step without the effort of cycling it back down.
+
+**The Fix:**
+Replaced `foot_clearance_reward` with a hybrid `foot_gait_reward`:
+- **70% Velocity-based**: `clamp(|foot_vel_z|, 0, 0.3 m/s)`
+- **30% Position-based**: `clamp(foot_z, 0, 0.02m)`
+A permanently airborne leg now has near-zero Z-velocity, capping its reward at `0.3` per step. A properly cycling leg earns up to `1.0` per step, heavily incentivizing the agent to keep all legs moving.
+
+### Issue 2: Yaw Drift and "Forward" Ambiguity
+The `forward_velocity` reward measured velocity in the *body frame's X-axis*. If the robot started walking in a circle, its body-frame forward velocity was still high, so it had no incentive to straighten out (there was no direct penalty for yawing). 
+
+**The Fix:**
+Added `forward_distance_x` as the new **primary positive reward** (weight `+2.5`). 
+- This measures linear velocity in the **absolute world-frame X-axis**.
+- Because the robot's initial yaw is fully randomized `[-pi, pi]` every episode, the robot must immediately turn to face the world +X direction and maintain that heading.
+- Any yaw drift away from +X causes its world-frame X velocity to drop, naturally and strongly penalizing asymmetric gaits that cause rotation.
+- Retained the body-frame `forward_velocity` (weight `+2.0`) as a secondary local reward to encourage forward effort even while turning.
