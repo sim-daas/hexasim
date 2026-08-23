@@ -56,10 +56,12 @@ from . import mdp as hex_mdp  # isort:skip
 # PhantomX Mark IV asset configuration
 from hexasim.assets.robot import PXMARK4_CFG  # isort:skip
 
+from isaaclab.sensors import ContactSensorCfg
 
 ##
 # Scene definition
 ##
+
 
 
 @configclass
@@ -100,6 +102,15 @@ class HexapodSceneCfg(InteractiveSceneCfg):
     # without needing a separate ContactSensorCfg in the scene.
     # -----------------------------------------------------------------------
     robot: ArticulationCfg = PXMARK4_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+    # -----------------------------------------------------------------------
+    # Foot Contact Sensors
+    # -----------------------------------------------------------------------
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*tn__pxmark4.*_tibia_link.*",
+        history_length=3,
+        track_air_time=True,
+    )
 
 
 ##

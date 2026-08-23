@@ -11,16 +11,19 @@ During the initial setup of the `Hexapod-Flat-v0` environment, we encountered se
 * **Root Cause**: The template code used `mdp.base_height_l2` as a termination condition. However, `base_height_l2` is a **reward function** that returns a continuous tensor, not a boolean termination function.
 * **Fix**: Replaced it with the correct built-in termination function: `mdp.root_height_below_minimum` with a threshold of `0.05m`.
 
-### Bug 2: `ContactSensor` USD Segfault (Exit Code 139)
-* **Error**: A low-level C++ segmentation fault occurring during `dlopen` at module load time.
-* **Root Cause**: Placing `from isaaclab.sensors import ContactSensorCfg` at the top level of the environment config file forced the `TfRegistryManager` to register USD schema types before Isaac Sim's plugin stack was fully initialized, corrupting memory.
-* **Fix**: Removed the `ContactSensor` from the scene and attempted to use the articulation's `body_contact_forces`. 
+### Bug 2: `ContactSensor` Setup & Initialization Issues
+* **Initial Error**: Exit code 139 segfaults and `RuntimeError: Failed to initialize contact reporter for specified bodies`.
+* **Root Causes**: 
+  1. **Missing Contact API Schema in USD**: PhysX contact reporting requires the `PhysxContactReportAPI` schema applied directly to the collision rigid bodies in the USD stage (`hexapod.usda`).
+  2. **Regex Over-Matching**: Prim paths like `.*tibia.*` or `.*_tibia_link.*` matched both top-level rigid bodies and nested non-rigid collision mesh prims (e.g., `pxmark4_tibia_link_1`), which caused PhysX tensor reporter initialization to crash.
+* **Fix**:
+  1. Applied `PhysxContactReportAPI` across all tibia links in `hexapod.usda`.
+  2. Added `ContactSensorCfg` to `HexapodSceneCfg` in `hexapod_env_cfg.py` using the precise rigid body regex `"{ENV_REGEX_NS}/Robot/.*tn__pxmark4.*_tibia_link.*"` (targeting exactly the 6 rigid tibia links).
 
-### Bug 3: `body_contact_forces` Attribute Error
+### Bug 3: `body_contact_forces` Attribute Error (Legacy Approach)
 * **Error**: `AttributeError: 'ArticulationData' object has no attribute 'body_contact_forces'`
 * **Root Cause**: The installed version of Isaac Lab's `ArticulationData` did not expose `body_contact_forces` directly.
-* **Fix**: Removed the custom foot contact force penalty entirely. We rely on the **joint torque penalty** as a proxy: if the robot pushes against the ground with excessive force, joint torques will naturally spike and be penalized.
-
+* **Fix**: Replaced by standard `ContactSensorCfg` in `InteractiveSceneCfg`, which exposes clean `net_forces_w`, `last_air_time`, and contact histories.
 ---
 
 ## 2. Reward Shaping Journey
@@ -253,3 +256,78 @@ The strategy implemented in Phase 9—specifically the heavy reliance on global 
 - **Pathological Gaits**: When the policy did manage to converge, the resulting behavior was worse than before. The robot adopted a severely broken gait using only 2 or 3 legs, perpetually rotating in a small circle rather than achieving the intended stable, straight-line walking.
 
 Adding strict global velocity rewards conflicted with the natural exploration of complex legged locomotion, trapping the agent rather than guiding it.
+
+---
+
+## 10. Phase 10: Tibia Foot Contact Sensor Integration & CPG Foundation
+
+To move toward **Central Pattern Generator (CPG)** guided reward formulation and avoid the pitfalls of naive velocity-based constraints observed in Phase 9, accurate ground contact sensing for all 6 feet (tibias) was successfully integrated.
+
+### 1. USD Setup & Scene Configuration
+
+* **USD Prim Schema (`hexapod.usda`)**:
+  `PhysxContactReportAPI` is prepended to the rigid body scopes for all 6 legs:
+  - `tn__pxmark4right_front_tibia_link_ri0`
+  - `tn__pxmark4right_middle_tibia_link_ck0`
+  - `tn__pxmark4right_back_tibia_link_bh0`
+  - `tn__pxmark4left_front_tibia_link_bh0`
+  - `tn__pxmark4left_middle_tibia_link_ri0`
+  - `tn__pxmark4left_back_tibia_link_qf0`
+
+* **Isaac Lab Scene Integration (`hexapod_env_cfg.py`)**:
+  ```python
+  from isaaclab.sensors import ContactSensorCfg
+
+  # Inside HexapodSceneCfg:
+  contact_forces = ContactSensorCfg(
+      prim_path="{ENV_REGEX_NS}/Robot/.*tn__pxmark4.*_tibia_link.*",
+      history_length=3,
+      track_air_time=True,
+  )
+  ```
+
+### 2. Contact Point Grounding: Why Tibia Sensing Measures Toe Contact
+
+In the URDF / USD kinematic tree:
+1. Each leg's lower link is a single rigid body (`pxmark4/xxx_tibia_link`) containing the collision geometry `pxmark4_tibia_link.stl`.
+2. The distal tip (toe) of the tibia link corresponds to the `foot_link` origin at $(x=0.095, y=0, z=-0.09)\text{ m}$ relative to the tibia joint.
+3. Because the tibia link is angled downward during standing and locomotion, the lowest geometric collision point contacting the ground surface is the **curved rubber toe tip**.
+4. PhysX computes collision pairs between this convex collision hull and the ground plane. When the toe tip touches the ground, PhysX registers the normal force on the tibia rigid body. If the robot stumbles or drags its shank, contact is also registered on the tibia body, physically capturing contact anomalies.
+
+### 3. Verification: Free-Fall Drop Test ($0.60\text{ m}$)
+
+To verify sensor operation and dynamic sensitivity, the robot was dropped from a spawn height of $0.60\text{ m}$ in simulation ($dt = 0.02\text{ s}$):
+
+* **Free-Fall ($0.00\text{ s} - 0.26\text{ s}$)**: Contact forces are strictly $0.00\text{ N}$ across all 6 feet.
+* **Impact Spike ($0.28\text{ s} - 0.30\text{ s}$)**: Contact force peaks at **$48.90\text{ N}$** on individual feet, with a total impact force of **$276.11\text{ N}$**.
+* **Standing Equilibrium ($0.80\text{ s} - 2.00\text{ s}$)**: Forces settle to $\approx 2.0\text{ N} - 2.2\text{ N}$ per foot, yielding a total normal force of **$\approx 11.8\text{ N}$** (matching the $1.2\text{ kg} \times 9.81\text{ m/s}^2$ weight of the robot).
+
+```text
+Time (s)   | Step  | Max Z-Force (N) | Total Z-Force (N)  | Per-Leg Z-Forces [RF, RM, RB, LF, LM, LB]
+-------------------------------------------------------------------------------------------------
+    0.02 s |     0 |            0.00 |               0.00 | [  0.00,   0.00,   0.00,   0.00,   0.00,   0.00]
+    0.28 s |    13 |           36.46 |             215.18 | [ 35.92,  36.20,  36.46,  35.55,  35.10,  35.95]
+    0.30 s |    14 |           48.90 |             276.11 | [ 43.91,  43.24,  44.92,  46.73,  48.90,  48.40]
+    0.40 s |    19 |            1.57 |               7.93 | [  1.20,   1.38,   1.05,   1.44,   1.57,   1.29]
+    1.00 s |    49 |            2.20 |              11.92 | [  2.03,   2.20,   2.11,   1.83,   1.86,   1.89]
+    2.00 s |    99 |            2.19 |              11.74 | [  2.03,   2.19,   2.01,   1.79,   1.86,   1.87]
+```
+
+### 4. Planned Usage of Contact Sensory Data in RL
+
+With working contact sensors, the RL pipeline can leverage four primary mechanisms:
+
+1. **CPG Gait Phase Tracking (Stance vs. Swing Synchronization)**:
+   Given target CPG phases $\phi_i \in [0, 2\pi)$ for each leg $i \in \{1 \dots 6\}$:
+   - Reward contact during planned stance phase ($\phi_i \in [\pi, 2\pi)$) where $F_{z, i} > F_{\text{threshold}}$.
+   - Penalize contact during planned swing phase ($\phi_i \in [0, \pi)$) where $F_{z, i} > 0$.
+   This directly eliminates both the "permanently airborne leg" and "dragging leg" exploits without rigid global velocity penalties.
+
+2. **Air-Time Consistency Reward**:
+   Using `contact_forces.data.last_air_time`, reward symmetric swing duration across opposing tripod pairs ($\{\text{RF, LM, RB}\}$ vs $\{\text{LF, RM, LB}\}$).
+
+3. **Impact Force Penalization**:
+   Penalize excessive peak contact forces ($F_z > 15\text{ N}$) to encourage smooth foot placement over slamming.
+
+4. **Policy Observation Input**:
+   Expose binary contact booleans or normalized contact forces ($6\text{D}$ tensor) into the policy observation space (`ObsGroup`) for reactive terrain response.
