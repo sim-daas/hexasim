@@ -8,14 +8,13 @@
 Functions
 ---------
 joint_pos_target_l2            : penalise joint deviation from a target value.
-forward_distance_x             : reward progress in world-frame X axis.
 forward_velocity               : reward forward body-frame velocity.
 lateral_velocity_penalty       : penalise sideways drift.
 stand_still_penalty            : penalise slow forward motion (cancels alive bonus).
 ang_vel_xy_penalty             : penalise roll/pitch rates.
 joint_torque_threshold_penalty : penalise torques above threshold.
 base_height_penalty            : penalise root height below minimum.
-foot_gait_reward               : reward active foot cycling (velocity primary + position secondary).
+foot_clearance_reward          : reward feet for being off the ground (anti-slide).
 joint_motion_reward            : reward joint velocity while penalising acceleration.
 base_orientation_penalty       : two-zone roll/pitch angle penalty (projected gravity).
 non_foot_body_ground_penalty   : penalise femur/coxa bodies approaching the ground.
@@ -51,23 +50,6 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
 # ---------------------------------------------------------------------------
 # Locomotion rewards
 # ---------------------------------------------------------------------------
-
-def forward_distance_x(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Reward world-frame X-axis linear velocity (forward distance).
-
-    This acts as a primary reward for progress in the absolute world X direction.
-    Because the agent loses this reward if its velocity vector rotates away from
-    the world X axis, it indirectly tracks and penalises unwanted yaw rotation
-    caused by imperfect/asymmetrical gaits.
-
-    Shape: (num_envs,)
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.root_lin_vel_w[:, 0]
-
 
 def forward_velocity(
     env: ManagerBasedRLEnv,
@@ -186,65 +168,47 @@ def base_height_penalty(
 
 
 # ---------------------------------------------------------------------------
-# Foot gait reward  (velocity primary + position secondary)
+# Foot clearance reward  (Option A — anti-slide)
 # ---------------------------------------------------------------------------
 
-def foot_gait_reward(
+def foot_clearance_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     target_clearance: float = 0.02,
-    target_vel: float = 0.3,
-    vel_weight: float = 0.7,
 ) -> torch.Tensor:
-    """Reward active foot gait cycling — velocity-primary, position-secondary hybrid.
+    """Reward each foot for being above the ground plane.
 
-    Closes the permanently-airborne exploit in the pure position-based
-    ``foot_clearance_reward``: a foot hanging motionless in the air has
-    near-zero Z-velocity and therefore earns almost nothing from this term.
+    This directly counters the sliding exploit: a sliding robot keeps all
+    six feet on the ground, earning zero from this term.  A robot with a
+    proper swing phase earns a positive signal for every foot that is
+    airborne.
 
-    Two normalised sub-signals, both in ``[0, 1]`` per foot:
+    Implemented via ``body_pos_w`` (world-frame body positions) so **no
+    ContactSensor is required** — avoids the USD segfault issue.
 
-    * **Velocity term** (weight ``vel_weight``):
-      ``clamp(|foot_vel_z|, 0, target_vel) / target_vel`` —
-      rewards feet actively moving vertically (both swing-up *and* touch-down).
-      Uses ``body_vel_w[:, :, 2]`` — world-frame Z linear velocity of each
-      tibia CoM.  No ContactSensor needed.
-
-    * **Position term** (weight ``1 − vel_weight``):
-      ``clamp(foot_z, 0, target_clearance) / target_clearance`` —
-      minimal residual pressure to keep feet off the ground (preserves
-      the anti-sliding gradient from Phase 5).  A permanently-airborne
-      foot still earns this (max ``1 − vel_weight = 0.3`` per foot)
-      but far less than a cycling foot (up to ``vel_weight = 0.7`` extra).
-
-    Maximum return value: ``6.0`` (all six feet at target vel and clearance).
-    Hanging foot: at most ``0.3`` per foot.  Cycling foot: up to ``1.0``.
+    The reward per foot is ``clamp(foot_z - ground_z, 0, target_clearance)``
+    normalised by ``target_clearance`` so the maximum contribution is 1.0 per
+    foot, giving a total max of 6.0 for a perfect swing.
 
     Args:
         env:              The RL environment instance.
-        asset_cfg:        SceneEntityCfg selecting the six tibia bodies.
-        target_clearance: Z-height (m) at which position reward saturates.
-                          Default ``0.02 m``.
-        target_vel:       Z-velocity (m/s) at which velocity reward saturates.
-                          Default ``0.3 m/s`` ≈ fast tibia swing at π rad/s.
-        vel_weight:       Velocity-term fraction ``[0, 1]``.
-                          Default ``0.7`` — velocity dominates, position secondary.
+        asset_cfg:        SceneEntityCfg selecting the robot *and* its foot
+                          body names (use ``body_names=[".*_foot_link"]``).
+        target_clearance: Z-height (m) at which the reward saturates per foot.
+                          Default 0.02 m (2 cm) — a gentle lift is enough.
 
     Shape: (num_envs,)
     """
     asset: Articulation = env.scene[asset_cfg.name]
+    # body_pos_w: (N, num_bodies, 3) — world-frame positions of all links.
+    # asset_cfg.body_ids is resolved by Isaac Lab from the body_names regex.
+    foot_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :]  # (N, 6, 3)
+    foot_z = foot_pos_w[:, :, 2]                                   # (N, 6)
 
-    # --- velocity term: reward active cycling (swing-up AND touch-down) ---
-    # body_vel_w: (N, num_bodies, 6); channel 2 = world-frame Z linear velocity
-    foot_vel_z = asset.data.body_vel_w[:, asset_cfg.body_ids, 2]              # (N, 6)
-    vel_norm = torch.clamp(torch.abs(foot_vel_z), 0.0, target_vel) / target_vel  # (N, 6)
-
-    # --- position term: minimal "get feet up" gradient (anti-slide) ---
-    foot_z = asset.data.body_pos_w[:, asset_cfg.body_ids, 2]                  # (N, 6)
-    pos_norm = torch.clamp(foot_z, 0.0, target_clearance) / target_clearance  # (N, 6)
-
-    combined = vel_weight * vel_norm + (1.0 - vel_weight) * pos_norm          # (N, 6)
-    return combined.sum(dim=-1)                                                # (N,)
+    # Clamp so each foot contributes in [0, target_clearance]
+    clearance = torch.clamp(foot_z, min=0.0, max=target_clearance)  # (N, 6)
+    # Normalise by target_clearance → max 1.0 per foot, 6.0 total
+    return clearance.sum(dim=-1) / target_clearance                  # (N,)
 
 
 # ---------------------------------------------------------------------------

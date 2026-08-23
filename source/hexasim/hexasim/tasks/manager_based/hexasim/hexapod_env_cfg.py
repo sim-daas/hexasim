@@ -12,7 +12,6 @@ Goal        : Walk forward as fast as possible in the robot's head-forward
 
 Reward terms
 ~~~~~~~~~~~~
-+ forward_distance_x    : primary reward for moving in world-frame +X direction
 + forward_velocity      : velocity-scaled reward for positive x-body-frame speed
 - stand_still           : penalty if v_x < 0.1 m/s (cancels alive bonus)
 - lateral_velocity      : small penalty for sideways drift (y-body-frame)
@@ -219,14 +218,7 @@ class RewardsCfg:
 
     Term weights — design rationale
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    forward_distance_x +2.5  Primary signal for global progress.
-                             Rewards world-frame X linear velocity.
-                             Since the robot spawns with random yaw, this forces
-                             it to turn and face +X, strongly penalising yaw drift.
-                             1 m/s in world +X → +2.5 per step.
-
-    forward_velocity  +2.0   Secondary signal for local body-frame progress.
-                             1 m/s forward → +2 per step.
+    forward_velocity  +2.0   Primary signal. 1 m/s forward → +2 per step.
                              Dominates over height and contact penalties
                              so the agent prioritises movement.
 
@@ -253,13 +245,12 @@ class RewardsCfg:
                              which exceeds the +2.0 forward velocity reward and
                              forces the robot to level out.
 
-    foot_gait         +0.8   Velocity-primary (70%) + position-secondary (30%)
-                             hybrid.  Rewards feet actively cycling vertically.
-                             Permanently-airborne foot earns at most 0.3/step
-                             vs 1.0/step for a properly cycling foot.
-                             Closes the hang-one-leg-up exploit.
+    foot_clearance    +0.8   Reward each of the 6 feet for being above the
+                             ground plane (max 1.0 per foot, 6.0 total).
+                             Directly counters sliding: all-feet-down = 0.
+                             Saturates at 2 cm clearance per foot.
 
-    joint_motion      +0.05  Reward total joint speed minus 10% acceleration
+    joint_motion      +0.05  Reward total joint speed minus 10 % acceleration
                              penalty.  Forces leg pumping without vibration.
                              At π rad/s per joint × 18 joints → ~2.8 / step.
 
@@ -278,16 +269,7 @@ class RewardsCfg:
     terminating       -5.0   Penalty on episode termination (not timeout).
     """
 
-    # (1) Primary locomotion incentive — progress in world +X direction
-    #     This fixes the yaw drift exploit because any rotation away from +X
-    #     directly reduces this reward.
-    forward_distance_x = RewTerm(
-        func=hex_mdp.forward_distance_x,
-        weight=2.5,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-
-    # (2) Secondary locomotion incentive — velocity-scaled forward reward (body frame)
+    # (1) Primary locomotion incentive — velocity-scaled forward reward
     forward_velocity = RewTerm(
         func=hex_mdp.forward_velocity,
         weight=2.0,
@@ -324,7 +306,7 @@ class RewardsCfg:
         weight=-60.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "minimum_height": 0.145,
+            "minimum_height": 0.13,
         },
     )
 
@@ -350,20 +332,24 @@ class RewardsCfg:
         },
     )
 
-    # (4c) Foot gait reward — velocity primary (70%) + position secondary (30%).
-    #      Closes the permanently-airborne exploit from Phase 9:
-    #      a hanging foot has ~0 Z-velocity → earns at most 0.3/step from
-    #      the position term vs 1.0/step for a properly cycling foot.
-    #      body_vel_w[:, :, 2] = world-frame Z linear velocity of each CoM.
-    #      No ContactSensor required.
-    foot_gait = RewTerm(
-        func=hex_mdp.foot_gait_reward,
+    # (4c) Foot clearance reward — Option A (anti-sliding)
+    #      Rewards each of the 6 feet for lifting off the ground.
+    #      Sliding → all feet on ground → 0 reward.
+    #      Proper swing phase → feet airborne → +up to 6.0 per step.
+    #      body_names regex selects the six *_foot_link bodies without
+    #      needing a ContactSensor (avoids the USD segfault).
+    foot_clearance = RewTerm(
+        func=hex_mdp.foot_clearance_reward,
         weight=0.8,
         params={
+            # NOTE: The URDF *_foot_link bodies are massless/geometry-less and
+            # are silently dropped by the Isaac Sim USD importer.  The tibia
+            # links are the true foot-tip equivalents available at runtime.
+            # Their mangled USD names follow the pattern:
+            #   tn__pxmark4{side}_{pos}_tibia_link_{hash}
+            # The regex ".*tibia.*" matches all six reliably.
             "asset_cfg": SceneEntityCfg("robot", body_names=[".*tibia.*"]),
-            "target_clearance": 0.02,   # 2 cm — position saturation height
-            "target_vel": 0.3,          # 0.3 m/s — velocity saturation (tibia swing)
-            "vel_weight": 0.05,          # 70% velocity, 30% position
+            "target_clearance": 0.02,  # 2 cm lift saturates the reward
         },
     )
 
@@ -447,7 +433,7 @@ class HexapodEnvCfg(ManagerBasedRLEnvCfg):
 
     # Scene
     scene: HexapodSceneCfg = HexapodSceneCfg(
-        num_envs=4096,
+        num_envs=3072,
         env_spacing=10.0,   # 10 m between robots — room for 10 s episodes
     )
 

@@ -240,8 +240,16 @@ A permanently airborne leg now has near-zero Z-velocity, capping its reward at `
 The `forward_velocity` reward measured velocity in the *body frame's X-axis*. If the robot started walking in a circle, its body-frame forward velocity was still high, so it had no incentive to straighten out (there was no direct penalty for yawing). 
 
 **The Fix:**
-Added `forward_distance_x` as the new **primary positive reward** (weight `+2.5`). 
-- This measures linear velocity in the **absolute world-frame X-axis**.
-- Because the robot's initial yaw is fully randomized `[-pi, pi]` every episode, the robot must immediately turn to face the world +X direction and maintain that heading.
-- Any yaw drift away from +X causes its world-frame X velocity to drop, naturally and strongly penalizing asymmetric gaits that cause rotation.
+Added `forward_distance_x` as the new **primary positive reward** (weight `+2.5`) and `distance_y` as its **negative counterpart** (weight `-2.5`).
+- `forward_distance_x` measures linear velocity in the **absolute world-frame X-axis**.
+- `distance_y` measures linear velocity in the **absolute world-frame Y-axis**.
+- Because the robot's initial yaw is fully randomized `[-pi, pi]` every episode, it must immediately turn to face the world +X direction and maintain that heading.
+- If the robot's gait is asymmetric causing it to rotate or drift diagonally, the `distance_y` penalty will cancel out the `forward_distance_x` reward, strongly penalizing slanted movement and forcing a straight path.
 - Retained the body-frame `forward_velocity` (weight `+2.0`) as a secondary local reward to encourage forward effort even while turning.
+
+### Outcome: Failure of Velocity-Based Constraints
+The strategy implemented in Phase 9—specifically the heavy reliance on global world-frame velocity constraints to fix gait issues—was a **failure**.
+- **Non-convergence**: The policy often failed to converge entirely. The heavy punishment from the `distance_y` penalty and strict global directional requirements created harsh loss landscapes where the agent simply got stuck.
+- **Pathological Gaits**: When the policy did manage to converge, the resulting behavior was worse than before. The robot adopted a severely broken gait using only 2 or 3 legs, perpetually rotating in a small circle rather than achieving the intended stable, straight-line walking.
+
+Adding strict global velocity rewards conflicted with the natural exploration of complex legged locomotion, trapping the agent rather than guiding it.
