@@ -331,3 +331,15 @@ With working contact sensors, the RL pipeline can leverage four primary mechanis
 
 4. **Policy Observation Input**:
    Expose binary contact booleans or normalized contact forces ($6\text{D}$ tensor) into the policy observation space (`ObsGroup`) for reactive terrain response.
+
+### 5. Implementation Progress: CPG Curriculum Integration
+
+**Current Status:**
+- Implemented `cpg_reward` in `mdp/rewards.py` utilizing the time-based `cpg_clock` mechanism. It penalizes ground contact during the planned swing phase and rewards contact during the planned stance phase (with an alternating tripod setup offset by `0` and `pi`).
+- Successfully exported `cpg_reward` in `mdp/__init__.py` after a test run failed with `AttributeError: module 'hexasim.tasks.manager_based.hexasim.mdp' has no attribute 'cpg_reward'`.
+- Verified the RL training script `train.py` correctly parses the custom CPG term.
+- Set up a transition curriculum (`CurriculaCfg`) in `hexapod_env_cfg.py` to fade out scaffolding rewards and introduce the CPG rewards after the initial gait is learned (at step 72,000 or ~3,000 iterations):
+  - `foot_clearance`: drops to `0.0`
+  - `joint_motion`: drops to `0.0`
+  - `cpg`: activates with weight `+2.0`
+- `base_height` curriculum testing was successful and its weight has been reverted to the static `-60.0` to maintain posture constraints throughout training.

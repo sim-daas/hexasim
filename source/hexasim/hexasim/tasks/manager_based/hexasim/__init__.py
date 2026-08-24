@@ -28,7 +28,7 @@ gym.register(
 
 gym.register(
     id="Hexapod-Flat-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.hexapod_env:HexapodEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hexapod_env_cfg:HexapodEnvCfg",
@@ -38,7 +38,7 @@ gym.register(
 
 gym.register(
     id="Hexapod-Flat-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.hexapod_env:HexapodEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hexapod_env_cfg:HexapodEnvCfg_PLAY",

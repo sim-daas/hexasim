@@ -42,6 +42,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
@@ -146,7 +147,7 @@ class ObservationsCfg:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """63-dimensional observation vector.
+        """75-dimensional observation vector.
 
         [3]  base linear velocity  (body frame)
         [3]  base angular velocity (body frame)
@@ -154,7 +155,8 @@ class ObservationsCfg:
         [18] joint positions (relative to default)
         [18] joint velocities
         [18] previous actions
-        Total: 63
+        [12] cpg phase clock (sin/cos for 6 legs)
+        Total: 75
         """
 
         base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
@@ -163,6 +165,7 @@ class ObservationsCfg:
         joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel)
         actions = ObsTerm(func=mdp.last_action)
+        cpg_clock = ObsTerm(func=hex_mdp.cpg_clock)
 
         def __post_init__(self) -> None:
             self.enable_corruption = True
@@ -311,7 +314,6 @@ class RewardsCfg:
     # (4) Height penalty — only penalise if height drops below 0.13 m.
     #     Raised from 0.095 m: forces legs to extend fully at all times,
     #     directly counteracting bent-knee local optima where the robot
-    #     balances on a folded femur instead of the tibia tip.
     base_height = RewTerm(
         func=hex_mdp.base_height_penalty,
         weight=-60.0,
@@ -409,9 +411,19 @@ class RewardsCfg:
 
     # (8) Alive bonus
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
-
-    # (9) Termination penalty
     terminating = RewTerm(func=mdp.is_terminated, weight=-5.0)
+    
+    # CPG Tracking
+    cpg_z_target = RewTerm(
+        func=hex_mdp.cpg_z_target_reward,
+        weight=0.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*tibia.*"])},
+    )
+    cpg_force_target = RewTerm(
+        func=hex_mdp.cpg_force_target_penalty,
+        weight=0.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*tibia.*"])},
+    )
 
 
 ##
@@ -433,6 +445,55 @@ class TerminationsCfg:
     )
 
 
+
+@configclass
+class CurriculaCfg:
+    """Curriculum terms for the MDP."""
+
+    foot_clearance = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "foot_clearance", 
+            "initial_weight": 0.8,
+            "target_weight": 0.0, 
+            "start_step": 8000,
+            "end_step": 11000,
+        },
+    )
+
+    joint_motion = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "joint_motion", 
+            "initial_weight": 0.05,
+            "target_weight": 0.0, 
+            "start_step": 8000,
+            "end_step": 11000,
+        },
+    )
+
+    cpg_z = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "cpg_z_target", 
+            "initial_weight": 0.0,
+            "target_weight": 2.0, 
+            "start_step": 8000,
+            "end_step": 11000,
+        },
+    )
+    
+    cpg_force = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "cpg_force_target", 
+            "initial_weight": 0.0,
+            "target_weight": -0.5, 
+            "start_step": 8000,
+            "end_step": 11000,
+        },
+    )
+
 ##
 # Environment configuration
 ##
@@ -444,7 +505,7 @@ class HexapodEnvCfg(ManagerBasedRLEnvCfg):
 
     # Scene
     scene: HexapodSceneCfg = HexapodSceneCfg(
-        num_envs=3072,
+        num_envs=4096,
         env_spacing=10.0,   # 10 m between robots — room for 10 s episodes
     )
 
@@ -454,6 +515,7 @@ class HexapodEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
+    curriculum: CurriculaCfg = CurriculaCfg()
 
     def __post_init__(self) -> None:
         """Post initialisation."""

@@ -373,3 +373,109 @@ def non_foot_body_ground_penalty(
     body_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :]  # (N, B, 3)
     body_z = body_pos_w[:, :, 2]                                   # (N, B)
     return torch.clamp(minimum_height - body_z, min=0.0).sum(dim=-1)  # (N,)
+
+def cpg_clock(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Observation of the 12-dimensional CPG phase clock (sin and cos for all 6 legs)."""
+    if not hasattr(env, "cpg_phase"):
+        return torch.zeros((env.num_envs, 12), device=env.device, dtype=torch.float32)
+    phases = env.cpg_phase
+    sin_phases = torch.sin(phases)
+    cos_phases = torch.cos(phases)
+    clock = torch.stack((sin_phases, cos_phases), dim=-1).view(env.num_envs, 12)
+    return clock
+
+def cpg_z_target_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    duty_factor: float = 5/6,
+    step_height: float = 0.05,
+    sigma: float = 0.02,
+) -> torch.Tensor:
+    """Reward foot tracking a target Z-height trajectory derived from the CPG phase."""
+    if not hasattr(env, "cpg_phase"):
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    robot: Articulation = env.scene[asset_cfg.name]
+    phases = env.cpg_phase
+    
+    swing_end = (1.0 - duty_factor) * 2.0 * math.pi
+    is_swing = phases < swing_end
+    swing_normalized_phase = (phases / swing_end) * math.pi
+    
+    target_z = torch.zeros_like(phases)
+    target_z[is_swing] = step_height * torch.sin(swing_normalized_phase[is_swing])
+    
+    foot_pos = robot.data.body_pos_w[:, asset_cfg.body_ids, :]
+    foot_z = foot_pos[:, :, 2]
+    
+    target_z_abs = target_z + 0.02
+    error = foot_z - target_z_abs
+    reward = torch.exp(-torch.square(error) / (sigma ** 2))
+    
+    return torch.mean(reward, dim=1)
+
+def cpg_force_target_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    duty_factor: float = 5/6,
+    max_force: float = 2.35, # N
+) -> torch.Tensor:
+    """Penalise deviation from a target ground reaction force ramp derived from the CPG phase."""
+    if not hasattr(env, "cpg_phase"):
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    from isaaclab.sensors import ContactSensor
+    contact_sensor: ContactSensor = env.scene[sensor_cfg.name]
+    
+    # Force data: ContactSensor only tracks the 6 tibia links, ordered exactly like cpg_phase.
+    # net_forces_w shape is (num_envs, num_bodies, 3)
+    force_z = contact_sensor.data.net_forces_w[:, :, 2] # (num_envs, 6)
+    
+    phases = env.cpg_phase
+    swing_end = (1.0 - duty_factor) * 2.0 * math.pi
+    
+    is_stance = phases >= swing_end
+    
+    # Target force: 0 during swing, smoothly ramps up and down like a half sine during stance
+    # Map [swing_end, 2pi] to [0, pi]
+    stance_duration = 2.0 * math.pi - swing_end
+    stance_normalized_phase = ((phases - swing_end) / stance_duration) * math.pi
+    
+    target_force = torch.zeros_like(phases)
+    target_force[is_stance] = max_force * torch.sin(stance_normalized_phase[is_stance])
+    
+    # MSE error
+    error = force_z - target_force
+    penalty = torch.square(error)
+    
+    return torch.mean(penalty, dim=1)
+
+from isaaclab.managers import ManagerTermBase, ManagerBase
+class LinearAnnealRewardWeight(ManagerTermBase):
+    """Manager term to linearly interpolate a reward weight over a specified step window."""
+    
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        term_name = cfg.params["term_name"]
+        self._term_cfg = env.reward_manager.get_term_cfg(term_name)
+        
+    def __call__(
+        self, 
+        env: ManagerBasedRLEnv, 
+        env_ids: torch.Tensor | None,
+        term_name: str,
+        initial_weight: float,
+        target_weight: float,
+        start_step: int,
+        end_step: int,
+    ) -> dict:
+        current_step = env.common_step_counter
+        
+        if current_step <= start_step:
+            new_weight = initial_weight
+        elif current_step >= end_step:
+            new_weight = target_weight
+        else:
+            progress = (current_step - start_step) / float(end_step - start_step)
+            new_weight = initial_weight + progress * (target_weight - initial_weight)
+            
+        self._term_cfg.weight = new_weight
+        return {term_name: new_weight}
