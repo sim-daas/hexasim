@@ -456,8 +456,8 @@ class CurriculaCfg:
             "term_name": "foot_clearance", 
             "initial_weight": 0.8,
             "target_weight": 0.0, 
-            "start_step": 8000,
-            "end_step": 11000,
+            "start_step": 1000,
+            "end_step": 1600,
         },
     )
 
@@ -467,8 +467,8 @@ class CurriculaCfg:
             "term_name": "joint_motion", 
             "initial_weight": 0.05,
             "target_weight": 0.0, 
-            "start_step": 8000,
-            "end_step": 11000,
+            "start_step": 1000,
+            "end_step": 1600,
         },
     )
 
@@ -477,9 +477,9 @@ class CurriculaCfg:
         params={
             "term_name": "cpg_z_target", 
             "initial_weight": 0.0,
-            "target_weight": 2.0, 
-            "start_step": 8000,
-            "end_step": 11000,
+            "target_weight": 4.0, 
+            "start_step": 1000,
+            "end_step": 40000,
         },
     )
     
@@ -488,9 +488,9 @@ class CurriculaCfg:
         params={
             "term_name": "cpg_force_target", 
             "initial_weight": 0.0,
-            "target_weight": -0.5, 
-            "start_step": 8000,
-            "end_step": 11000,
+            "target_weight": -1.0, 
+            "start_step": 1000,
+            "end_step": 40000,
         },
     )
 

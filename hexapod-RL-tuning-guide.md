@@ -343,3 +343,9 @@ With working contact sensors, the RL pipeline can leverage four primary mechanis
   - `joint_motion`: drops to `0.0`
   - `cpg`: activates with weight `+2.0`
 - `base_height` curriculum testing was successful and its weight has been reverted to the static `-60.0` to maintain posture constraints throughout training.
+
+
+
+The curriculum should remove the previous basic rewards of joint_motion and foot_clearance as soon as the CPG rewards are introduced.
+
+The CPG reward weightage should be increased over 150 iterations, to prevent catastrophic forgetting.
