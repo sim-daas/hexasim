@@ -353,7 +353,7 @@ class RewardsCfg:
     #      needing a ContactSensor (avoids the USD segfault).
     foot_clearance = RewTerm(
         func=hex_mdp.foot_clearance_reward,
-        weight=0.8,
+        weight=0.4,
         params={
             # NOTE: The URDF *_foot_link bodies are massless/geometry-less and
             # are silently dropped by the Isaac Sim USD importer.  The tibia
@@ -372,7 +372,7 @@ class RewardsCfg:
     #      Net positive only when joints move smoothly and consistently.
     joint_motion = RewTerm(
         func=hex_mdp.joint_motion_reward,
-        weight=0.05,
+        weight=0.035,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "accel_penalty_scale": 0.1,
@@ -414,15 +414,41 @@ class RewardsCfg:
     terminating = RewTerm(func=mdp.is_terminated, weight=-5.0)
     
     # CPG Tracking
-    cpg_z_target = RewTerm(
-        func=hex_mdp.cpg_z_target_reward,
+    cpg_femur_target = RewTerm(
+        func=hex_mdp.cpg_femur_target_penalty,
         weight=0.0,
-        params={"asset_cfg": SceneEntityCfg("robot", body_names=[".*tibia.*"])},
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_femur"]),
+            "duty_factor": 0.5,
+            "amplitude": 0.4,
+        },
+    )
+    cpg_stance_rigidity = RewTerm(
+        func=hex_mdp.cpg_stance_rigidity_penalty,
+        weight=0.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_femur", ".*_tibia"]),
+            "duty_factor": 0.5,
+        },
     )
     cpg_force_target = RewTerm(
         func=hex_mdp.cpg_force_target_penalty,
         weight=0.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*tibia.*"])},
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*tibia.*"]),
+            "duty_factor": 0.5,
+            # 11.8 N robot / 3 tripod support legs ≈ 3.93 N per foot
+            "max_force": 4.0,
+        },
+    )
+    cpg_coxa_contact = RewTerm(
+        func=hex_mdp.cpg_coxa_contact_reward,
+        weight=0.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_coxa"]),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*tibia.*"]),
+            "duty_factor": 0.5,
+        },
     )
 
 
@@ -456,8 +482,8 @@ class CurriculaCfg:
             "term_name": "foot_clearance", 
             "initial_weight": 0.8,
             "target_weight": 0.0, 
-            "start_step": 1000,
-            "end_step": 1600,
+            "start_step": 3000,
+            "end_step": 3500,
         },
     )
 
@@ -467,30 +493,63 @@ class CurriculaCfg:
             "term_name": "joint_motion", 
             "initial_weight": 0.05,
             "target_weight": 0.0, 
-            "start_step": 1000,
-            "end_step": 1600,
+            "start_step": 3000,
+            "end_step": 3500,
         },
     )
 
-    cpg_z = CurrTerm(
+    cpg_femur = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "cpg_z_target", 
+            "term_name": "cpg_femur_target", 
             "initial_weight": 0.0,
-            "target_weight": 4.0, 
-            "start_step": 1000,
-            "end_step": 40000,
+            "target_weight": -2.0, 
+            "start_step": 3000,
+            "end_step": 8000,
         },
     )
-    
+    cpg_rigidity = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "cpg_stance_rigidity", 
+            "initial_weight": 0.0,
+            "target_weight": -0.5, 
+            "start_step": 3000,
+            "end_step": 8000,
+        },
+    )
     cpg_force = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
             "term_name": "cpg_force_target", 
             "initial_weight": 0.0,
-            "target_weight": -1.0, 
-            "start_step": 1000,
-            "end_step": 40000,
+            "target_weight": -0.5, 
+            "start_step": 3000,
+            "end_step": 8000,
+        },
+    )
+
+    cpg_coxa = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "cpg_coxa_contact", 
+            "initial_weight": 0.0,
+            "target_weight": 1.0, 
+            "start_step": 3000,
+            "end_step": 8000,
+        },
+    )
+    # Ease off the primary velocity incentive once CPG phase-tracking takes
+    # over (step 3000): 2.0 -> 1.0 so gait-shaping objectives dominate the
+    # late-training reward economy without removing the drive to move.
+    forward_velocity = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "forward_velocity",
+            "initial_weight": 2.0,
+            "target_weight": 1.7,
+            "start_step": 3000,
+            "end_step": 45000,
         },
     )
 

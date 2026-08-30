@@ -349,3 +349,197 @@ With working contact sensors, the RL pipeline can leverage four primary mechanis
 The curriculum should remove the previous basic rewards of joint_motion and foot_clearance as soon as the CPG rewards are introduced.
 
 The CPG reward weightage should be increased over 150 iterations, to prevent catastrophic forgetting.
+
+### 6. Phase 10b: Empirical Ground-Offset Calibration of `cpg_z_target_reward`
+
+The `cpg_z_target_reward` term assumed the tibia rigid-body origin sat $0.02\text{ m}$ above the ground at toe contact (`target_z_abs = target_z + 0.02`). This was unverified.
+
+**Measurement method (slow quasi-static descent):**
+- Robot spawned at $0.30\text{ m}$; root lowered in $2.5\text{ mm}$ increments with velocities zeroed each step.
+- Tibia body-origin Z recorded alongside `ContactSensor` Z-forces; the first force spike ($>1\text{ N}$) marks exact toe/ground contact.
+
+**Result — first-contact offset per leg:**
+
+| Leg | Offset |
+|---|---|
+| right_front | 0.08923 m |
+| right_middle | 0.08922 m |
+| right_back | 0.08921 m |
+| left_front | 0.08922 m |
+| left_middle | 0.08922 m |
+| left_back | 0.08921 m |
+
+Mean = **$0.0892\text{ m}$**, inter-leg spread $< 0.1\text{ mm}$. All six toes touch simultaneously — confirming a level stance geometry.
+
+**Fix:** `target_z_abs = target_z + 0.02` → `target_z_abs = target_z + 0.0892` in `mdp/rewards.py`. The old value made every planted foot carry a constant $(0.0892 - 0.02)^2/\sigma^2$ error, so the Gaussian reward was near-zero exactly when it should have been maximal.
+
+Caveat: this offset is exact for the default rest pose ($\text{femur}=30°$, $\text{tibia}=-30°$); it shifts slightly with joint angles during active gait, but remains the correct stance-phase baseline since the CPG swing trajectory is defined relative to ground contact.
+
+### 7. The Force Penalty Bug: The "Floor is Lava" Exploit
+
+`cpg_force_target_penalty` originally used **Mean Squared Error (MSE)** on physics contact forces:
+
+```python
+penalty = torch.square(error)   # REMOVED
+```
+
+Squaring contact forces in a rigid-body simulator is catastrophic. Isaac Lab routinely produces transient micro-collision spikes of $20\text{ N} - 40\text{ N}$ from slight over-extensions or foot slams.
+
+**Economic asymmetry that broke the policy:**
+
+| Behaviour | Force error | MSE penalty | × weight -0.5 |
+|---|---|---|---|
+| Leg slams at 22.35 N | 20 N | $20^2 = 400$ | **-200 / step** |
+| Leg hovers in air | 2.35 N | $5.5$ | **-2.75 / step** |
+
+A single physics spike cost ~73× more than permanently suspending the leg. The agent rationally concluded that keeping legs safely airborne (or grazing the ground at $<2\text{ N}$) was infinitely cheaper than risking a 400-point nuke on impact — recreating the "permanently airborne leg" exploit from Phase 9 through an entirely new mechanism.
+
+**Fix:** switched to **Mean Absolute Error ($L_1$)**:
+
+```python
+penalty = torch.abs(error)
+```
+
+$L_1$ yields a constant-magnitude linear gradient that guides the leg down toward its target force ramp without exploding on transient impact spikes.
+
+**General principle:** never square raw simulator signals with unbounded transients (contact forces, torques, impulses). Squaring is only safe for bounded, smooth quantities (e.g., joint position errors). Reserve $L_2$ shaping for states, $L_1$ for physics measurements.
+
+### 8. Phase 10c: The Gaussian Dragging Exploit in `cpg_z_target_reward`
+
+**Diagnosis from TensorBoard:** the `cpg_z_target` reward curve was a *mathematically perfect straight line* rising in lockstep with its curriculum weight ramp. Neural-network convergence is never perfectly linear — a straight reward curve that tracks the scheduler means the policy is earning a **static score** and the curriculum multiplier is doing all the movement. The pink line was not "learning to lift legs"; it was the anneal multiplying a guaranteed baseline.
+
+**The loophole:** the Gaussian $\exp(-\text{err}^2/\sigma^2)$ was evaluated across the **entire CPG cycle**. With $\beta = 5/6$, stance occupies $83.3\%$ of every cycle, during which the target is $z_{\text{target}} = 0 + 0.0892$. A planted (or dragging) foot sits at exactly $0.0892\text{ m}$:
+
+| Behaviour | Phase | Error | Gaussian | Share of cycle |
+|---|---|---|---|---|
+| Foot on ground, doing nothing | stance | $0$ | **1.0** | $83.3\%$ |
+| Foot on ground while others swing | swing | $-0.05$ | $\approx 0.002$ | $16.7\%$ |
+
+A do-nothing dragging policy guarantees a mean score of $\approx 0.83$ of maximum — an A-grade for sitting on the floor. Swinging legs risked instability to chase the remaining $17\%$. The rational policy dragged.
+
+**Fix (`mdp/rewards.py`, `cpg_z_target_reward`):**
+1. **Stance contributions zeroed**: per-leg Gaussian is multiplied by the swing mask — stance-phase reward is exactly $0$ regardless of foot position. Ground contact during stance is the force penalty's job; kinematic tracking applies only to swing.
+2. **Swing-count renormalisation**: the sum is divided by the *current* number of legs in swing (clamped to ≥ 1), keeping the reward scale in $[0, 1]$ as the gait moves between double-support and single-tripod phases instead of collapsing with swing count.
+
+The only way to earn from this term is now physically lifting a leg along the sine wave during its own swing window. The dragging exploit is mathematically eliminated.
+
+### 9. Curriculum Handover at Step 4500
+
+All transition schedules were unified around the CPG takeover at **step 4500**:
+
+| Term | From → To | Window |
+|---|---|---|
+| `foot_clearance` | $+0.8 \to 0.0$ | 4500 → 5000 |
+| `joint_motion` | $+0.05 \to 0.0$ | 4500 → 5000 |
+| `cpg_z_target` | $0.0 \to +2.0$ | 4500 → 40000 |
+| `cpg_force_target` | $0.0 \to -0.5$ | 4500 → 40000 |
+| **`forward_velocity`** *(new)* | $+2.0 \to +1.0$ | 4500 → 6000 |
+
+**Rationale for the new `forward_velocity` anneal:** once CPG phase-tracking dominates, the raw velocity incentive must yield so gait-quality gradients are not drowned out — but it is halved rather than removed, preserving the drive to translate forward. The slow 1500-step fade avoids a step change in the reward landscape that would shock the critic mid-training.
+
+### 10. Phase 11: Gait-Math Alignment — Duty Factor Contradiction & Adaptive Baseline
+
+**Diagnosis:** the CPG reward stack contained a *fatal internal contradiction*. `cpg_z_target_reward` and `cpg_force_target_penalty` used `duty_factor = 5/6` (a wave-gait duty factor) while `HexapodEnv._cpg_base_offsets` used alternating-tripod offsets `[0, π]`. The consequence is exact: Tripod A swings $[0°, 60°)$, Tripod B swings $[180°, 240°)$ — so for the remaining **66.6% of every cycle all six legs are commanded to be planted simultaneously** (6-leg double-support), while `forward_velocity` (+2.0) demands continuous fluid motion. Lifting three legs at once for only a short window while pushing forward causes instability; the policy resolves the contradiction by abandoning the Z-target entirely, eating the force penalty, and dragging its feet to farm forward velocity.
+
+**Fixes applied (all three must ship together — they are one gait):**
+
+1. **`duty_factor` 5/6 → 0.5** in both CPG rewards (and made explicit in `RewardsCfg.params`). With offsets `[0, π]`, swing windows become Tripod A $[0°, 180°)$ and Tripod B $[180°, 360°)$: exactly 3 legs swing at every instant, no double-support dead zone. Bonus: each swing now lasts 500 ms (25 control steps at 50 Hz) instead of ~8, making the sine-tracking task far more learnable at the existing 1.0 Hz clock.
+2. **`max_force` 2.35 N → 4.0 N.** Measured robot weight is 11.8 N; with only 3 tripod legs supporting, each stance foot carries ≈ 3.93 N. The old 2.35 N target punished *correct* mid-stance loading as an error.
+3. **Fixed foot baseline → adaptive contact baseline.** `target_z_abs = target_z + 0.0892` assumed the tibia origin rests exactly 0.0892 m above ground — true only for the default rest pose. Any torso sag (or non-zero-terrain use) lowers the physical foot below that constant, making targets unreachable no matter how hard the policy tries. Replacement: `HexapodEnv.cpg_foot_baseline`, a per-leg $(num\_envs \times 6)$ EMA ($\alpha = 0.2$) of tibia world-Z updated **only when that foot registers > 1 N contact**, refreshed after physics each step and reset to 0.0892 on episode reset. Swing targets are then `baseline + target_z` per leg — self-calibrating to whatever height the torso currently holds the standing feet at. Reward functions fall back to the static 0.0892 offset if the attribute is absent (non-HexapodEnv harnesses).
+
+### 11. Phase 12: Adaptive CPG Frequency & Coxa Velocity Reward
+
+**Diagnosis:** Despite the tripod gait math fixes, the hexapod policy remained stuck in a local optimum (4 legs moving minimally, 2 legs airborne). Lingering CPG issues and lack of explicit forward stride incentives were identified as the cause. Additionally, the fixed CPG clock (1.0 Hz) was fighting the agent's natural learned velocity, holding it back.
+
+**Fixes applied (Two-Phase Testing):**
+
+1. **Pure CPG Baseline (Phase 1):** We completely removed the `cpg_z` and `cpg_force` curriculum terms. This activates the `cpg_z_target` (weight 2.0) and `cpg_force_target` (weight -0.5) rewards from step 0, forcing the policy to experience pure CPG shaping immediately rather than getting trapped in an early dragging optimum before step 4500.
+
+2. **Adaptive CPG Phase Increment (Phase 2):** The hardcoded `f = 1.0` clock in `HexapodEnv._step_impl` was replaced with a dynamic frequency based on the physical forward velocity: `f = v_x / 0.2`, clamped to `[0.2, 2.5]`. This scales the clock with the robot's stride (assumed nominal 0.2m), preventing the clock from fighting the agent's velocity.
+
+3. **Coxa Velocity Reward (Phase 2):** To provide a direct incentive for sweeping legs forward during swing, we added `cpg_coxa_velocity_reward` targeting the `.*_coxa` joints. It rewards absolute angular velocity during the swing phase (positive multiplier) and penalizes it during the stance phase (negative multiplier). Weight: 1.0.
+
+### 12. Phase 13: Curriculum Reinstatement (Delayed CPG Introduction)
+
+**Diagnosis:** The Phase 12 pure CPG baseline (introducing CPG constraints from step 0) failed to produce significant improvement over the old dragging behavior. The policy cannot handle the complex rhythmic constraints before it has learned basic stability (i.e., until the mean episode length reaches the maximum 500 steps/10 seconds).
+
+**Fixes applied:**
+We reinstated the two-stage curriculum approach, but shifted the transition from step 4500 to step 3000 (since 3000 is enough time to learn to stand and move forward without falling).
+
+1. **Base Rewards (0 → 3000):** `foot_clearance` (0.8) and `joint_motion` (0.05) remain active early to enforce basic smooth stepping, then anneal to 0.0 by step 3500.
+2. **CPG Introduction (3000 → 8000):** `cpg_z_target` (0.0 → 2.0), `cpg_force_target` (0.0 → -0.5), and `cpg_coxa_velocity` (0.0 → 1.0) all linearly scale up together starting at step 3000, "taking over" the gait once the policy is already capable of surviving the full 500-step episode.
+3. **Velocity Fade (3000 → 4500):** `forward_velocity` incentive fades from 2.0 to 1.0 simultaneously to allow the CPG gradients to dominate.
+
+## 13. Phase 14: Analysis of Local Optima and Proposed CPG Refinements
+
+### Observed Behavior
+Despite the reinstatement of the CPG curriculum, the policy remains stuck in a local optimum. The robot continues to rely on 5 legs, with the back-left leg mostly hanging in the air and moving ~1-2cm from the ground with no contribution. The expected textbook tripod gait (lifting legs significantly during swing and pushing during stance) is absent.
+
+**Key Insights from Current Weights:**
+1. **Coxa Velocity Optimization:** The `cpg_coxa_velocity_reward` is functioning correctly (mean ~8). The policy optimizes leg sweeping, demonstrating that phase-based joint targets *are* learnable.
+2. **CPG Z and Force Ineffectiveness:** The `cpg_z_target` (mean ~2) and `cpg_force_target` (mean ~-2.5) have marginal impacts. The policy avoids lifting the leg entirely, thereby bypassing the CPG Z target sine wave and avoiding the large force penalties that would result from placing a lifted foot back down incorrectly.
+
+### Diagnosis
+The core issue is that Cartesian Z-height targets (`cpg_z_target`) and global velocity constraints are easily exploited by a policy that learns to keep legs mostly planted or permanently airborne. The policy finds a "safe" lazy gait that satisfies forward velocity and coxa sweeping without the risk of lifting and replacing the feet.
+
+### Proposed Reward Refinements (To Be Implemented)
+To explicitly force the robot out of this local optimum, we must enforce the mechanical reality of walking at the joint level, rather than just the Cartesian level. 
+
+1. **Joint-Space Swing Trajectory (Femur Target):**
+   *   **Concept:** Instead of rewarding Cartesian Z-height (which is exploited by keeping a leg permanently airborne), we will reward the *femur joint* for following a targeted trajectory. 
+   *   **Mechanism:** Penalize the deviation of the femur joint position from a nominal swing sine-wave trajectory during the swing phase. This directly forces the physical hardware to lift the leg and lower it back down.
+
+2. **Contact-Conditioned Propulsion (Coxa):**
+   *   **Concept:** Currently, `forward_velocity` rewards global movement, and `cpg_coxa_velocity` rewards leg sweeps. A lazy policy can sweep its coxa in the air while dragging itself forward. 
+   *   **Mechanism:** We will modify the reward to encourage the coxa to move backward (propulsion) *only* when the corresponding foot is in physical contact with the ground during the stance phase. This links propulsion effort directly to physical grip.
+
+3. **Stance Rigidity Penalty:**
+   *   **Concept:** Legs should act as rigid struts during the stance phase. 
+   *   **Mechanism:** Add a penalty for any velocity in the femur and tibia joints during the stance phase. This prevents the robot from buckling, vibrating, or slowly sliding its legs when they are supposed to be firmly planted and carrying the robot's weight.
+
+### 14. Phase 15: The Frozen CPG Clock Bug
+
+**Discovery:**
+While running a detailed offline debug script (`play_debug.py`) to analyze the CPG trajectory, a catastrophic bug was discovered: the CPG phase clock was **completely frozen** at `0.0` and `3.1415927` for the entire duration of the episode.
+
+**Root Cause:**
+In Phase 12, the dynamic CPG update logic (scaling the clock frequency with forward velocity) was implemented by overriding a method named `def _step_impl(self, action):` in `hexapod_env.py`. However, unlike standard OpenAI Gym setups, Isaac Lab's `ManagerBasedRLEnv` class does **not** have a `_step_impl` method; it uses `def step(self, action):`. Because of the incorrect method name, the Isaac Lab environment completely ignored our custom override during the entire training run, and the phase clock was never updated after initialization.
+
+**Impact on the Policy:**
+Because the clock never ticked, the legs were statically assigned a permanent phase from step 0:
+*   **Tripod A (Phase 0.0)** was permanently frozen in the **swing phase**. The policy was continuously commanded to hold these 3 legs in the air forever. 
+*   **Tripod B (Phase 3.14)** was permanently frozen in the **stance phase**. The policy was continuously commanded to plant these 3 legs and push forever.
+
+This completely explains the asymmetric, dragging policy observed in Phases 13 and 14:
+*   The robot learned to permanently lean all its weight onto Tripod B (explaining the massive 5-9 N forces on those specific legs).
+*   It let Tripod A drag or hover (explaining the 0.01 N force on Leg 5). 
+*   It never learned a gait because the target sine wave never actually moved. The agent was being penalized by perfectly valid reward math applied to a completely broken, static clock.
+
+**Fix:**
+Renamed `def _step_impl` to `def step` inside `hexapod_env.py` and updated the `super()` call accordingly. The CPG clock will now tick correctly in the next training run.
+
+**The Tensor Crash Anomaly:**
+When `step` finally ran, code crashed on `net_forces_w_history[:, :, 0, :]` slice. Why? Bug was always there. `_step_impl` was dead code, so crash hid. Renamed to `step` -> code ran -> immediate shape mismatch crash.
+Fixed by using current force: `net_forces_w`.
+
+### 15. Phase 16: The "2 Airborne, 4 Dragging" Exploit (Reward Economy)
+
+**Observed Behavior:**
+After fixing the clock, the policy plateaued quickly (~1000 iterations) with a mean reward of ~8. The robot kept 4 legs planted and dragged them, while holding 2 legs permanently airborne. The CPG Z target reward and force penalties were completely ignored.
+
+**The Reward Economy (Why it happens):**
+With the clock moving, the agent must either learn to perfectly follow a 5cm sine wave, or find the cheapest way to ignore it. 
+1. **Airborne Leg:** Incurs a stance force penalty (misses the 4N push target), but easily stays near the Z target sine wave during swing. Net cost: ~ `-0.38` per step.
+2. **Dragging Leg:** Incurs a swing force penalty (applies force when it shouldn't) and misses the Z target completely. Net cost: ~ `-1.28` per step.
+
+**The Local Optimum:**
+Being airborne (-0.38) is mathematically cheaper than dragging (-1.28). The agent wants *all* legs airborne to minimize penalties! However, lifting too many legs causes the robot to fall, triggering the massive `-60` `base_height` penalty. 
+The agent calculates the cheapest survival strategy: plant exactly 4 legs to prevent falling (absorbing the heavy dragging penalty), and hold the remaining 2 legs airborne to farm the cheaper -0.38 rate. 
+
+The `cpg_z_target` reward had a `sigma=0.02`. If a dragging leg tried to lift 1cm, its error went from 5cm to 4cm. The Gaussian reward went from ~0.001 to ~0.018. The gradient was virtually zero, teaching the policy that lifting was impossible before it could reach the peak.
+
+**Fixes Implemented (Phase 14 applied):**
+Replaced the broken Gaussian Z-reward with direct joint-level L1 penalties to provide a constant gradient that crushes this exploit:
+1. **`cpg_femur_target_penalty`:** Replaced `cpg_z_target`. Applies an L1 penalty on the femur joint deviating from a sine wave during swing. L1 provides a constant gradient; if the leg is wrong, it always feels a push in the exact right direction. Target weight: `-2.0`.
+2. **`cpg_coxa_contact_reward`:** Replaced `cpg_coxa_velocity`. Rewards backward coxa velocity *only* if the foot's contact force > 1N during stance. Ensures sweeping actually propels the robot. Target weight: `1.0`.
+3. **`cpg_stance_rigidity_penalty`:** Penalizes femur and tibia velocity during stance, preventing buckling or sliding. Target weight: `-0.5`.

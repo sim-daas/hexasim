@@ -1,3 +1,8 @@
+from .rewards import (
+    cpg_femur_target_penalty,
+    cpg_coxa_contact_reward,
+    cpg_stance_rigidity_penalty,
+)
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
@@ -16,6 +21,7 @@ from .rewards import (  # noqa: E402, F401
     base_height_penalty,
     base_orientation_penalty,
     cpg_z_target_reward,
+    cpg_coxa_velocity_reward,
     cpg_force_target_penalty,
     cpg_clock,
     LinearAnnealRewardWeight,

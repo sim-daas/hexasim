@@ -387,11 +387,25 @@ def cpg_clock(env: ManagerBasedRLEnv) -> torch.Tensor:
 def cpg_z_target_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    duty_factor: float = 5/6,
+    duty_factor: float = 0.5,
     step_height: float = 0.05,
     sigma: float = 0.02,
 ) -> torch.Tensor:
-    """Reward foot tracking a target Z-height trajectory derived from the CPG phase."""
+    """Reward foot tracking the CPG swing-phase Z trajectory — SWING-ONLY scoring.
+
+    Stance-phase contribution is EXACTLY ZERO regardless of foot position:
+    ground contact during stance is the force penalty's job, not this term's.
+
+    Why: with target_z = 0 + offset(0.0892) during stance, any planted or
+    dragging foot has error ≈ 0 → Gaussian = 1.0 for 83% of the cycle
+    ("Gaussian dragging exploit" — a do-nothing policy farms ~0.83 of max).
+    Zeroing stance makes the ONLY way to earn from this term physically
+    lifting the leg along the sine wave during its swing window.
+
+    Normalised by the CURRENT number of legs in swing so the reward scale
+    stays ~[0, 1] across the cycle instead of collapsing as swing count
+    changes between double-support and single-tripod phases.
+    """
     if not hasattr(env, "cpg_phase"):
         return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
     robot: Articulation = env.scene[asset_cfg.name]
@@ -407,17 +421,30 @@ def cpg_z_target_reward(
     foot_pos = robot.data.body_pos_w[:, asset_cfg.body_ids, :]
     foot_z = foot_pos[:, :, 2]
     
-    target_z_abs = target_z + 0.02
+    # Adaptive per-leg ground-contact baseline maintained by HexapodEnv
+    # (EMA of world-Z whenever that foot registers >1 N contact). Falls back
+    # to the measured rest-pose offset if the attribute is absent.
+    baseline = getattr(env, "cpg_foot_baseline", None)
+    if baseline is None:
+        target_z_abs = target_z + 0.0892
+    else:
+        target_z_abs = target_z + baseline
     error = foot_z - target_z_abs
-    reward = torch.exp(-torch.square(error) / (sigma ** 2))
+    per_leg = torch.exp(-torch.square(error) / (sigma ** 2))
     
-    return torch.mean(reward, dim=1)
+    # THE FIX: mask out stance entirely — dragging/planted feet earn nothing here.
+    per_leg = per_leg * is_swing.to(per_leg.dtype)
+    
+    # Renormalise by active swing count (min 1 avoids div-by-zero when all
+    # legs are in double-support; that step legitimately earns 0.0).
+    n_swing = is_swing.sum(dim=1).clamp(min=1).to(per_leg.dtype)
+    return per_leg.sum(dim=1) / n_swing
 
 def cpg_force_target_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
-    duty_factor: float = 5/6,
-    max_force: float = 2.35, # N
+    duty_factor: float = 0.5,
+    max_force: float = 4.0, # N (11.8 N robot / 3 tripod support legs ≈ 3.93 N)
 ) -> torch.Tensor:
     """Penalise deviation from a target ground reaction force ramp derived from the CPG phase."""
     if not hasattr(env, "cpg_phase"):
@@ -442,9 +469,13 @@ def cpg_force_target_penalty(
     target_force = torch.zeros_like(phases)
     target_force[is_stance] = max_force * torch.sin(stance_normalized_phase[is_stance])
     
-    # MSE error
+    # L1 (MAE) error — NOT MSE. Squaring raw contact forces explodes on
+    # transient PhysX spikes (20-40 N micro-collisions → 400+ penalty at
+    # -0.5 weight), making impact ~73x costlier than hovering the leg in
+    # the air ("floor is lava" exploit). L1 gives a linear gradient that
+    # guides the leg down without nuking the policy on impact.
     error = force_z - target_force
-    penalty = torch.square(error)
+    penalty = torch.abs(error)
     
     return torch.mean(penalty, dim=1)
 
@@ -479,3 +510,107 @@ class LinearAnnealRewardWeight(ManagerTermBase):
             
         self._term_cfg.weight = new_weight
         return {term_name: new_weight}
+
+def cpg_coxa_velocity_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    duty_factor: float = 0.5,
+) -> torch.Tensor:
+    """Reward forward leg sweep (coxa joint) during swing, penalize movement during stance."""
+    if not hasattr(env, "cpg_phase"):
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    robot = env.scene[asset_cfg.name]
+    joint_vel = robot.data.joint_vel[:, asset_cfg.joint_ids]  # (N, 6)
+    
+    phases = env.cpg_phase
+    swing_end = (1.0 - duty_factor) * 2.0 * math.pi
+    is_swing = phases < swing_end
+    
+    val = torch.abs(joint_vel)
+    # Positive weight during swing, negative during stance
+    reward = val * is_swing.to(val.dtype) - val * (~is_swing).to(val.dtype)
+    
+    return reward.sum(dim=1)
+
+def cpg_femur_target_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    duty_factor: float = 0.5,
+    amplitude: float = 0.4,
+) -> torch.Tensor:
+    """Penalize deviation from femur swing sine wave (L1 error for constant gradient)."""
+    if not hasattr(env, "cpg_phase"):
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    robot = env.scene[asset_cfg.name]
+    joint_pos = robot.data.joint_pos[:, asset_cfg.joint_ids]
+    
+    phases = env.cpg_phase
+    swing_end = (1.0 - duty_factor) * 2.0 * math.pi
+    is_swing = phases < swing_end
+    
+    swing_normalized_phase = (phases / swing_end) * math.pi
+    
+    # Target: 0 during stance, sine wave during swing
+    # Assuming default femur rest is ~0.5 rad (based on CSV data). 
+    # We want it to lift (decrease angle, moving upwards).
+    # Let's use relative movement: penalty drives it to -amplitude * sin(phi) from rest.
+    default_femur = 0.5
+    target_pos = torch.full_like(phases, default_femur)
+    target_pos[is_swing] = default_femur - amplitude * torch.sin(swing_normalized_phase[is_swing])
+    
+    # L1 penalty gives constant gradient everywhere, breaking the Gaussian dead zone
+    error = torch.abs(joint_pos - target_pos)
+    # Apply mostly during swing, but keep a small centering force during stance
+    return error.sum(dim=1)
+
+def cpg_coxa_contact_reward(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    sensor_cfg: SceneEntityCfg,
+    duty_factor: float = 0.5,
+) -> torch.Tensor:
+    """Reward backward coxa movement ONLY when the foot is planted (force > 1N)."""
+    if not hasattr(env, "cpg_phase"):
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    robot = env.scene[asset_cfg.name]
+    sensor = env.scene[sensor_cfg.name]
+    
+    joint_vel = robot.data.joint_vel[:, asset_cfg.joint_ids]  # (N, 6)
+    forces = torch.norm(sensor.data.net_forces_w, dim=-1)     # (N, 6)
+    
+    phases = env.cpg_phase
+    swing_end = (1.0 - duty_factor) * 2.0 * math.pi
+    is_stance = phases >= swing_end
+    
+    # Contact confirmed
+    is_planted = forces > 1.0
+    
+    # Reward backward velocity (positive angular vel usually means backward sweep for coxa, 
+    # but it can be mirrored. Using absolute value here as we did in cpg_coxa_velocity_reward, 
+    # but strictly gated by contact and stance phase).
+    val = torch.abs(joint_vel)
+    reward = val * (is_stance & is_planted).to(val.dtype)
+    
+    return reward.sum(dim=1)
+
+def cpg_stance_rigidity_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    duty_factor: float = 0.5,
+) -> torch.Tensor:
+    """Penalize femur and tibia joint velocity during stance phase."""
+    if not hasattr(env, "cpg_phase"):
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+    robot = env.scene[asset_cfg.name]
+    joint_vel = robot.data.joint_vel[:, asset_cfg.joint_ids]  # Expected to pass both femur and tibia
+    
+    # Since asset_cfg has 12 joints (6 femur, 6 tibia), map phases
+    phases = env.cpg_phase.repeat(1, 2) # Duplicate [0..5] to [0..11] to match [femur0..5, tibia0..5]
+    
+    swing_end = (1.0 - duty_factor) * 2.0 * math.pi
+    is_stance = phases >= swing_end
+    
+    val = torch.abs(joint_vel)
+    penalty = val * is_stance.to(val.dtype)
+    
+    return penalty.sum(dim=1)
