@@ -1,5 +1,5 @@
 from .rewards import (
-    cpg_femur_target_penalty,
+    cpg_z_target_l1_penalty,
     cpg_coxa_contact_reward,
     cpg_stance_rigidity_penalty,
 )

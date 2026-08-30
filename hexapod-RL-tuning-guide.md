@@ -562,3 +562,80 @@ Controlling only the femur joint opened a new kinematic loophole. The policy lea
 The joint-space femur target was originally introduced because a Cartesian Z-height target can often be exploited by tilting the entire torso (pitch/roll) to artificially raise a foot relative to the ground. However, since a strict `base_orientation_penalty` was introduced in Phase 6, the torso-tilt exploit is securely blocked. 
 
 Therefore, an L1 Cartesian Z-height penalty (`weight * abs(target_z - current_z)`) is now mathematically superior to the femur target. It provides a constant gradient that guarantees the foot leaves the ground regardless of what the individual joints do, without the dead-zone issues of the older Gaussian reward.
+
+### 17. Phase 17: The Cartesian L1 Revert
+
+**Diagnosis & The Exploit:**
+The Phase 16 setup is a critical success in one regard: it is the only setup so far that successfully prevented the permanently airborne leg exploit and forced almost all legs to participate in movement. The robot established a solid foundation of walking on all six legs rather than cheating with a 4-drag/2-hover broken stance.
+
+However, the policy still lacked proper vertical swing (ground clearance). It was discovered that the policy was not "farming" the femur target (which is a penalty), but rather it was simply accepting and eating the mild penalty (plateauing at ~-1.7). Economically, eating a -1.7 femur penalty and continuing to drag the leg was vastly cheaper than lifting the foot and risking a massive `-60` fall/height penalty if the base height dropped.
+
+**Fix:**
+To add the missing vertical ground clearance while keeping all legs active, we reverted to tracking the foot's Cartesian Z-height, but this time using a constant-gradient L1 penalty (MAE) rather than the exploitable Gaussian. 
+1. **Removed `cpg_femur_target_penalty`**.
+2. **Implemented `cpg_z_target_l1_penalty`**: Applies `abs(foot_z - target_z_abs)` only during the swing phase, with a heavily increased weight of `-20.0` in the curriculum (`cpg_z`). This massive penalty guarantees that dragging a swinging foot results in a cost (~-2.0 per step) that heavily outweighs the "safety" of keeping the leg planted to avoid a minor height drop.
+
+### 18. Phase 17 Results: The Minimal Error and Pre-CPG Hovering Exploit
+
+**Observed Behavior:**
+Despite the heavy curriculum weight of `-20.0` for `cpg_z_target_l1_penalty`, the policy plateaued without lifting its legs. The robot reverted to keeping a leg permanently airborne (before CPG activation) and dragging the remaining legs. The user noted the CPG Z target reward converged at merely `~-1.6`, indicating the error signal was too minimal to drive behavioral change.
+
+**Diagnosis 1: The Pre-CPG Hovering Exploit**
+The policy learns to keep a leg permanently airborne *before* the CPG curriculum activates (around step 3000). The `foot_clearance` reward active in the early curriculum was reverted from the Phase 9 hybrid approach back to a pure position-based `clamp(foot_z - ground_z, 0, 0.02)`. This provides a continuous `+0.8` reward for simply hanging a leg 2cm in the air permanently. The agent locks into this "hovering toe" local optimum because it is perfectly stable and highly rewarded, rendering it unprepared for the periodic sine-wave constraints introduced later.
+
+**Diagnosis 2: The Minimal Z-Error Math**
+The `cpg_z_target_l1_penalty` calculates error in absolute meters: `abs(foot_z - target_z_abs)`.
+- The target swing trajectory (`step_height`) peaks at `0.05m` (5 cm).
+- If a foot completely ignores the swing and drags on the ground, its maximum error is exactly `0.05m`.
+- The average error over the half-cycle swing phase is `~0.0318m` per leg.
+- With 3 legs swinging, the total raw error is `~0.095m`. 
+- Multiplied by the `-20.0` weight, the policy receives a total penalty of exactly `~-1.9` (matching the user's `~-1.6` observation).
+
+The Z-target gradient is mathematically dwarfed. The agent rationally chooses to "eat" the tiny `-1.6` penalty because properly lifting the legs risks instability, which triggers the massive `-60.0` base height penalty.
+
+**Proposed Corrections (To Be Implemented):**
+1. **Normalize the CPG Z Error:** In `cpg_z_target_l1_penalty`, the physical meter error must be normalized by the `step_height`: 
+   `error = torch.abs(foot_z - target_z_abs) / step_height`
+   This converts the error from tiny physical meters `[0, 0.05]` to a normalized ratio `[0, 1.0]`. A completely ignored swing will then generate a massive `-38.0` penalty (average across 3 legs), providing an unmistakable gradient that forces the agent to comply.
+2. **Fix Pre-CPG `foot_clearance`:** Address the early curriculum hovering exploit by either reinstating the hybrid velocity/position reward from Phase 9 or heavily scaling down the position-only reward so the agent doesn't enter the CPG curriculum already committed to a broken 5-leg stance.
+
+### 19. Phase 17b: Normalized CPG Z Error Correction
+
+**Fix Implemented:**
+Following the diagnosis of the "Minimal Error Exploit" in Phase 17, the `cpg_z_target_l1_penalty` mathematical calculation was updated.
+
+**Changes in `mdp/rewards.py`:**
+The absolute physical error in meters is now normalized by dividing by the `step_height` (0.05m):
+```python
+error = torch.abs(foot_z - target_z_abs) / step_height
+```
+
+**Expected Outcome:**
+Instead of generating a tiny raw penalty (e.g., `-0.05` * `weight`), the penalty now correctly acts as a ratio `[0, 1.0]`. If a leg stays perfectly grounded and ignores the `0.05m` swing apex, the normalized error peaks at `1.0`. Multiplied by the `-20.0` weight, this yields a robust, inescapable penalty gradient (averaging `~-38.0` total across all swinging legs). The agent will now find it mathematically necessary to clear the ground to avoid this massive loss.
+
+### 20. Phase 17c: Debugging the Curriculum Trap
+
+**Observed Behavior:**
+After training with the normalized `cpg_z_target_l1_penalty` (Phase 17b), the policy *still* refused to lift its legs properly, retaining the 5-legs-grounded, 1-leg-airborne gait. 
+
+**Debug Trajectory Analysis:**
+We ran `play_debug.py` with expanded logging to trace the exact internal CPG math. The normalized error logic is functioning perfectly and generating massive gradients, but the policy is choosing to ignore them.
+
+*   **Leg 4 (Dragging):** Bearing heavy load (`8.78 N`). Because it stays planted at `0.094 m`, its normalized error against the swing target is huge, resulting in a mean penalty of **`-6.73` per step**.
+*   **Leg 5 (Permanently Airborne):** Hovering at `0.113 m` with `0.06 N` force. Because it is already elevated, its error against the swing target is smaller, yielding a penalty of only **`-3.22` per step**.
+*   **Total CPG Z Penalty:** The combined penalty across all swinging legs averages **`~-30.0` per step**.
+
+**Diagnosis: The Curriculum Trap**
+If the policy is willing to absorb a massive `-30` penalty every step, it means the alternative (obeying the CPG and lifting the dragging legs) is perceived by the critic network as even *more* expensive.
+
+1.  **The Bad Foundation:** Before step 3000 (when CPG is disabled), the `foot_clearance` reward gives a static `+0.8` bonus for keeping a foot in the air. The agent learns an asymmetric, lazy 5-leg walking style to farm this reward safely.
+2.  **The Lock-in:** By step 3000, the neural network has committed its weight distribution to this 5-leg gait. Leg 4 is now a critical, load-bearing pillar.
+3.  **The Trap:** When the CPG activates and demands Leg 4 be lifted, the agent realizes that lifting it will cause the torso to sag or collapse. A collapse triggers the massive `-60` `base_height` penalty and potentially ends the episode. 
+4.  **The Local Optimum:** The gradient to switch from a 5-leg gait to a proper 3-leg tripod gait requires passing through an unstable transition phase. The critic network correctly evaluates that trying to learn the new gait will cause immediate, catastrophic falls. It is mathematically "cheaper" to just drag the legs and pay the `-30` tax than to fall over.
+
+**Implemented Corrections (Phase 17c Curriculum Overhaul):**
+Since reinstating the hybrid velocity/position reward from Phase 9 is not viable (the policy exploits it by swinging in place just to farm the velocity component), we must instead tackle the curriculum timing directly. The agent is spending too much time in the pre-CPG phase and locking into a 5-leg stance.
+
+1.  **Earlier CPG Introduction:** Shifted all CPG curriculum terms (`cpg_z`, `cpg_rigidity`, `cpg_force`, `cpg_coxa`) to start much earlier at **step 1500** (approx 100 iterations), giving the agent less time to lock into a bad gait.
+2.  **Extended CPG Z Annealing:** Increased the `end_step` for `cpg_z` (target weight `-2.0`) to **step 20000**. This extremely slow ramp-up ensures the agent doesn't suffer catastrophic forgetting when the massive penalty kicks in.
+3.  **Phase 8 Reward Disablement:** Added fade-out curriculum terms for the two harsh Phase 8 static posture penalties (`base_height` at `-60.0`, and `non_foot_body` at `-30.0`). These now linearly decay to `0.0` between steps 1500 and 2000. As the CPG takes over gait control, these static crutches are removed so they don't fight the dynamic height variations natural to a tripod gait.

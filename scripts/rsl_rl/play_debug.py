@@ -231,7 +231,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"leg_{i}_tibia_z",
                 f"leg_{i}_force_z",
                 f"leg_{i}_coxa_pos",
-                f"leg_{i}_femur_pos"
+                f"leg_{i}_femur_pos",
+                f"leg_{i}_target_z",
+                f"leg_{i}_baseline",
+                f"leg_{i}_error",
+                f"leg_{i}_penalty"
             ])
         csv_writer.writerow(header)
         # DEBUG ADDITIONS END
@@ -266,14 +270,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             coxa_pos = robot.data.joint_pos[0, coxa_joint_indices].cpu().numpy()
                             femur_pos = robot.data.joint_pos[0, femur_joint_indices].cpu().numpy()
                             
+                            import math
+                            duty_factor = 0.5
+                            step_height = 0.05
+                            swing_end = (1.0 - duty_factor) * 2.0 * math.pi
+                            
+                            baseline_attr = getattr(unwrapped_env, "cpg_foot_baseline", None)
+                            baseline_arr = baseline_attr[0].cpu().numpy() if baseline_attr is not None else [0.0892]*6
+                            
                             row = [timestep]
                             for i in range(6):
+                                phase = cpg_phase[i] if i < len(cpg_phase) else 0
+                                is_swing = phase < swing_end
+                                swing_norm = (phase / swing_end) * math.pi if is_swing else 0
+                                target_z = step_height * math.sin(swing_norm) if is_swing else 0
+                                
+                                tz_abs = target_z + baseline_arr[i]
+                                error = abs(tibia_z[i] - tz_abs) / step_height
+                                penalty = -20.0 * error if is_swing else 0.0
+                                
                                 row.extend([
-                                    cpg_phase[i] if i < len(cpg_phase) else 0,
+                                    phase,
                                     tibia_z[i] if i < len(tibia_z) else 0,
                                     forces_z[i] if i < len(forces_z) else 0,
                                     coxa_pos[i] if i < len(coxa_pos) else 0,
-                                    femur_pos[i] if i < len(femur_pos) else 0
+                                    femur_pos[i] if i < len(femur_pos) else 0,
+                                    target_z,
+                                    baseline_arr[i],
+                                    error,
+                                    penalty
                                 ])
                             csv_writer.writerow(row)
                             csv_file.flush()

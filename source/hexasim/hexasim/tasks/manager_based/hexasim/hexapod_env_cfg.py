@@ -414,13 +414,13 @@ class RewardsCfg:
     terminating = RewTerm(func=mdp.is_terminated, weight=-5.0)
     
     # CPG Tracking
-    cpg_femur_target = RewTerm(
-        func=hex_mdp.cpg_femur_target_penalty,
+    cpg_z_target = RewTerm(
+        func=hex_mdp.cpg_z_target_l1_penalty,
         weight=0.0,
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_femur"]),
+            "asset_cfg": SceneEntityCfg("robot", body_names=[".*tibia.*"]),
             "duty_factor": 0.5,
-            "amplitude": 0.4,
+            "step_height": 0.05,
         },
     )
     cpg_stance_rigidity = RewTerm(
@@ -482,8 +482,8 @@ class CurriculaCfg:
             "term_name": "foot_clearance", 
             "initial_weight": 0.8,
             "target_weight": 0.0, 
-            "start_step": 3000,
-            "end_step": 3500,
+            "start_step": 1500,
+            "end_step": 2000,
         },
     )
 
@@ -493,19 +493,19 @@ class CurriculaCfg:
             "term_name": "joint_motion", 
             "initial_weight": 0.05,
             "target_weight": 0.0, 
-            "start_step": 3000,
-            "end_step": 3500,
+            "start_step": 1500,
+            "end_step": 2000,
         },
     )
 
-    cpg_femur = CurrTerm(
+    cpg_z = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "cpg_femur_target", 
+            "term_name": "cpg_z_target", 
             "initial_weight": 0.0,
             "target_weight": -2.0, 
-            "start_step": 3000,
-            "end_step": 8000,
+            "start_step": 1500,
+            "end_step": 20000,
         },
     )
     cpg_rigidity = CurrTerm(
@@ -514,7 +514,7 @@ class CurriculaCfg:
             "term_name": "cpg_stance_rigidity", 
             "initial_weight": 0.0,
             "target_weight": -0.5, 
-            "start_step": 3000,
+            "start_step": 1500,
             "end_step": 8000,
         },
     )
@@ -524,7 +524,7 @@ class CurriculaCfg:
             "term_name": "cpg_force_target", 
             "initial_weight": 0.0,
             "target_weight": -0.5, 
-            "start_step": 3000,
+            "start_step": 1500,
             "end_step": 8000,
         },
     )
@@ -535,7 +535,7 @@ class CurriculaCfg:
             "term_name": "cpg_coxa_contact", 
             "initial_weight": 0.0,
             "target_weight": 1.0, 
-            "start_step": 3000,
+            "start_step": 1500,
             "end_step": 8000,
         },
     )
@@ -548,11 +548,33 @@ class CurriculaCfg:
             "term_name": "forward_velocity",
             "initial_weight": 2.0,
             "target_weight": 1.7,
-            "start_step": 3000,
+            "start_step": 1500,
             "end_step": 45000,
         },
     )
 
+
+    base_height = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "base_height", 
+            "initial_weight": -60.0,
+            "target_weight": 0.0, 
+            "start_step": 1500,
+            "end_step": 2000,
+        },
+    )
+
+    non_foot_body = CurrTerm(
+        func=hex_mdp.LinearAnnealRewardWeight,
+        params={
+            "term_name": "non_foot_body", 
+            "initial_weight": -30.0,
+            "target_weight": 0.0, 
+            "start_step": 1500,
+            "end_step": 2000,
+        },
+    )
 ##
 # Environment configuration
 ##

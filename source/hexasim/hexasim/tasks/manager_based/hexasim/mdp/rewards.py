@@ -532,36 +532,39 @@ def cpg_coxa_velocity_reward(
     
     return reward.sum(dim=1)
 
-def cpg_femur_target_penalty(
+def cpg_z_target_l1_penalty(
     env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     duty_factor: float = 0.5,
-    amplitude: float = 0.4,
+    step_height: float = 0.05,
 ) -> torch.Tensor:
-    """Penalize deviation from femur swing sine wave (L1 error for constant gradient)."""
+    """L1 Penalty for foot deviating from the CPG swing-phase Z trajectory."""
     if not hasattr(env, "cpg_phase"):
         return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
     robot = env.scene[asset_cfg.name]
-    joint_pos = robot.data.joint_pos[:, asset_cfg.joint_ids]
-    
     phases = env.cpg_phase
+    
     swing_end = (1.0 - duty_factor) * 2.0 * math.pi
     is_swing = phases < swing_end
-    
     swing_normalized_phase = (phases / swing_end) * math.pi
     
-    # Target: 0 during stance, sine wave during swing
-    # Assuming default femur rest is ~0.5 rad (based on CSV data). 
-    # We want it to lift (decrease angle, moving upwards).
-    # Let's use relative movement: penalty drives it to -amplitude * sin(phi) from rest.
-    default_femur = 0.5
-    target_pos = torch.full_like(phases, default_femur)
-    target_pos[is_swing] = default_femur - amplitude * torch.sin(swing_normalized_phase[is_swing])
+    target_z = torch.zeros_like(phases)
+    target_z[is_swing] = step_height * torch.sin(swing_normalized_phase[is_swing])
     
-    # L1 penalty gives constant gradient everywhere, breaking the Gaussian dead zone
-    error = torch.abs(joint_pos - target_pos)
-    # Apply mostly during swing, but keep a small centering force during stance
-    return error.sum(dim=1)
+    foot_pos = robot.data.body_pos_w[:, asset_cfg.body_ids, :]
+    foot_z = foot_pos[:, :, 2]
+    
+    baseline = getattr(env, "cpg_foot_baseline", None)
+    if baseline is None:
+        target_z_abs = target_z + 0.0892
+    else:
+        target_z_abs = target_z + baseline
+        
+    error = torch.abs(foot_z - target_z_abs) / step_height
+    # Mask out stance entirely — ground contact is handled by force penalty
+    penalty_per_leg = error * is_swing.to(error.dtype)
+    
+    return penalty_per_leg.sum(dim=1)
 
 def cpg_coxa_contact_reward(
     env: ManagerBasedRLEnv,
