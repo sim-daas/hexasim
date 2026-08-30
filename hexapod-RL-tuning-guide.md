@@ -525,7 +525,7 @@ Fixed by using current force: `net_forces_w`.
 ### 15. Phase 16: The "2 Airborne, 4 Dragging" Exploit (Reward Economy)
 
 **Observed Behavior:**
-After fixing the clock, the policy plateaued quickly (~1000 iterations) with a mean reward of ~8. The robot kept 4 legs planted and dragged them, while holding 2 legs permanently airborne. The CPG Z target reward and force penalties were completely ignored.
+After fixing the clock, the policy plateaued quickly (~1000 iterations) with a mean reward of ~60. The robot kept 4 legs planted and dragged them, while holding 2 legs permanently airborne. The CPG Z target reward and force penalties were completely ignored.
 
 **The Reward Economy (Why it happens):**
 With the clock moving, the agent must either learn to perfectly follow a 5cm sine wave, or find the cheapest way to ignore it. 
@@ -543,3 +543,22 @@ Replaced the broken Gaussian Z-reward with direct joint-level L1 penalties to pr
 1. **`cpg_femur_target_penalty`:** Replaced `cpg_z_target`. Applies an L1 penalty on the femur joint deviating from a sine wave during swing. L1 provides a constant gradient; if the leg is wrong, it always feels a push in the exact right direction. Target weight: `-2.0`.
 2. **`cpg_coxa_contact_reward`:** Replaced `cpg_coxa_velocity`. Rewards backward coxa velocity *only* if the foot's contact force > 1N during stance. Ensures sweeping actually propels the robot. Target weight: `1.0`.
 3. **`cpg_stance_rigidity_penalty`:** Penalizes femur and tibia velocity during stance, preventing buckling or sliding. Target weight: `-0.5`.
+
+### 16. Phase 16 Results: The Femur-Tibia Compensation Exploit
+
+**Observed Behavior:**
+The Phase 14 reward changes (specifically replacing the Cartesian Z-height target with a joint-space femur target) resulted in a degraded policy that plateaus around a mean reward of ~60. The robot exhibits a 6-leg dragging behavior, heavily optimizing the CPG coxa sweep while ignoring the mechanical intent of the femur target.
+
+**Trajectory Analysis:**
+- Mean Z-heights for all 6 legs are firmly between 0.080m and 0.102m (ground level).
+- Contact forces for all legs average > 3.1N, proving all 6 legs are continuously planted.
+- Coxa joints sweep nearly 60 degrees (~1.0 rad), confirming the policy is aggressively farming the `cpg_coxa_contact` reward.
+- Femur joints *do* move (range ~0.42 rad), but the feet never lift.
+
+**The Exploit:**
+Controlling only the femur joint opened a new kinematic loophole. The policy learned to rotate the femur to satisfy the `cpg_femur_target_penalty`, but simultaneously extended the tibia joint downwards to keep the foot planted. This allows it to farm the femur reward without risking the `-60` fall penalty that comes with actually lifting a foot.
+
+**Why not a Cartesian Z-height L1 penalty?**
+The joint-space femur target was originally introduced because a Cartesian Z-height target can often be exploited by tilting the entire torso (pitch/roll) to artificially raise a foot relative to the ground. However, since a strict `base_orientation_penalty` was introduced in Phase 6, the torso-tilt exploit is securely blocked. 
+
+Therefore, an L1 Cartesian Z-height penalty (`weight * abs(target_z - current_z)`) is now mathematically superior to the femur target. It provides a constant gradient that guarantees the foot leaves the ground regardless of what the individual joints do, without the dead-zone issues of the older Gaussian reward.
