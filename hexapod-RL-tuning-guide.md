@@ -639,3 +639,23 @@ Since reinstating the hybrid velocity/position reward from Phase 9 is not viable
 1.  **Earlier CPG Introduction:** Shifted all CPG curriculum terms (`cpg_z`, `cpg_rigidity`, `cpg_force`, `cpg_coxa`) to start much earlier at **step 1500** (approx 100 iterations), giving the agent less time to lock into a bad gait.
 2.  **Extended CPG Z Annealing:** Increased the `end_step` for `cpg_z` (target weight `-2.0`) to **step 20000**. This extremely slow ramp-up ensures the agent doesn't suffer catastrophic forgetting when the massive penalty kicks in.
 3.  **Phase 8 Reward Disablement:** Added fade-out curriculum terms for the two harsh Phase 8 static posture penalties (`base_height` at `-60.0`, and `non_foot_body` at `-30.0`). These now linearly decay to `0.0` between steps 1500 and 2000. As the CPG takes over gait control, these static crutches are removed so they don't fight the dynamic height variations natural to a tripod gait.
+
+### 21. Phase 18: Partial Tripod Success & The Half-Tripod Local Optimum
+
+**Observed Behavior (Post-Phase 17c):**
+The curriculum overhaul in Phase 17c yielded a major breakthrough: the hexapod achieved a recognizable partial tripod gait for the first time with **no permanently airborne legs**. However, the gait was asymmetric. The left-side legs followed the CPG sine-wave beautifully, but the right-side legs (e.g., RM leg 1, RB leg 2) stayed permanently grounded, dragging to farm propulsion rewards. The policy had settled into a **half-tripod gait**.
+
+**Phase 18 Attempted Fixes (Reward Updates):**
+To perfect the gait and break this half-tripod minimum, a suite of new reward mechanics was introduced incrementally:
+1. **`forward_displacement_reward`:** Introduced to replace the unbounded `forward_velocity` reward. It projected the XY world velocity onto the spawn heading and capped the per-step reward at a tunable threshold (equivalent to 0.4 m/s). This was intended to remove the sprint incentive that historically caused sloppy gaits and leg collisions.
+2. **`cpg_swing_contact_penalty`:** A direct, full-norm penalty applied *only* to legs that remain in contact with the ground (>0.5 N) during their designated CPG swing phase. This was added to explicitly punish the right-side dragging legs without adding noise to the stance phase.
+3. **`cpg_force_target_penalty` Variance:** An attempt was made to change the force target penalty from `mean` to `sum` to increase the gradient against planted swing legs. This failed catastrophically—it amplified noisy PhysX stance-phase micro-contacts into a variance wall, preventing convergence entirely. It was changed back to `mean`.
+4. **Slower Curriculum Annealing:** To assist convergence, the transition periods in `CurriculaCfg` were manually stretched, pushing the `end_step` for the velocity fades and displacement ramp-ups to step 15,000.
+
+**Outcome: Failure to Escape the Local Optimum**
+Despite introducing the rewards incrementally and meticulously tuning the curriculum timelines, the model failed to converge to the perfect alternating tripod gait.
+- The `forward_displacement` reward had no noticeable effect in encouraging a better gait over the raw velocity reward.
+- The policy refused to learn to avoid the new CPG penalties. The dragging legs remained stubbornly planted.
+
+**Diagnosis:**
+The agent has found an incredibly robust local optimum. Supporting its weight statically on one side while performing the required CPG leg-waving with the other side is mathematically "safe." Escaping this half-tripod gait requires a transition period of profound instability (learning to lift the dragging legs and dynamically shift weight), which the critic network evaluates as too risky to explore. The penalizing gradients, even when massively scaled against planted swing legs, are simply absorbed by the policy as an acceptable survival tax.
