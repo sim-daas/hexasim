@@ -503,9 +503,9 @@ class CurriculaCfg:
         params={
             "term_name": "cpg_z_target", 
             "initial_weight": 0.0,
-            "target_weight": -2.0, 
+            "target_weight": -10.0, 
             "start_step": 1500,
-            "end_step": 20000,
+            "end_step": 45000,
         },
     )
     cpg_rigidity = CurrTerm(
