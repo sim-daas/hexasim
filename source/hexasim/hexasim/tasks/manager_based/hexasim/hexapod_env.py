@@ -60,10 +60,13 @@ class HexapodEnv(ManagerBasedRLEnv):
 
     def step(self, action: torch.Tensor):
         # Dynamic CPG frequency: f = v_x / stride_length, clamped [0.2, 2.5]
+        # stride_length = 0.20 m matches the training-time empirical phase rate
+        # (observed Δφ = 0.265 rad/step ≡ 2.11 Hz ≈ 0.447/0.20; stride=0.15
+        # would produce 0.325 rad/step / 2.8 Hz — 33% too fast → overstepping).
         with torch.no_grad():
             vx = self.scene["robot"].data.root_lin_vel_b[:, 0]
             vx_positive = torch.clamp(vx, min=0.0)
-            f = torch.clamp(vx_positive / 0.2, min=0.2, max=2.5)
+            f = torch.clamp(vx_positive / 0.20, min=0.2, max=2.5)
         
         delta_phase = 2.0 * math.pi * f.unsqueeze(1) * self.step_dt
         self.cpg_phase = (self.cpg_phase + delta_phase) % (2.0 * math.pi)

@@ -420,7 +420,7 @@ class RewardsCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=[".*tibia.*"]),
             "duty_factor": 0.5,
-            "step_height": 0.05,
+            "step_height": 0.038,
         },
     )
     cpg_stance_rigidity = RewTerm(
@@ -616,3 +616,24 @@ class HexapodEnvCfg_PLAY(HexapodEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 1
         self.scene.env_spacing = 2.5
+
+
+@configclass
+class HexapodFlatResumeEnvCfg(HexapodEnvCfg):
+    """Resume variant — no curriculum, max target weights from start."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        
+        # Disable all curricula to prevent weight resets on --resume
+        self.curriculum = None
+        
+        # Manually apply the final target weights from the original curriculum
+        self.rewards.foot_clearance.weight = 0.0
+        self.rewards.joint_motion.weight = 0.0
+        self.rewards.cpg_z_target.weight = -10.0
+        self.rewards.cpg_stance_rigidity.weight = -0.5
+        self.rewards.cpg_force_target.weight = -0.5
+        self.rewards.cpg_coxa_contact.weight = 1.0
+        self.rewards.forward_velocity.weight = 1.7
+        self.rewards.base_height.weight = 0.0

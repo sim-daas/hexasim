@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-csv_path = "logs/rsl_rl/hexapod_flat/2026-09-06_13-05-04/debug_cpg_trajectory.csv"
+csv_path = "logs/rsl_rl/hexapod_flat/2026-09-06_14-35-10/debug_cpg_trajectory.csv"
 print(f"Loading {csv_path}...")
 df = pd.read_csv(csv_path)
 

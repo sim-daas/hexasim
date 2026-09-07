@@ -11,7 +11,7 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 16          # longer rollout horizon for legged locomotion
-    max_iterations = 5000           # 10× more iterations for hexapod (was 150)
+    max_iterations = 10000           # 10× more iterations for hexapod (was 150)
     save_interval = 50              # checkpoint every 50 iters — never lose a run
     experiment_name = "hexapod_flat"
 
