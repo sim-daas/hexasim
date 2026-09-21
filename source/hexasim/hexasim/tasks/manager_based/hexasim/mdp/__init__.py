@@ -1,8 +1,3 @@
-from .rewards import (
-    cpg_z_target_l1_penalty,
-    cpg_coxa_contact_reward,
-    cpg_stance_rigidity_penalty,
-)
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
@@ -16,15 +11,18 @@ lazy_export()
 
 # Explicit re-exports so that `from . import mdp as hex_mdp` and
 # `hex_mdp.<func>` work without relying on lazy_export auto-discovery.
+from .observations import s0a_policy_obs, s0a_privileged_obs  # noqa: E402, F401
 from .rewards import (  # noqa: E402, F401
+    LinearAnnealRewardWeight,
     ang_vel_xy_penalty,
     base_height_penalty,
     base_orientation_penalty,
-    cpg_z_target_reward,
-    cpg_coxa_velocity_reward,
-    cpg_force_target_penalty,
     cpg_clock,
-    LinearAnnealRewardWeight,
+    cpg_coxa_contact_reward,
+    cpg_force_target_penalty,
+    cpg_stance_rigidity_penalty,
+    cpg_z_target_kernel_reward,
+    cpg_z_target_l1_penalty,
     foot_clearance_reward,
     forward_velocity,
     joint_motion_reward,

@@ -53,6 +53,7 @@ import cli_args  # isort: skip
 logger = logging.getLogger(__name__)
 
 import hexasim.tasks  # noqa: F401
+
 with contextlib.suppress(ImportError):
     import isaaclab_tasks_experimental  # noqa: F401
 
@@ -80,7 +81,13 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Resume training from the most recent checkpoint in the experiment folder. "
-         "Overrides --resume / --load_run. Omit this flag to start from scratch.",
+    "Overrides --resume / --load_run. Omit this flag to start from scratch.",
+)
+parser.add_argument(
+    "--warmstart",
+    type=str,
+    default=None,
+    help="π_base checkpoint to widen into the S0a actor (s0_ppo.warmstart_actor_state). Critic starts fresh.",
 )
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
@@ -209,11 +216,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # copy-paste a timestamp directory name. Omit the flag for a clean start.
         if args_cli.resume_last:
             import glob
-            import re
 
-            run_dirs = sorted(
-                [d for d in glob.glob(os.path.join(log_root_path, "*")) if os.path.isdir(d)]
-            )
+            run_dirs = sorted([d for d in glob.glob(os.path.join(log_root_path, "*")) if os.path.isdir(d)])
             if run_dirs:
                 agent_cfg.load_run = os.path.basename(run_dirs[-1])
                 agent_cfg.resume = True
@@ -260,6 +264,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO]: Loading model checkpoint from: {resume_path}")
             # load previously trained model
             runner.load(resume_path)
+        elif args_cli.warmstart:
+            from hexasim.assets.robot import PXMARK4_CFG
+            from hexasim.rl.s0_ppo import warmstart_actor_state
+
+            print(f"[INFO]: Warm-starting the actor from: {args_cli.warmstart}")
+            base = torch.load(args_cli.warmstart, map_location="cpu", weights_only=False)["actor_state_dict"]
+            # π_base was trained on PXMARK4_CFG's rest pose; fold the shift to this task's rest pose.
+            robot = env.unwrapped.scene["robot"]
+            old_rest = torch.tensor(
+                [
+                    next(v for k, v in PXMARK4_CFG.init_state.joint_pos.items() if n.endswith(k[2:]))
+                    for n in robot.joint_names
+                ]
+            )
+            rest_delta = robot.data.default_joint_pos.torch[0].cpu() - old_rest
+            print(f"[INFO]: rest-pose delta folded into the warm start (rad): {rest_delta.tolist()}")
+            state = warmstart_actor_state(base, agent_cfg.algorithm.std_floor, rest_delta)
+            runner.alg.actor.load_state_dict({k: v.to(agent_cfg.device) for k, v in state.items()})
 
         # dump the configuration into log-directory
         dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

@@ -55,3 +55,22 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
     },
 )
+gym.register(
+    id="Hexapod-S0a-v0",
+    entry_point=f"{__name__}.hexapod_env:HexapodS0aEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.hexapod_env_cfg:HexapodS0aEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg_S0a",
+    },
+)
+
+gym.register(
+    id="Hexapod-S0a-Play-v0",
+    entry_point=f"{__name__}.hexapod_env:HexapodS0aEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.hexapod_env_cfg:HexapodS0aEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg_S0a",
+    },
+)

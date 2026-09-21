@@ -35,34 +35,35 @@ Every episode:
 
 import math
 
+# Isaac Lab built-in MDP primitives
+import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils.configclass import configclass
 
-# Isaac Lab built-in MDP primitives
-import isaaclab.envs.mdp as mdp
-
 # Local custom MDP functions (rewards.py in this package)
 from . import mdp as hex_mdp  # isort:skip
 
 # PhantomX Mark IV asset configuration
-from hexasim.assets.robot import PXMARK4_CFG  # isort:skip
+from hexasim.assets.robot import PXMARK4_AX12A_CFG, PXMARK4_CFG  # isort:skip
 
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab_physx.physics import PhysxCfg
+from isaaclab_physx.sim.spawners.materials import PhysxRigidBodyMaterialCfg
+
+from isaaclab.sensors import ContactSensorCfg, ImuCfg
 
 ##
 # Scene definition
 ##
-
 
 
 @configclass
@@ -76,10 +77,17 @@ class HexapodSceneCfg(InteractiveSceneCfg):
         prim_path="/World/ground",
         spawn=sim_utils.GroundPlaneCfg(
             size=(200.0, 200.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=1.0,
-                dynamic_friction=1.0,
+            # Multiply outranks PhysX's default average, so effective μ = μ_ground × μ_foot(1.0) = μ_ground.
+            # μ_ground 0.75 = π_base's training friction: the robot USD has no collider material, so its feet
+            # used PhysX's default 0.5, averaged with the old ground's 1.0. At μ 1.0, π_base falls in 9 % more
+            # episodes (logs/eval/pi_base_ablate_*.json). ponytail: flat-ground placeholder until the per-surface
+            # μ bench measurement; the terrain material library replaces it at S0b.
+            physics_material=PhysxRigidBodyMaterialCfg(
+                static_friction=0.75,
+                dynamic_friction=0.75,
                 restitution=0.0,
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
             ),
         ),
     )
@@ -196,6 +204,40 @@ class EventCfg:
         },
     )
 
+    # Foot (all robot bodies) μ = 1.0 so the multiply combine returns the ground's μ unchanged.
+    robot_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (1.0, 1.0),
+            "dynamic_friction_range": (1.0, 1.0),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 1,
+        },
+    )
+
+    # Camera mast (D435 + bracket) on every arm, blind ones included (paradigm spec §1).
+    # ponytail: provisional 0.15 kg at (+0.10, 0, +0.10) m from the base origin, until weighed on the robot;
+    # modelled as added base mass + the resulting base CoM shift 0.15·(0.10, 0, 0.10)/1.672 kg.
+    camera_mast_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*base_link.*"),
+            "mass_distribution_params": (0.15, 0.15),
+            "operation": "add",
+        },
+    )
+    camera_mast_com = EventTerm(
+        func=mdp.randomize_rigid_body_com,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*base_link.*"),
+            "com_range": {"x": (0.009, 0.009), "z": (0.009, 0.009)},
+        },
+    )
+
     # Reset root pose: random x/y offset, random yaw (full 360°).
     # Yaw randomisation is critical — without it the agent never learns
     # to walk relative to its own heading; it just aligns with world-x.
@@ -206,7 +248,7 @@ class EventCfg:
             "pose_range": {
                 "x": (-0.5, 0.5),
                 "y": (-0.5, 0.5),
-                "yaw": (-math.pi, math.pi),   # full random heading every episode
+                "yaw": (-math.pi, math.pi),  # full random heading every episode
             },
             "velocity_range": {
                 "x": (0.0, 0.0),
@@ -355,12 +397,8 @@ class RewardsCfg:
         func=hex_mdp.foot_clearance_reward,
         weight=0.4,
         params={
-            # NOTE: The URDF *_foot_link bodies are massless/geometry-less and
-            # are silently dropped by the Isaac Sim USD importer.  The tibia
-            # links are the true foot-tip equivalents available at runtime.
-            # Their mangled USD names follow the pattern:
-            #   tn__pxmark4{side}_{pos}_tibia_link_{hash}
-            # The regex ".*tibia.*" matches all six reliably.
+            # The URDF foot_link is merged into the tibia at import; the term derives
+            # the toe point from the tibia pose (mdp.rewards.toe_pos_w).
             "asset_cfg": SceneEntityCfg("robot", body_names=[".*tibia.*"]),
             "target_clearance": 0.02,  # 2 cm lift saturates the reward
         },
@@ -412,14 +450,13 @@ class RewardsCfg:
     # (8) Alive bonus
     alive = RewTerm(func=mdp.is_alive, weight=1.0)
     terminating = RewTerm(func=mdp.is_terminated, weight=-5.0)
-    
+
     # CPG Tracking
     cpg_z_target = RewTerm(
         func=hex_mdp.cpg_z_target_l1_penalty,
         weight=0.0,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=[".*tibia.*"]),
-            "duty_factor": 0.5,
             "step_height": 0.038,
         },
     )
@@ -427,8 +464,10 @@ class RewardsCfg:
         func=hex_mdp.cpg_stance_rigidity_penalty,
         weight=0.0,
         params={
+            # Coxa deliberately excluded: the backward coxa sweep IS the stance stroke that cpg_coxa_contact
+            # pays for (+1 per rad/s); penalising it here (−0.5 per rad/s) would recreate the v7 §2.6 coxa
+            # contradiction. Stance slip is policed by stance_rigidity_contact (toe velocity) from S0b.
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_femur", ".*_tibia"]),
-            "duty_factor": 0.5,
         },
     )
     cpg_force_target = RewTerm(
@@ -436,9 +475,6 @@ class RewardsCfg:
         weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*tibia.*"]),
-            "duty_factor": 0.5,
-            # 11.8 N robot / 3 tripod support legs ≈ 3.93 N per foot
-            "max_force": 4.0,
         },
     )
     cpg_coxa_contact = RewTerm(
@@ -447,7 +483,6 @@ class RewardsCfg:
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_coxa"]),
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*tibia.*"]),
-            "duty_factor": 0.5,
         },
     )
 
@@ -471,7 +506,6 @@ class TerminationsCfg:
     )
 
 
-
 @configclass
 class CurriculaCfg:
     """Curriculum terms for the MDP."""
@@ -479,9 +513,9 @@ class CurriculaCfg:
     foot_clearance = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "foot_clearance", 
+            "term_name": "foot_clearance",
             "initial_weight": 0.8,
-            "target_weight": 0.0, 
+            "target_weight": 0.0,
             "start_step": 1500,
             "end_step": 2000,
         },
@@ -490,9 +524,9 @@ class CurriculaCfg:
     joint_motion = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "joint_motion", 
+            "term_name": "joint_motion",
             "initial_weight": 0.05,
-            "target_weight": 0.0, 
+            "target_weight": 0.0,
             "start_step": 1500,
             "end_step": 2000,
         },
@@ -501,9 +535,9 @@ class CurriculaCfg:
     cpg_z = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "cpg_z_target", 
+            "term_name": "cpg_z_target",
             "initial_weight": 0.0,
-            "target_weight": -10.0, 
+            "target_weight": -10.0,
             "start_step": 1500,
             "end_step": 45000,
         },
@@ -511,9 +545,9 @@ class CurriculaCfg:
     cpg_rigidity = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "cpg_stance_rigidity", 
+            "term_name": "cpg_stance_rigidity",
             "initial_weight": 0.0,
-            "target_weight": -0.5, 
+            "target_weight": -0.5,
             "start_step": 1500,
             "end_step": 8000,
         },
@@ -521,9 +555,9 @@ class CurriculaCfg:
     cpg_force = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "cpg_force_target", 
+            "term_name": "cpg_force_target",
             "initial_weight": 0.0,
-            "target_weight": -0.5, 
+            "target_weight": -0.5,
             "start_step": 1500,
             "end_step": 8000,
         },
@@ -532,9 +566,9 @@ class CurriculaCfg:
     cpg_coxa = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "cpg_coxa_contact", 
+            "term_name": "cpg_coxa_contact",
             "initial_weight": 0.0,
-            "target_weight": 1.0, 
+            "target_weight": 1.0,
             "start_step": 1500,
             "end_step": 8000,
         },
@@ -553,13 +587,12 @@ class CurriculaCfg:
         },
     )
 
-
     base_height = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "base_height", 
+            "term_name": "base_height",
             "initial_weight": -60.0,
-            "target_weight": 0.0, 
+            "target_weight": 0.0,
             "start_step": 1500,
             "end_step": 2000,
         },
@@ -568,13 +601,15 @@ class CurriculaCfg:
     non_foot_body = CurrTerm(
         func=hex_mdp.LinearAnnealRewardWeight,
         params={
-            "term_name": "non_foot_body", 
+            "term_name": "non_foot_body",
             "initial_weight": -30.0,
-            "target_weight": 0.0, 
+            "target_weight": 0.0,
             "start_step": 1500,
             "end_step": 2000,
         },
     )
+
+
 ##
 # Environment configuration
 ##
@@ -584,10 +619,13 @@ class CurriculaCfg:
 class HexapodEnvCfg(ManagerBasedRLEnvCfg):
     """PhantomX Mark IV hexapod — flat ground locomotion environment."""
 
+    # Single source for every CPG term's swing/stance split (tripod offsets {0, π} require 0.5).
+    duty_factor: float = 0.5
+
     # Scene
     scene: HexapodSceneCfg = HexapodSceneCfg(
         num_envs=4096,
-        env_spacing=10.0,   # 10 m between robots — room for 10 s episodes
+        env_spacing=10.0,  # 10 m between robots — room for 10 s episodes
     )
 
     # MDP
@@ -600,8 +638,8 @@ class HexapodEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self) -> None:
         """Post initialisation."""
-        self.decimation = 4                    # 200 Hz physics / 4 = 50 Hz policy
-        self.episode_length_s = 10.0           # 10 s × 50 Hz = 500 steps
+        self.decimation = 4  # 200 Hz physics / 4 = 50 Hz policy
+        self.episode_length_s = 10.0  # 10 s × 50 Hz = 500 steps
         self.sim.dt = 1.0 / 200.0
         self.sim.render_interval = self.decimation
         self.viewer.eye = (4.0, 4.0, 2.5)
@@ -624,10 +662,10 @@ class HexapodFlatResumeEnvCfg(HexapodEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        
+
         # Disable all curricula to prevent weight resets on --resume
         self.curriculum = None
-        
+
         # Manually apply the final target weights from the original curriculum
         self.rewards.foot_clearance.weight = 0.0
         self.rewards.joint_motion.weight = 0.0
@@ -637,3 +675,95 @@ class HexapodFlatResumeEnvCfg(HexapodEnvCfg):
         self.rewards.cpg_coxa_contact.weight = 1.0
         self.rewards.forward_velocity.weight = 1.7
         self.rewards.base_height.weight = 0.0
+
+
+##
+# S0a — actuator and observation reconditioning (paradigm spec §4.2)
+##
+
+
+@configclass
+class HexapodS0aSceneCfg(HexapodSceneCfg):
+    """AX-12A servos, rest pose femur +30° / tibia +30°, and a base IMU."""
+
+    robot: ArticulationCfg = PXMARK4_AX12A_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    imu = ImuCfg(prim_path="{ENV_REGEX_NS}/Robot/Geometry/tn__pxmark4base_link_VP")
+
+
+@configclass
+class S0aActionsCfg:
+    """Joint targets = rest pose + 0.5·a, clipped to the servo CW/CCW limits (= URDF joint limits, rad)."""
+
+    joint_pos = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=[".*"],
+        scale=0.5,
+        use_default_offset=True,
+        clip={".*_coxa": (-0.9599, 0.9599), ".*_femur": (-1.7104, 1.5708), ".*_tibia": (-0.7854, 2.1817)},
+    )
+
+
+@configclass
+class S0aObservationsCfg:
+    """Actor: o_p ⊕ v_in (114-D). Critic: the same ⊕ privileged 22-D. Noise is applied inside the env."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        o_p_v_in = ObsTerm(func=hex_mdp.s0a_policy_obs)
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        o_p_v_in = ObsTerm(func=hex_mdp.s0a_policy_obs)
+        privileged = ObsTerm(func=hex_mdp.s0a_privileged_obs)
+
+    policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
+
+
+@configclass
+class HexapodS0aEnvCfg(HexapodFlatResumeEnvCfg):
+    """S0a: π_base's final reward weights (curriculum off) under the AX-12A model and deployable observations."""
+
+    scene: HexapodS0aSceneCfg = HexapodS0aSceneCfg(num_envs=4096, env_spacing=10.0)
+    actions: S0aActionsCfg = S0aActionsCfg()
+    observations: S0aObservationsCfg = S0aObservationsCfg()
+
+    # Read pipeline (provisional, calibrate on the bench): p_drop = drop_p0 + drop_k·|τ|/τ_stall.
+    drop_p0: float = 0.005
+    drop_k: float = 0.068
+    imu_acc_std: float = 0.05  # m/s²
+    imu_gyro_std: float = 0.02  # rad/s
+    gravity_std: float = 0.02  # unit vector
+    # V_0 substitution ramp, env steps (16 per iteration): α 0 → 1 from the end of the 300-iteration critic
+    # burn-in to 50 % of a 3,000-iteration run.
+    v0_lr: float = 1e-3
+    v0_ramp_steps: tuple[int, int] = (300 * 16, 1500 * 16)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Camera mast 0.15 kg + payload U[0.1, 1.0] kg, per env (static envelope at +1.0 kg: femur 14 %,
+        # tibia 42 % of stall).
+        self.events.camera_mast_mass.params["mass_distribution_params"] = (0.25, 1.15)
+        # applied_torque is now the servo model's own torque; penalise the top 20 % of the 1.5 N·m stall.
+        self.rewards.joint_torque_excess.params["threshold"] = 1.2
+        # Explicit (effort) actuators need PhysX TGS to apply external forces in every solver iteration; with the
+        # default False the servo torques barely move the joints (phase2-progress §2.0.9).
+        self.sim.physics = PhysxCfg(enable_external_forces_every_iteration=True)
+        # Reward economics (phase2-progress §2.0.11): bounded positive toe-swing reward instead of the L1 penalty,
+        # and an alive bonus sized so that standing > falling and walking > standing. Weights set from
+        # scripts/tests/reward_economy.py measurements.
+        self.rewards.cpg_z_target.func = hex_mdp.cpg_z_target_kernel_reward
+        self.rewards.cpg_z_target.params["sigma"] = 0.02
+        self.rewards.cpg_z_target.weight = 5.0
+        self.rewards.alive.weight = 10.0
+        # stand_still at v = 0 costs 1.5 × alive, so standing (+0.029/step) stays below a falling-prone π_base gait
+        # (+0.074/step) and above falling (−0.1 once): walking > standing > falling.
+        self.rewards.stand_still.weight = -75.0
+
+
+@configclass
+class HexapodS0aEnvCfg_PLAY(HexapodS0aEnvCfg):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.scene.env_spacing = 2.5

@@ -23,6 +23,8 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
+from hexasim.actuators import AX12AActuatorCfg
+
 ##
 # Robot USDA path
 ##
@@ -85,7 +87,7 @@ PXMARK4_CFG = ArticulationCfg(
         # Select the "physx" physics variant which provides
         # PhysicsDriveAPI:angular drives on all revolute joints.
         variants={"Physics": "physx"},
-        activate_contact_sensors=True,   # required for ContactSensorCfg in scene
+        activate_contact_sensors=True,  # required for ContactSensorCfg in scene
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             retain_accelerations=True,
@@ -127,8 +129,8 @@ PXMARK4_CFG = ArticulationCfg(
             joint_names_expr=[_COXA_JOINTS_REGEX],
             effort_limit=3.0,
             velocity_limit=math.pi,
-            stiffness=20.0,   # position gain (Kp)
-            damping=0.5,      # velocity gain (Kd)
+            stiffness=20.0,  # position gain (Kp)
+            damping=0.5,  # velocity gain (Kd)
         ),
         # ------------------------------------------------------------------
         # Femur + tibia actuators — leg swing / extension about Y-axis
@@ -149,7 +151,7 @@ Key parameters
 - 18 revolute joints, all driven with :class:`ImplicitActuatorCfg`.
 - Effort limit : 3 Nm (from URDF).
 - Velocity limit: π rad/s (from URDF).
-- Default rest pose places coxa at 0°, femur at 30°, tibia at -60°.
+- Default rest pose places coxa at 0°, femur at +30°, tibia at -30°.
 
 To override actuator gains or spawn height in a specific environment,
 use :meth:`~isaaclab.utils.configclass.ConfigBase.replace`::
@@ -159,4 +161,18 @@ use :meth:`~isaaclab.utils.configclass.ConfigBase.replace`::
     MY_ROBOT_CFG = PXMARK4_CFG.replace(
         init_state=PXMARK4_CFG.init_state.replace(pos=(0.0, 0.0, 0.25))
     )
+"""
+
+PXMARK4_AX12A_CFG = PXMARK4_CFG.replace(
+    actuators={"ax12a": AX12AActuatorCfg(joint_names_expr=[".*"])},
+    init_state=PXMARK4_CFG.init_state.replace(
+        joint_pos={".*_coxa": 0.0, ".*_femur": math.radians(30.0), ".*_tibia": math.radians(30.0)},
+    ),
+)
+"""PhantomX Mark IV with the AX-12A servo model (v7 §5.1) on all 18 joints — S0 onward.
+
+Rest pose femur +30°, tibia +30° (was −30°): the static torque envelope
+(``scripts/tests/static_torque_envelope.py``, lever-arm torques from contact forces) puts tripod-stance femur
+torque at 12 % of the 1.5 N·m stall vs 134 % at the Phase 1 pose (spec §4.2 gate: ≤ 60 %).
+:data:`PXMARK4_CFG` keeps the Phase 1 pose and idealised implicit PD (π_base reference runs only).
 """

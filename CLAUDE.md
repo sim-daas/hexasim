@@ -86,8 +86,10 @@ code before relying on any line here.
 - Latest checkpoint: `logs/rsl_rl/hexapod_flat/2026-09-06_19-45-34/model_14998.pt`.
   Its logged `params/` record **4,096 envs × 16 steps, seed 42**. The paradigm
   spec (§1, §4.1, §8.1) calls the base run "8,192 × 16" — that is wrong for
-  this checkpoint; flag it to the user instead of copying the spec's number.
-  Mean v_x 0.209 m/s on flat is the reference operating point for the S0a gates.
+  this checkpoint. User decision (2026-09-21): S0/S1 run at 4,096 × 16 (compute limit).
+  Its "mean v_x 0.209 m/s" came from one 10 s run. The 256-episode reference
+  (`scripts/rsl_rl/eval_s0.py`, phase2-progress §2.0.2) is 0.159 m/s, 0 % falls on
+  the Phase 1 code, and 0.181 m/s, 9 % falls on the fixed Flat env (random reset phase).
 - S0 reconditioning (paradigm spec §4.2), per item:
   - **S0a** (flat): AX-12A actuator model with dropped reads + 18-bit mask;
     per-step frame → 111-D `o_p` = q(18) + q̇(18) + tracking error
@@ -106,21 +108,29 @@ code before relying on any line here.
     whether the warm start is kept at all.
 - TCN window is **W = 50** (v2 overrides v7's 25); pin the residual block in
   code and assert RF ≥ W at construction; sweep W ∈ {25, 50, 75} on S1.
-- Known code defects to fix before S0 (verified in the current code, v7 §2 /
-  v2 §0.4):
-  - Clock: `hexapod_env.py` step uses measured `v_x`, floor **0.2 Hz**;
-    `_reset_idx` restores identical phases (no jitter).
-  - `foot_z` uses the tibia-link origin + hard-coded `0.0892`
-    (`rewards.py:429`, `:559`, `hexapod_env.py:52`) — replace with the toe
-    point everywhere (see invariants).
-  - `cpg_coxa_velocity_reward` and `cpg_coxa_contact_reward` contradict each
-    other and use `abs(joint_vel)` — keep one, signed, clipped.
-    `cpg_stance_rigidity_penalty` excludes coxa; its `phases.repeat(1, 2)`
-    leg ordering is unverified.
-  - `duty_factor` is passed separately to each CPG term (all 0.5 today) — pin
-    it to one source or assert agreement at startup.
-  - `net_forces_w[:, :, 2]` is world-Z, not surface normal — wrong on slopes.
-  - Stale comments/docstrings ("63-dim obs", "duty factor 5/6", `[0, π/3)`).
+- Phase 2.0 (2026-09-21, `research/phase2-progress.md`) fixed the v7 §2 / v2 §0.4
+  code defects: toe point everywhere (`mdp.rewards.toe_pos_w`), clock floor 0.8 Hz
+  + per-env phase jitter, one signed/clipped coxa term, `duty_factor` single source
+  (`env.cfg.duty_factor`), leg/joint order asserted at env build, force target =
+  weight/3, friction combine multiply (ground μ 0.75 = π_base's effective training μ).
+  Coxa is deliberately **excluded** from `cpg_stance_rigidity` (it is the stance
+  stroke `cpg_coxa_contact` pays for). Still open: `net_forces_w[..., 2]` is world-Z,
+  not surface normal — must be projected before any sloped terrain (S0b).
+- `Hexapod-Flat-v0` keeps `PXMARK4_CFG` (implicit PD, Phase 1 rest pose) so π_base
+  stays reproducible. `Hexapod-S0a-v0` uses `PXMARK4_AX12A_CFG`: AX-12A servo model
+  (`hexasim/actuators/ax12a.py`, datasheet values, provisional) and rest pose femur
+  +30° / tibia +30°. The Phase 1 pose fails the §4.2 torque gate (femur 134 % of
+  stall in tripod stance). Isaac Lab's `applied_torque` for **implicit** drives
+  under-reads ~2× — use lever-arm torques (`scripts/tests/static_torque_envelope.py`).
+- **Explicit actuators need `PhysxCfg(enable_external_forces_every_iteration=True)`**
+  (phase2-progress §2.0.9): with Isaac Lab's default TGS setting, explicit joint
+  efforts barely act and a policy under them learns to stand. Explicit PD on these
+  light links also needs armature (AX-12A model: 0.003 kg·m²) to be numerically
+  stable at 5 ms. The USD `jointFriction` is not applied (sim friction reads 0).
+- Isaac Lab here returns `ProxyArray`s from `robot.data.*` / sensor data: use `.torch`.
+- The pre-commit `insert-license` hook is broken repo-wide (missing
+  `.github/LICENSE_HEADER.txt`). Never run `pre-commit run --all-files` blindly:
+  it reformats untracked-by-you files, including the specs. Use `--files`.
 
 ## Experimental paradigm rules (from the specs)
 
