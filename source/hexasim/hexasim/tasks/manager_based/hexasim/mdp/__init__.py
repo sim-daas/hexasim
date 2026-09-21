@@ -11,7 +11,9 @@ lazy_export()
 
 # Explicit re-exports so that `from . import mdp as hex_mdp` and
 # `hex_mdp.<func>` work without relying on lazy_export auto-discovery.
-from .observations import s0a_policy_obs, s0a_privileged_obs  # noqa: E402, F401
+from .commands import HexapodVelocityCommandCfg, pin_command  # noqa: E402, F401
+from .events import foot_materials  # noqa: E402, F401
+from .observations import s0a_policy_obs, s0a_privileged_obs, s0b_dr_obs, s0b_policy_obs  # noqa: E402, F401
 from .rewards import (  # noqa: E402, F401
     LinearAnnealRewardWeight,
     ang_vel_xy_penalty,
@@ -24,11 +26,19 @@ from .rewards import (  # noqa: E402, F401
     cpg_z_target_kernel_reward,
     cpg_z_target_l1_penalty,
     foot_clearance_reward,
+    foot_forces_nt,
     forward_velocity,
     joint_motion_reward,
     joint_pos_target_l2,
     joint_torque_threshold_penalty,
     lateral_velocity_penalty,
     non_foot_body_ground_penalty,
+    root_height_above_terrain_below,
+    stance_rigidity_contact_penalty,
     stand_still_penalty,
+    standing_contact_reward,
+    standing_joint_speed_penalty,
+    swing_clearance,
+    track_lin_vel_xy_l1,
 )
+from .terrain import S0B_TERRAIN_CFG, HeightMap, pin_terrain_level, terrain_levels_cmd  # noqa: E402, F401

@@ -11,12 +11,14 @@ Per physics step, per joint:
     e       = q_goal - quantise(q)                         10-bit output-shaft potentiometer
     dz      = margin·tick + backlash/2                     compliance margin + gear-play dead zone
     u       = sign(e)·(punch + (1-punch)·clip((|e|-dz)/(slope·tick), 0, 1))   if |e| > dz, else 0
-    τ       = clip(τ_stall·(u - q̇/ω_nl), ±τ_stall)       PWM duty on a DC motor with back-EMF
+    τ       = clip(τ_stall·(u - q̇/ω_nl), ±τ_stall) − τ_c·tanh(q̇/0.05)      DC motor with back-EMF, gear friction
 
 Back-EMF is the only damping: the servo firmware is P-only, there is no Kd to tune.
-All defaults are datasheet values. ponytail: provisional until the bench characterisation (v7 action
-item 14); every constant here is a calibration knob. Not modelled yet: thermal derating (lower
-``stall_torque`` instead), hysteretic backlash (approximated by the dead zone), joint friction.
+Stall torque, compliance slope, backlash, Coulomb friction τ_c and latency are per env, resampled at every
+reset from the ``*_range`` / ``*_choices`` fields (dynamics randomisation, v7 §5.6); the defaults are single
+datasheet values (S0a). ponytail: provisional until the bench characterisation (v7 action item 14); every
+constant here is a calibration knob. Not modelled yet: thermal derating (lower ``stall_torque`` instead),
+hysteretic backlash (approximated by the dead zone).
 """
 
 from __future__ import annotations
@@ -44,6 +46,11 @@ class AX12AActuator(ActuatorBase):
     def __init__(self, cfg: AX12AActuatorCfg, *args, **kwargs):
         super().__init__(cfg, *args, **kwargs)
         self._delay = DelayBuffer(cfg.max_delay, self._num_envs, device=self._device)
+        shape = (self._num_envs, 1)
+        self.stall = torch.full(shape, cfg.stall_torque, device=self._device)
+        self.slope = torch.full(shape, float(cfg.compliance_slope), device=self._device)
+        self.backlash = torch.full(shape, cfg.backlash, device=self._device)
+        self.coulomb = torch.zeros(shape, device=self._device)
         self.reset(slice(None))
 
     def reset(self, env_ids: Sequence[int] | slice):
@@ -52,15 +59,26 @@ class AX12AActuator(ActuatorBase):
         lag = torch.randint(self.cfg.min_delay, self.cfg.max_delay + 1, (n,), dtype=torch.int, device=self._device)
         self._delay.set_time_lag(lag, ids)
         self._delay.reset(ids)
+        c = self.cfg
+        idx = slice(None) if ids is None else ids
+        u = lambda r: torch.empty(n, 1, device=self._device).uniform_(*r)  # noqa: E731
+        self.stall[idx] = c.stall_torque * u(c.stall_scale_range)
+        slopes = torch.tensor(
+            c.compliance_slope_choices or (c.compliance_slope,), dtype=torch.float, device=self._device
+        )
+        self.slope[idx] = slopes[torch.randint(len(slopes), (n, 1), device=self._device)]
+        self.backlash[idx] = u(c.backlash_range or (c.backlash, c.backlash))
+        self.coulomb[idx] = u(c.coulomb_range)
 
     def compute(self, control_action, joint_pos: torch.Tensor, joint_vel: torch.Tensor):
         c = self.cfg
         q_goal = self._delay.compute(quantise(control_action.joint_positions))
         e = q_goal - quantise(joint_pos)
-        dz = c.compliance_margin * TICK + 0.5 * c.backlash
-        ramp = torch.clamp((e.abs() - dz) / (c.compliance_slope * TICK), 0.0, 1.0)
+        dz = c.compliance_margin * TICK + 0.5 * self.backlash
+        ramp = torch.clamp((e.abs() - dz) / (self.slope * TICK), 0.0, 1.0)
         u = torch.sign(e) * (c.punch + (1.0 - c.punch) * ramp) * (e.abs() > dz)
-        tau = torch.clamp(c.stall_torque * (u - joint_vel / c.no_load_speed), -c.stall_torque, c.stall_torque)
+        tau = torch.clamp(self.stall * (u - joint_vel / c.no_load_speed), -self.stall, self.stall)
+        tau = tau - self.coulomb * torch.tanh(joint_vel / 0.05)
         self.computed_effort = tau
         self.applied_effort = tau
         control_action.joint_efforts = tau
@@ -83,3 +101,8 @@ class AX12AActuatorCfg(ActuatorBaseCfg):
     backlash: float = math.radians(0.5)  # rad, total play
     min_delay: int = 1  # physics steps (5 ms): bus latency 4–12 ms
     max_delay: int = 2
+    # Per-env randomisation, resampled at reset. Defaults (None / degenerate) = the single values above (S0a).
+    stall_scale_range: tuple[float, float] = (1.0, 1.0)
+    compliance_slope_choices: tuple[int, ...] | None = None
+    backlash_range: tuple[float, float] | None = None
+    coulomb_range: tuple[float, float] = (0.0, 0.0)  # N·m

@@ -74,3 +74,23 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg_S0a",
     },
 )
+
+gym.register(
+    id="Hexapod-S0b-v0",
+    entry_point=f"{__name__}.hexapod_env:HexapodS0bEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.hexapod_env_cfg:HexapodS0bEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg_S0b",
+    },
+)
+
+gym.register(
+    id="Hexapod-S0b-Play-v0",
+    entry_point=f"{__name__}.hexapod_env:HexapodS0bEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.hexapod_env_cfg:HexapodS0bEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg_S0b",
+    },
+)

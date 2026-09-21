@@ -60,6 +60,7 @@ from isaaclab_physx.physics import PhysxCfg
 from isaaclab_physx.sim.spawners.materials import PhysxRigidBodyMaterialCfg
 
 from isaaclab.sensors import ContactSensorCfg, ImuCfg
+from isaaclab.terrains import TerrainImporterCfg
 
 ##
 # Scene definition
@@ -769,3 +770,174 @@ class HexapodS0aEnvCfg_PLAY(HexapodS0aEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 1
         self.scene.env_spacing = 2.5
+
+
+##
+# S0b — commands, clock, standing, terrain, dynamics randomisation (paradigm spec §4.2)
+##
+
+
+@configclass
+class HexapodS0bSceneCfg(HexapodS0aSceneCfg):
+    """Generated terrain (μ 1, restitution 1, multiply: the per-env contact physics sits on the feet) and servo DR.
+
+    ``replicate_physics=False``: each env's feet carry their own USD material (``mdp.events.foot_materials``).
+    Servo ranges are provisional until the bench (v7 §5.6; latency stays 1–2 physics steps = 5–10 ms).
+    """
+
+    ground = None
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="generator",
+        terrain_generator=hex_mdp.S0B_TERRAIN_CFG,
+        max_init_terrain_level=2,
+        physics_material=PhysxRigidBodyMaterialCfg(
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=1.0,
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+        ),
+    )
+    robot: ArticulationCfg = PXMARK4_AX12A_CFG.replace(
+        prim_path="{ENV_REGEX_NS}/Robot",
+        actuators={
+            "ax12a": PXMARK4_AX12A_CFG.actuators["ax12a"].replace(
+                stall_scale_range=(0.9, 1.1),
+                compliance_slope_choices=(16, 32, 64),
+                backlash_range=(math.radians(0.3), math.radians(1.0)),
+                coulomb_range=(0.0, 0.05),
+            )
+        },
+    )
+    replicate_physics: bool = False
+
+
+@configclass
+class S0bObservationsCfg:
+    """Actor: o_p ⊕ v_in ⊕ twist_cmd (117-D). Critic: the same ⊕ privileged 22-D ⊕ DR parameters 12-D."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        o_p_v_in_cmd = ObsTerm(func=hex_mdp.s0b_policy_obs)
+
+    @configclass
+    class CriticCfg(ObsGroup):
+        o_p_v_in_cmd = ObsTerm(func=hex_mdp.s0b_policy_obs)
+        privileged = ObsTerm(func=hex_mdp.s0a_privileged_obs)
+        dr = ObsTerm(func=hex_mdp.s0b_dr_obs)
+
+    policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
+
+
+@configclass
+class S0bCommandsCfg:
+    """twist_cmd (spec §1): resampled every 5 s; 10 % standing, 30 % with small v_y / yaw rate."""
+
+    base_velocity = hex_mdp.HexapodVelocityCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(5.0, 5.0),
+        rel_standing_envs=0.1,
+        rel_side_envs=0.3,
+        heading_command=False,
+        debug_vis=False,
+        ranges=hex_mdp.HexapodVelocityCommandCfg.Ranges(
+            lin_vel_x=(0.05, 0.20), lin_vel_y=(-0.05, 0.05), ang_vel_z=(-0.25, 0.25)
+        ),
+    )
+
+
+@configclass
+class S0bRewardsCfg(RewardsCfg):
+    """S0a's terms plus command tracking, the phase-free floors (spec §5) and the standing-mode term.
+
+    Economics (phase2-progress §2.1): tracking is the primary signal; the floors are small next to it.
+    """
+
+    track_lin_vel = RewTerm(
+        func=mdp.track_lin_vel_xy_exp, weight=10.0, params={"std": 0.05, "command_name": "base_velocity"}
+    )
+    track_lin_vel_l1 = RewTerm(func=hex_mdp.track_lin_vel_xy_l1, weight=-10.0, params={"command_name": "base_velocity"})
+    track_yaw = RewTerm(func=mdp.track_ang_vel_z_exp, weight=3.0, params={"std": 0.25, "command_name": "base_velocity"})
+    swing_clearance = RewTerm(
+        func=hex_mdp.swing_clearance,
+        weight=5.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces"), "height": 0.03},
+    )
+    stance_rigidity_contact = RewTerm(
+        func=hex_mdp.stance_rigidity_contact_penalty,
+        weight=-0.5,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "joint_scale": 0.1,
+        },
+    )
+    # Standing mode (phase2-progress §2.1.5): ×5 so a lifted leg costs 0.83/step; the joint-speed term covers what
+    # the contact-conditioned stance floor cannot see (a leg held in the air).
+    standing_contact = RewTerm(
+        func=hex_mdp.standing_contact_reward, weight=5.0, params={"sensor_cfg": SceneEntityCfg("contact_forces")}
+    )
+    standing_joint_speed = RewTerm(func=hex_mdp.standing_joint_speed_penalty, weight=-0.2)
+
+
+@configclass
+class S0bTerminationsCfg:
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    base_contact = DoneTerm(func=hex_mdp.root_height_above_terrain_below, params={"minimum_height": 0.05})
+
+
+@configclass
+class S0bCurriculumCfg:
+    terrain_levels = CurrTerm(func=hex_mdp.terrain_levels_cmd)
+
+
+@configclass
+class HexapodS0bEnvCfg(HexapodS0aEnvCfg):
+    """S0b: S0a + twist_cmd, command clock, standing mode, terrain curriculum, full dynamics randomisation."""
+
+    scene: HexapodS0bSceneCfg = HexapodS0bSceneCfg(num_envs=4096, env_spacing=4.0)
+    observations: S0bObservationsCfg = S0bObservationsCfg()
+    commands: S0bCommandsCfg = S0bCommandsCfg()
+    rewards: S0bRewardsCfg = S0bRewardsCfg()
+    terminations: S0bTerminationsCfg = S0bTerminationsCfg()
+
+    # Per-episode IMU bias, provisional (bench).
+    imu_acc_bias_std: float = 0.05  # m/s²
+    imu_gyro_bias_std: float = 0.01  # rad/s
+    # V_0 was ramped in during S0a; S0b runs on it alone.
+    v0_ramp_steps: tuple[int, int] = (0, 1)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.curriculum = S0bCurriculumCfg()  # the S0a parent clears it
+        r = self.rewards
+        # Replaced by command tracking: forward speed, lateral drift and the 0.1 m/s stand-still threshold (which
+        # would punish the 0.05 m/s commands). Flat-only / zero-weight Phase 1 terms go too.
+        r.forward_velocity = r.lateral_velocity = r.stand_still = None
+        r.base_height = r.foot_clearance = r.joint_motion = None
+        ev = self.events
+        ev.robot_material = None  # contact physics is per-env on the feet (prestartup materials)
+        ev.foot_material = EventTerm(
+            func=hex_mdp.foot_materials,
+            mode="prestartup",
+            params={
+                "num_buckets": 64,
+                "static_friction_range": (0.3, 1.1),  # provisional: must contain every bench-measured μ
+                "dynamic_ratio_range": (0.8, 1.0),
+                "restitution_range": (0.0, 0.1),
+                "rigid_fraction": 0.5,
+                "stiffness_range": (2e3, 5e4),  # N/m, provisional until the foam is characterised
+                "damping_range": (10.0, 200.0),  # N·s/m
+            },
+        )
+        ev.camera_mast_com.params["com_range"] = {"x": (-0.001, 0.019), "y": (-0.01, 0.01), "z": (0.009, 0.009)}
+        ev.reset_robot_base.params["pose_range"]["z"] = (0.0, 0.02)  # clears 2 cm bumps at the spawn point
+
+
+@configclass
+class HexapodS0bEnvCfg_PLAY(HexapodS0bEnvCfg):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 1

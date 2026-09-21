@@ -10,8 +10,9 @@
 2. Normaliser fold: swapping in re-estimated statistics leaves π(raw obs) unchanged.
 3. Value-loss backward leaves every actor-side grad None.
 4. A frozen-actor S0PPO update changes the critic and not the actor; std floor holds.
+5. π_S0a → S0b widening (twist_cmd appended): widened actor == π_S0a over 10,000 random observations, < 1e-6.
 
-Usage: python scripts/tests/test_s0_ppo.py [--ckpt logs/rsl_rl/hexapod_flat/2026-09-06_19-45-34/model_14998.pt]
+Usage: python scripts/tests/test_s0_ppo.py [--ckpt <π_base.pt>] [--s0a_ckpt <π_S0a.pt>]
 """
 
 import argparse
@@ -19,13 +20,24 @@ import copy
 import math
 
 import torch
-from hexasim.rl.s0_ppo import BASE_TO_S0A, S0A_DIM, S0PPO, fold_normalizer, warmstart_actor_state
+from hexasim.rl.s0_ppo import (
+    BASE_TO_S0A,
+    S0A_DIM,
+    S0B_DIM,
+    S0PPO,
+    fold_normalizer,
+    warmstart_actor_state,
+    widen_actor_state,
+)
 from rsl_rl.models import MLPModel
 from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--ckpt", default="logs/rsl_rl/hexapod_flat/2026-09-06_19-45-34/model_14998.pt")
+parser.add_argument(
+    "--s0a_ckpt", default="logs/rsl_rl/hexapod_s0a/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/model_4498.pt"
+)
 args = parser.parse_args()
 torch.manual_seed(0)
 N = 10_000
@@ -99,4 +111,18 @@ alg.compute_returns(o)
 alg.update()
 assert all(torch.equal(v, actor_before[k]) for k, v in a.state_dict().items() if "normalizer" not in k), "actor moved"
 assert any(not torch.equal(v, critic_before[k]) for k, v in c.state_dict().items()), "critic did not train"
-print(f"S0 checks OK (float64): warm-start max|Δ| = {d1:.2e}, fold max|Δ| = {d2:.2e}")
+
+# 5. S0a → S0b widening
+s0a_state = torch.load(args.s0a_ckpt, map_location="cpu", weights_only=False)["actor_state_dict"]
+a_old, a_new = actor(S0A_DIM), actor(S0B_DIM)
+a_old.load_state_dict(s0a_state)
+a_new.load_state_dict(widen_actor_state(s0a_state, S0B_DIM, 0.05))
+a_old.double()
+a_new.double()
+x = (s0a_state["obs_normalizer._mean"] + 3 * s0a_state["obs_normalizer._std"] * torch.randn(N, S0A_DIM)).double()
+x_cmd = torch.cat([x, 5 * torch.randn(N, S0B_DIM - S0A_DIM, dtype=torch.float64)], dim=1)
+with torch.no_grad():
+    d5 = (a_old(TensorDict({"policy": x}, [N])) - a_new(TensorDict({"policy": x_cmd}, [N]))).abs().max().item()
+assert d5 < 1e-6, d5
+assert torch.equal(a_new.distribution.std_param, a_old.distribution.std_param.clamp(min=0.05))
+print(f"S0 checks OK (float64): warm-start max|Δ| = {d1:.2e}, fold max|Δ| = {d2:.2e}, S0a→S0b max|Δ| = {d5:.2e}")

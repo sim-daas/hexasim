@@ -354,8 +354,8 @@ def non_foot_body_ground_penalty(
     """
     asset: Articulation = env.scene[asset_cfg.name]
     # body_pos_w: (N, num_bodies, 3) — same API used by foot_clearance_reward
-    body_pos_w = asset.data.body_pos_w[:, asset_cfg.body_ids, :]  # (N, B, 3)
-    body_z = body_pos_w[:, :, 2]  # (N, B)
+    body_pos_w = asset.data.body_pos_w.torch[:, asset_cfg.body_ids, :]  # (N, B, 3)
+    body_z = body_pos_w[:, :, 2] - env.terrain_z(body_pos_w[..., :2])  # height above terrain (N, B)
     return torch.clamp(minimum_height - body_z, min=0.0).sum(dim=-1)  # (N,)
 
 
@@ -397,6 +397,19 @@ def _swing_end(env: ManagerBasedRLEnv) -> float:
     return (1.0 - env.cfg.duty_factor) * 2.0 * math.pi
 
 
+def foot_forces_nt(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-foot (N, 6) force along the terrain normal at the toe, and the tangential magnitude.
+
+    Sensor bodies share the tibia order (asserted in ``HexapodEnv.load_managers``); the normal is the height map's
+    at the toe xy — the contact point on a tibia whose toe is planted.
+    """
+    f = env.scene[sensor_cfg.name].data.net_forces_w.torch
+    toe = toe_pos_w(env.scene["robot"], env._tibia_body_ids)
+    n = env.terrain_normal(toe[..., :2])
+    fn = (f * n).sum(dim=-1)
+    return fn, torch.norm(f - fn.unsqueeze(-1) * n, dim=-1)
+
+
 # ---------------------------------------------------------------------------
 # CPG terms
 # ---------------------------------------------------------------------------
@@ -424,7 +437,7 @@ def cpg_z_target_l1_penalty(
     target_z = step_height * torch.sin(phases / swing_end * math.pi) * is_swing
     toe_z = toe_pos_w(robot, asset_cfg.body_ids)[..., 2]
     error = torch.abs(toe_z - (target_z + env.cpg_foot_baseline)) / step_height
-    return (error * is_swing).sum(dim=1)
+    return (error * is_swing).sum(dim=1) * env.cpg_active
 
 
 def cpg_z_target_kernel_reward(
@@ -447,22 +460,21 @@ def cpg_z_target_kernel_reward(
     target_z = step_height * torch.sin(phases / swing_end * math.pi) * is_swing
     toe_z = toe_pos_w(robot, asset_cfg.body_ids)[..., 2]
     k = torch.exp(-torch.square((toe_z - (target_z + env.cpg_foot_baseline)) / sigma)) * is_swing
-    return k.sum(dim=1) / is_swing.sum(dim=1).clamp(min=1)
+    return k.sum(dim=1) / is_swing.sum(dim=1).clamp(min=1) * env.cpg_active
 
 
 def cpg_force_target_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """L1 error between vertical foot force and a stance half-sine peaking at weight/3 (tripod support).
+    """L1 error between the surface-normal foot force and a stance half-sine peaking at weight/3 (tripod support).
 
     L1, not MSE: PhysX produces 20-40 N single-step contact spikes (Phase 10 §7).
-    ponytail: world-Z == surface normal on flat ground only; project onto the terrain normal at S0b.
     """
-    force_z = env.scene[sensor_cfg.name].data.net_forces_w.torch[:, :, 2]
+    force_z = foot_forces_nt(env, sensor_cfg)[0]
     phases = env.cpg_phase
     swing_end = _swing_end(env)
     is_stance = phases >= swing_end
     stance_phase = (phases - swing_end) / (2.0 * math.pi - swing_end) * math.pi
     target = env.tripod_leg_load * torch.sin(stance_phase) * is_stance
-    return torch.abs(force_z - target).mean(dim=1)
+    return torch.abs(force_z - target).mean(dim=1) * env.cpg_active
 
 
 def cpg_coxa_contact_reward(
@@ -482,7 +494,7 @@ def cpg_coxa_contact_reward(
     planted = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
     is_stance = env.cpg_phase >= _swing_end(env)
     rate = torch.clamp(sign * joint_vel, -max_rate, max_rate)
-    return (rate * (is_stance & planted)).sum(dim=1)
+    return (rate * (is_stance & planted)).sum(dim=1) * env.cpg_active
 
 
 def cpg_stance_rigidity_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -490,7 +502,78 @@ def cpg_stance_rigidity_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCf
     robot: Articulation = env.scene[asset_cfg.name]
     joint_vel = robot.data.joint_vel.torch[:, asset_cfg.joint_ids]
     is_stance = (env.cpg_phase >= _swing_end(env))[:, joint_leg_index(robot, asset_cfg.joint_ids)]
-    return (torch.abs(joint_vel) * is_stance).sum(dim=1)
+    return (torch.abs(joint_vel) * is_stance).sum(dim=1) * env.cpg_active
+
+
+# ---------------------------------------------------------------------------
+# S0b: command tracking, phase-free floors (paradigm spec §5), standing, terrain-aware termination
+# ---------------------------------------------------------------------------
+
+
+def track_lin_vel_xy_l1(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """|v_xy − v_cmd,xy|₁ (body frame). Dense slope far from the command, where the exp kernel is flat."""
+    v = env.scene["robot"].data.root_lin_vel_b.torch[:, :2]
+    return torch.abs(v - env.command_manager.get_command(command_name)[:, :2]).sum(dim=1)
+
+
+class swing_clearance(ManagerTermBase):
+    """Phase-free swing floor: per foot, peak toe height above the terrain over an airborne interval, scored once at
+    touchdown as min(peak/h_c, 1). Contact from the sim sensor (reward only, never an input). Standing envs earn 0.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.peak = torch.zeros(env.num_envs, 6, device=env.device)
+
+    def reset(self, env_ids=None):
+        self.peak[slice(None) if env_ids is None else env_ids] = 0.0
+
+    def __call__(self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, height: float) -> torch.Tensor:
+        toe = toe_pos_w(env.scene["robot"], env._tibia_body_ids)
+        h = toe[..., 2] - env.terrain_z(toe[..., :2])
+        contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
+        score = (torch.clamp(self.peak / height, max=1.0) * (contact & (self.peak > 0.0))).sum(dim=1)
+        self.peak = torch.where(contact, torch.zeros_like(self.peak), torch.maximum(self.peak, h))
+        return score * env.cpg_active
+
+
+def stance_rigidity_contact_penalty(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, sensor_cfg: SceneEntityCfg, joint_scale: float
+) -> torch.Tensor:
+    """Phase-free stance floor (spec §5): on legs in measured contact, toe tangential speed (m/s) plus
+    ``joint_scale`` × Σ|q̇| (rad/s) of that leg's joints, coxa included. L1. ``asset_cfg`` selects the joints.
+    """
+    robot: Articulation = env.scene[asset_cfg.name]
+    ids = env._tibia_body_ids
+    contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
+    quat = robot.data.body_quat_w.torch[:, ids]
+    arm = quat_apply(quat, torch.tensor(TOE_OFFSET_TIBIA, device=env.device).expand(*quat.shape[:-1], 3))
+    v_toe = robot.data.body_link_lin_vel_w.torch[:, ids] + torch.cross(
+        robot.data.body_link_ang_vel_w.torch[:, ids], arm, dim=-1
+    )
+    toe = robot.data.body_pos_w.torch[:, ids] + arm
+    n = env.terrain_normal(toe[..., :2])
+    v_t = torch.norm(v_toe - (v_toe * n).sum(-1, keepdim=True) * n, dim=-1)
+    qd = torch.abs(robot.data.joint_vel.torch[:, asset_cfg.joint_ids])
+    leg_contact = contact[:, joint_leg_index(robot, asset_cfg.joint_ids)]
+    return (v_t * contact).sum(dim=1) + joint_scale * (qd * leg_contact).sum(dim=1)
+
+
+def standing_contact_reward(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Standing mode only: fraction of feet in contact."""
+    contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
+    return contact.float().mean(dim=1) * ~env.cpg_active
+
+
+def standing_joint_speed_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Standing mode only: Σ|q̇| over all joints (rad/s) — the stance floor misses legs held in the air."""
+    return env.scene["robot"].data.joint_vel.torch.abs().sum(dim=1) * ~env.cpg_active
+
+
+def root_height_above_terrain_below(env: ManagerBasedRLEnv, minimum_height: float) -> torch.Tensor:
+    """Termination: root height above the terrain under it below ``minimum_height``."""
+    root = env.scene["robot"].data.root_pos_w.torch
+    return root[:, 2] - env.terrain_z(root[:, :2]) < minimum_height
 
 
 class LinearAnnealRewardWeight(ManagerTermBase):

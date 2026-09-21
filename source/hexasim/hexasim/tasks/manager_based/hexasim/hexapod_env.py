@@ -13,6 +13,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 
 from .mdp.proprio import ProprioReader
 from .mdp.rewards import LEG_NAMES, toe_pos_w
+from .mdp.terrain import HeightMap
 
 
 class HexapodEnv(ManagerBasedRLEnv):
@@ -42,6 +43,8 @@ class HexapodEnv(ManagerBasedRLEnv):
         self.cpg_foot_baseline = torch.zeros(self.num_envs, 6, device=self.device)
         # Velocity the clock (and, in S0a, the actor) sees; ground truth here.
         self.v_in = torch.zeros(self.num_envs, 3, device=self.device)
+        # Envs whose clock runs and whose CPG terms count; S0b clears it for standing (zero-command) envs.
+        self.cpg_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         super().load_managers()
         # Per-env, per-leg peak load in tripod stance: total weight / 3, (N, 1). Read after the startup
         # events added mast and payload, which differ per env.
@@ -50,11 +53,22 @@ class HexapodEnv(ManagerBasedRLEnv):
     def _velocity_input(self) -> torch.Tensor:
         return self.scene["robot"].data.root_lin_vel_b.torch
 
-    def step(self, action: torch.Tensor):
+    def _clock_frequency(self) -> torch.Tensor:
         # f = v_x / 0.20 m stride, clamped [0.8, 2.5] Hz (v7 §2.2 stall floor).
+        return torch.clamp(self.v_in[:, 0] / 0.20, min=0.8, max=2.5)
+
+    def terrain_z(self, xy: torch.Tensor) -> torch.Tensor:
+        """Terrain height at world xy (..., 2); flat ground plane at z = 0 here."""
+        return torch.zeros(xy.shape[:-1], device=xy.device)
+
+    def terrain_normal(self, xy: torch.Tensor) -> torch.Tensor:
+        """Terrain unit normal at world xy (..., 2) → (..., 3); world z here."""
+        return torch.tensor([0.0, 0.0, 1.0], device=xy.device).expand(*xy.shape[:-1], 3)
+
+    def step(self, action: torch.Tensor):
         with torch.no_grad():
             self.v_in = self._velocity_input()
-            f = torch.clamp(self.v_in[:, 0] / 0.20, min=0.8, max=2.5)
+            f = self._clock_frequency()
         self.cpg_phase = (self.cpg_phase + 2.0 * math.pi * f.unsqueeze(1) * self.step_dt) % (2.0 * math.pi)
 
         ret = super().step(action)
@@ -72,7 +86,8 @@ class HexapodEnv(ManagerBasedRLEnv):
         # Per-env global phase jitter keeps tripod structure but breaks batch-wide phase lock (v7 §2.3).
         jitter = torch.rand(len(env_ids), 1, device=self.device) * 2.0 * math.pi
         self.cpg_phase[env_ids] = (self._cpg_base_offsets + jitter) % (2.0 * math.pi)
-        self.cpg_foot_baseline[env_ids] = 0.0
+        root_xy = self.scene["robot"].data.root_pos_w.torch[env_ids, :2]
+        self.cpg_foot_baseline[env_ids] = self.terrain_z(root_xy).unsqueeze(1)
 
 
 class HexapodS0aEnv(HexapodEnv):
@@ -106,6 +121,7 @@ class HexapodS0aEnv(HexapodEnv):
         self.v0_train = True
         self.v0_loss = torch.zeros((), device=self.device)
         self.v0_alpha = 0.0
+        self.imu_bias = torch.zeros(self.num_envs, 6, device=self.device)  # accel (3), gyro (3); S0b samples it
         super().load_managers()
 
     def _velocity_input(self) -> torch.Tensor:
@@ -120,7 +136,7 @@ class HexapodS0aEnv(HexapodEnv):
         q_true = robot.data.joint_pos.torch
         q_cmd = self.action_manager.get_term("joint_pos").processed_actions
         servo = robot.actuators["ax12a"]
-        load = servo.applied_effort / servo.cfg.stall_torque
+        load = servo.applied_effort / servo.stall
         valid = torch.rand_like(q_true) >= self.proprio.drop_probability(load)
         if self._fresh.any():
             self.proprio.reset(self._fresh, q_true[self._fresh])
@@ -134,8 +150,8 @@ class HexapodS0aEnv(HexapodEnv):
                 p.qd,
                 q_cmd - p.q,
                 self.action_manager.action,
-                noise(imu.lin_acc_b.torch, c.imu_acc_std),
-                noise(imu.ang_vel_b.torch, c.imu_gyro_std),
+                noise(imu.lin_acc_b.torch + self.imu_bias[:, :3], c.imu_acc_std),
+                noise(imu.ang_vel_b.torch + self.imu_bias[:, 3:], c.imu_gyro_std),
                 noise(robot.data.projected_gravity_b.torch, c.gravity_std),
                 torch.stack((torch.sin(self.cpg_phase), torch.cos(self.cpg_phase)), dim=-1).view(self.num_envs, 12),
                 p.mask,
@@ -169,3 +185,45 @@ class HexapodS0aEnv(HexapodEnv):
     def _reset_idx(self, env_ids: Sequence[int]):
         super()._reset_idx(env_ids)
         self._fresh[env_ids] = True
+
+
+class HexapodS0bEnv(HexapodS0aEnv):
+    """S0b env (paradigm spec §4.2): twist_cmd, command-referenced clock, standing mode, terrain, full DR.
+
+    Clock f_ref = clamp(v_cmd,x / 0.20, 0.8, 2.5) Hz from the command (replaces S0a's V_0-driven clock); standing
+    envs (zero command) freeze the clock and drop every CPG term (``cpg_active``). Terrain height and normal come
+    from a height map raycast once from the terrain mesh. ``foot_material`` (N, 5) is set by the prestartup
+    material event; the IMU bias is resampled per episode.
+    """
+
+    def load_managers(self):
+        self.heightmap = HeightMap(self.scene.terrain.cfg.prim_path + "/terrain/mesh", self.device)
+        self.spawn_xy = torch.zeros(self.num_envs, 2, device=self.device)
+        self.cmd_dist = torch.zeros(self.num_envs, device=self.device)  # commanded path length this episode
+        super().load_managers()
+        self.cmd_term = self.command_manager.get_term("base_velocity")
+
+    def terrain_z(self, xy: torch.Tensor) -> torch.Tensor:
+        return self.heightmap.height(xy)
+
+    def terrain_normal(self, xy: torch.Tensor) -> torch.Tensor:
+        return self.heightmap.normal(xy)
+
+    def _clock_frequency(self) -> torch.Tensor:
+        cmd = self.cmd_term.command
+        return torch.clamp(cmd[:, 0] / 0.20, min=0.8, max=2.5) * self.cpg_active
+
+    def step(self, action: torch.Tensor):
+        self.cpg_active = ~self.cmd_term.is_standing_env
+        self.cmd_dist += torch.norm(self.cmd_term.command[:, :2], dim=1) * self.step_dt
+        return super().step(action)
+
+    def _reset_idx(self, env_ids: Sequence[int]):
+        super()._reset_idx(env_ids)  # curriculum reads spawn_xy / cmd_dist before they are reset here
+        self.spawn_xy[env_ids] = self.scene["robot"].data.root_pos_w.torch[env_ids, :2]
+        self.cmd_dist[env_ids] = 0.0
+        c = self.cfg
+        n = len(env_ids)
+        self.imu_bias[env_ids] = torch.randn(n, 6, device=self.device) * torch.tensor(
+            [c.imu_acc_bias_std] * 3 + [c.imu_gyro_bias_std] * 3, device=self.device
+        )

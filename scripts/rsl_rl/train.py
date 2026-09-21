@@ -87,7 +87,7 @@ parser.add_argument(
     "--warmstart",
     type=str,
     default=None,
-    help="π_base checkpoint to widen into the S0a actor (s0_ppo.warmstart_actor_state). Critic starts fresh.",
+    help="π_base (→ S0a) or π_S0a (→ S0b) checkpoint to widen into the actor (hexasim.rl.s0_ppo). Critic starts fresh.",
 )
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
@@ -266,21 +266,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             runner.load(resume_path)
         elif args_cli.warmstart:
             from hexasim.assets.robot import PXMARK4_CFG
-            from hexasim.rl.s0_ppo import warmstart_actor_state
+            from hexasim.rl.s0_ppo import warmstart_actor_state, widen_actor_state
 
             print(f"[INFO]: Warm-starting the actor from: {args_cli.warmstart}")
-            base = torch.load(args_cli.warmstart, map_location="cpu", weights_only=False)["actor_state_dict"]
-            # π_base was trained on PXMARK4_CFG's rest pose; fold the shift to this task's rest pose.
-            robot = env.unwrapped.scene["robot"]
-            old_rest = torch.tensor(
-                [
-                    next(v for k, v in PXMARK4_CFG.init_state.joint_pos.items() if n.endswith(k[2:]))
-                    for n in robot.joint_names
-                ]
-            )
-            rest_delta = robot.data.default_joint_pos.torch[0].cpu() - old_rest
-            print(f"[INFO]: rest-pose delta folded into the warm start (rad): {rest_delta.tolist()}")
-            state = warmstart_actor_state(base, agent_cfg.algorithm.std_floor, rest_delta)
+            ck = torch.load(args_cli.warmstart, map_location="cpu", weights_only=False)
+            base = ck["actor_state_dict"]
+            if "v0_state_dict" in ck:
+                # π_S0a → S0b: same rest pose; append the new trailing input blocks and carry V_0.
+                obs_dim = env.unwrapped.observation_manager.group_obs_dim["policy"][0]
+                state = widen_actor_state(base, obs_dim, agent_cfg.algorithm.std_floor)
+                env.unwrapped.v0.load_state_dict(ck["v0_state_dict"])
+                env.unwrapped.v0_opt.load_state_dict(ck["v0_optimizer_state_dict"])
+                print(f"[INFO]: widened {base['mlp.0.weight'].shape[1]} → {obs_dim} inputs; V_0 carried")
+            else:
+                # π_base was trained on PXMARK4_CFG's rest pose; fold the shift to this task's rest pose.
+                robot = env.unwrapped.scene["robot"]
+                old_rest = torch.tensor(
+                    [
+                        next(v for k, v in PXMARK4_CFG.init_state.joint_pos.items() if n.endswith(k[2:]))
+                        for n in robot.joint_names
+                    ]
+                )
+                rest_delta = robot.data.default_joint_pos.torch[0].cpu() - old_rest
+                print(f"[INFO]: rest-pose delta folded into the warm start (rad): {rest_delta.tolist()}")
+                state = warmstart_actor_state(base, agent_cfg.algorithm.std_floor, rest_delta)
             runner.alg.actor.load_state_dict({k: v.to(agent_cfg.device) for k, v in state.items()})
 
         # dump the configuration into log-directory

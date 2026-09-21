@@ -132,6 +132,13 @@ code before relying on any line here.
   3.8 cm, V_0 only. S0a reward economics differ from Flat (bounded toe-swing kernel
   σ 1 cm ×5, alive ×10, stand_still −75): check any reward change with
   `scripts/tests/reward_economy.py` (walk > stand > fall) before training.
+- **S0b (in progress, research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
+  clock, standing mode at zero command (`env.cpg_active`), terrain curriculum (`mdp/terrain.py`, height map gives
+  `env.terrain_z` / `terrain_normal`; never use absolute z), full DR incl. per-env foot material (bound on the tibia
+  rigid body — the colliders are instance proxies). Never import `pxr` or Isaac Lab command/marker classes at
+  module level in `mdp/` (train.py loads the cfg before Kit starts → crash). Latest:
+  `logs/rsl_rl/hexapod_s0b/2026-09-21_21-36-27_s0b_seed42_r2_from_r1/model_4998.pt` — not yet π_S0 (0.10 m/s stride
+  +16 %, standing load sharing). Gates: `scripts/rsl_rl/eval_s0b_gates.sh`.
 - Resuming: use `--resume --load_run … --checkpoint …`; a Hydra `agent.resume=True`
   is silently overwritten by `cli_args`. Pin `env.v0_ramp_steps=[0,1]` when resuming S0a
   (the ramp is keyed to the per-process step counter).

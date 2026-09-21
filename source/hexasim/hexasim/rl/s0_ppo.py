@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""S0 reconditioning PPO (paradigm spec §4.2, §4.3, §8.1) and the π_base → S0a warm start.
+"""S0 reconditioning PPO (paradigm spec §4.2, §4.3, §8.1) and the π_base → S0a → S0b warm starts.
 
 On top of rsl_rl's PPO (separate actor and critic networks, each with its own normaliser):
 
@@ -65,6 +65,24 @@ def warmstart_actor_state(
     new["obs_normalizer._var"] = var
     new["obs_normalizer._std"] = var.sqrt()
     new["distribution.std_param"] = base_actor["distribution.std_param"].clamp(min=std_floor)
+    return new
+
+
+S0B_DIM = 117  # S0a layout ⊕ twist_cmd (3)
+
+
+def widen_actor_state(actor: dict, new_dim: int, std_floor: float) -> dict:
+    """Append new trailing inputs to an actor state dict, function-preserving (spec §4.3): zero first-layer columns,
+    identity normaliser statistics for the new dims (re-estimated in the burn-in), std carried and floored."""
+    new = copy.deepcopy(actor)
+    w = actor["mlp.0.weight"]
+    extra = new_dim - w.shape[1]
+    assert extra > 0, (w.shape, new_dim)
+    new["mlp.0.weight"] = torch.cat([w, w.new_zeros(w.shape[0], extra)], dim=1)
+    for key, fill in (("_mean", 0.0), ("_var", 1.0), ("_std", 1.0)):
+        k = f"obs_normalizer.{key}"
+        new[k] = torch.cat([actor[k], torch.full((1, extra), fill, dtype=actor[k].dtype)], dim=1)
+    new["distribution.std_param"] = actor["distribution.std_param"].clamp(min=std_floor)
     return new
 
 

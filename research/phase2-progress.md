@@ -549,3 +549,203 @@ reported from S1 onward, conditional on π_S0 — state this in the paper.
   from-scratch control arm, S0b gates incl. tracking at the hardware drop rate.
 * Tooling: the pre-commit `insert-license` hook needs `.github/LICENSE_HEADER.txt`; `play_debug.py:229` SIM115
   (pre-existing).
+
+---
+
+## Phase 2.1: S0b — commands, clock, standing, terrain, dynamics randomisation (started 2026-09-21)
+
+Scope: paradigm spec §4.2 S0b on top of π_S0a. Output: π_S0 (warm start + KL anchor for every arm).
+
+Decisions taken with the user before implementation:
+
+| Topic | Decision | Spec deviation? |
+| --- | --- | --- |
+| Terrain | Mild mix, 10 levels: flat 15 %, rough ±0 → 1.5 cm, pyramid slopes up/down 0 → 10°, bumps 0 → 2 cm. Generator laid out for 15 levels (`difficulty_range = (0, 10/15)`), so +5 harder levels (stairs, rougher, steeper) later is a config change with levels 0–9 unchanged in distribution | No (spec: "easy-to-medium") |
+| Dynamics randomisation | Full v7 §5.6 set brought into S0b, provisional ranges until the bench | Timing not fixed by the spec |
+| Zero command | **Standing mode**: clock frozen (f = 0), every CPG term masked, stance floor on all legs + all-feet-contact bonus, tracking asks v = 0 | Spec silent (D13) |
+| Friction / compliance | Per-env μ + contact compliance (per-patch materials are the S2/S3 experiment) | See D14 |
+| Command resampling | Every 5 s (two segments per episode), same marginals (10 % zero, 30 % with v_y/yaw) | Spec says "episodes" (D15) |
+| v_y / yaw ranges | ±0.05 m/s, ±0.25 rad/s | Spec: "small" |
+
+### 2.1.1 Implementation
+
+`Hexapod-S0b-v0` = `HexapodS0bEnv(HexapodS0aEnv)` + `HexapodS0bEnvCfg(HexapodS0aEnvCfg)`:
+
+* **Commands** (`mdp/commands.py`, `mdp/velocity_command.py`): Isaac Lab's `UniformVelocityCommand` with
+  `rel_standing_envs = 0.1`; 70 % of segments get v_y = yaw = 0. Actor obs 117-D = o_p (111) ⊕ V_0 (3) ⊕
+  twist_cmd (3). Critic adds the terrain-aware 22-D privileged block and 12-D DR parameters (151-D).
+* **Clock**: `f_ref = clamp(v_cmd,x / 0.20, 0.8, 2.5)` from the command (replaces D3), × 0 when standing.
+  `env.cpg_active` masks every `cpg_*` term (all 1 in Flat/S0a, so those tasks are unchanged).
+* **Terrain** (`mdp/terrain.py`): generator above (4 × 4 m tiles, 5 cm cells, 2 mm vertical quantum; Isaac Lab's
+  random-uniform field ignores difficulty, so a wrapper scales its amplitude). A height map (2 cm grid, one
+  downward raycast of the terrain mesh at startup) gives `env.terrain_z` / `env.terrain_normal`; the Flat/S0a
+  env returns z = 0 / world z. Used by: termination (root height *above terrain* < 5 cm), `non_foot_body`,
+  critic base height, toe heights in the swing floor, reset of the contact baseline, eval clearance.
+* **Surface-normal forces** (`mdp.rewards.foot_forces_nt`): F_n = F·n(toe xy), F_t = |F − F_n n|, used by
+  `cpg_force_target` and the critic. Closes the v7 §2.6 world-Z item.
+* **Curriculum** `terrain_levels_cmd`: Isaac Lab's `terrain_levels_vel` promotes at tile/2 = 2 m, out of reach at
+  0.05–0.20 m/s. Up: survived, commanded path ≥ 0.3 m, displacement ≥ 0.8 × commanded path. Down: fell or
+  displacement < 0.4 × path. Start levels 0–2.
+* **Rewards** (§2.1.3): tracking (`track_lin_vel_xy_exp` σ 0.05 ×10, `track_lin_vel_xy_l1` ×−10,
+  `track_ang_vel_z_exp` σ 0.25 ×3) replace forward_velocity / lateral_velocity / stand_still (its 0.1 m/s
+  threshold would punish the 0.05 m/s commands). Phase-free floors (spec §5), introduced here: `swing_clearance`
+  (per foot, peak toe height above terrain over the airborne interval, min(peak/3 cm, 1) at touchdown, ×5) and
+  `stance_rigidity_contact` (legs in sensor contact: toe tangential speed + 0.1·Σ|q̇| incl. coxa, ×−0.5);
+  `standing_contact` (feet-in-contact fraction, standing only, ×1).
+* **DR** (all provisional, bench): foot μ_s U[0.3, 1.1], μ_d = μ_s·U[0.8, 1], restitution U[0, 0.1], 50 % of
+  envs compliant with k log-U[2e3, 5e4] N/m, c log-U[10, 200] N·s/m (64 material buckets); payload
+  U[0.1, 1.0] kg (S0a) + base CoM x/y ±1 cm; servo stall ×U[0.9, 1.1], compliance slope {16, 32, 64},
+  backlash U[0.3°, 1.0°], Coulomb joint friction U[0, 0.05] N·m (new in the AX-12A model), latency 1–2 physics
+  steps (5–10 ms, as S0a); per-episode IMU bias N(0, 0.05 m/s²) / N(0, 0.01 rad/s). Servo parameters are per env,
+  resampled at reset.
+* **Warm start** (`rl/s0_ppo.widen_actor_state`, `train.py --warmstart <π_S0a>`): 114 → 117 by zero columns,
+  identity normaliser stats for the new dims (re-estimated in the 50-iteration burn-in and folded), std carried,
+  V_0 weights + optimiser carried. Critic fresh; actor frozen until iteration ≥ 300 and EV ≥ 0.8 (S0PPO).
+
+### 2.1.2 Bugs found while building (Observed / Root cause / Fix)
+
+**Foot materials had no effect.** *Observed:* `scripts/tests/foot_material_test.py` — every env slid at 30°
+(tan 0.577) and none at 20° regardless of its sampled μ; no compliance sink. That is PhysX's default material
+(μ 0.5). *Root cause:* the tibia colliders are **instance proxies** (the robot USD's mesh prims are
+instanceable); `sim_utils.bind_physics_material` applies to collider descendants and silently skips proxies,
+so nothing was bound. *Fix:* author the physics-purpose binding (strongerThanDescendants) on the tibia
+rigid-body prim; binding resolution inherits it down to the collider (`mdp/events.py`).
+
+**Kit crashed at start (`free(): invalid pointer`) for every task, S0a included.** *Root cause:* `train.py`
+loads the task config (Hydra) before starting the simulation app; the config now imported USD (`pxr`) at module
+level, twice — in `mdp/events.py` and through Isaac Lab's `UniformVelocityCommand` class. *Fix:* `pxr` imported
+inside the event function; the command class lives in `mdp/velocity_command.py`, referenced lazily by the
+config's `class_type` string, as Isaac Lab does.
+
+### 2.1.3 Verification before training
+
+* `python scripts/tests/test_s0_ppo.py` → `S0 checks OK (float64): warm-start max|Δ| = 2.73e-07, fold max|Δ| =
+  1.87e-14, S0a→S0b max|Δ| = 0.00e+00` (widened actor = π_S0a over 10,000 random observations with random
+  twist_cmd).
+* `python scripts/tests/foot_material_test.py --headless` → **PASS** (`logs/foot_material_test.txt`), 256 envs,
+  zero actions, flat terrain. 20°: 157/157 envs with μ_d > tan θ + 0.15 hold (max drift 4.5 mm). 30°: 92/92 envs
+  with μ_s < tan θ − 0.05 slide, 73/73 with μ_d > tan θ + 0.15 hold. So μ_eff = sampled foot μ (combine multiply
+  against the terrain's 1.0). Near the boundary (μ_d within 0.12 of tan 30°) 5 envs slip 6–11 cm: they land from
+  the spawn height with tangential speed, and uphill legs unload — reported, not tuned away. Compliance:
+  compliant envs sink 0.37 mm more than rigid ones on average (max 0.97 mm), Spearman(k, sink) = −0.91; effective
+  per-foot stiffness ≈ 2.5 × the material's nominal k (PhysX applies k per contact point). The foam fit on the
+  bench must therefore be done against measured sink in sim, not against the nominal k.
+* Servo DR: compliance slopes {16, 32, 64} drawn 96/70/90 of 256.
+
+**Reward economics** (`scripts/tests/reward_economy.py --task Hexapod-S0b-v0 --ckpt <π_S0a> --cmd … --terrain_level
+0`, per step, dt-scaled; `logs/s0b_economy_v1.txt`, `_v2.txt`). "Walk" is π_S0a widened, which ignores the
+command and walks 0.206 m/s at the 0.8 Hz clock (0.244 m/s at 1.0 Hz). "Walk@cmd" is estimated: measured walk,
+tracking terms replaced by perfect tracking (+0.24), coxa term scaled to the commanded speed.
+
+| cmd v_x | σ_lin | Stand | Walk (π_S0a, 0.21 m/s) | Walk@cmd (est.) | Fall |
+| --- | --- | --- | --- | --- | --- |
+| 0.05 | 0.10 | +0.366 | +0.215 | ≈ +0.39 | −0.1 once |
+| 0.05 | **0.05** | **+0.285** | +0.189 | ≈ +0.39 | −0.1 once |
+| 0.10 | 0.10 | +0.275 | +0.244 | ≈ +0.41 | |
+| 0.10 | **0.05** | **+0.205** | +0.207 | ≈ +0.41 | |
+| 0.20 | 0.05 | +0.181 | +0.283 | — | |
+| 0 (standing) | 0.10 | **+0.478** | +0.369 (walks 0.012 m/s, 2 % falls) | — | |
+
+With σ 0.1, standing when commanded 0.05 m/s was within ≈ 5 % of walking at the command — the classic
+"stand when asked to go slow" optimum. σ 0.05 widens that margin to ≈ 37 %; the L1 term keeps a gradient far
+from the command, where the kernel is flat. At zero command, standing beats stepping by 0.11/step. Coxa-term
+overspeed bias: its slope (≈ +20 per m/s over 3 stance legs) against the tracking terms puts the equilibrium
+≈ 5 mm/s above the command — inside the 0.03 m/s gate.
+
+Baseline, π_S0a on S0b (`eval_s0.py --task Hexapod-S0b-v0 --cmd 0.10 0 0 --terrain_level 0`, 64 envs): v_x 0.205,
+cycle RMSE 0.110 m/s, stride 0.241 m (reference 0.125), falls 1.6 %, V_0 RMSE 0.092 m/s (0.031 on S0a flat — the
+DR moves it off-distribution; it keeps training online in S0b). At zero command it keeps stepping (clock frozen):
+0.16 m drift per episode.
+
+### 2.1.4 S0b run 1 (seed 42)
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 3000 \
+  --warmstart logs/rsl_rl/hexapod_s0a/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/model_4498.pt --run_name s0b_seed42_r1
+```
+
+1.76 s/iteration (4,096 envs, `replicate_physics=False`). During the frozen-actor burn-in the curriculum already
+moved π_S0a to mean terrain level 6.4 at 0.85 % falls (the "up" rule counts overspeed as progress).
+Finished at 3,000 iterations (5,242 s): `logs/rsl_rl/hexapod_s0b/2026-09-21_19-59-42_s0b_seed42_r1/`.
+
+Gate evaluation, `scripts/rsl_rl/eval_s0b_gates.sh <ckpt> <tag>` (256 deterministic episodes per condition, JSON in
+`logs/eval/s0b_r1_it*_*.json`; L = terrain level):
+
+| Condition | Iter | Falls | v_x | Cycle RMSE | Step RMSE | Stride (ref) | Duty | Apex q50 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.10, L0 | 1500 | 0 % | 0.134 | 0.035 | 0.058 | 0.167 (0.125) | 0.49 | 4.1 cm |
+| 0.10, L0 | 2999 | 0 % | 0.119 | **0.019** | 0.040 | **0.148 (+18 %)** | 0.49 | 4.0 cm |
+| 0.10, L5 | 2999 | 0 % | 0.117 | 0.025 | 0.055 | 0.148 | 0.48 | |
+| 0.10, L0, no drops | 2999 | 0 % | 0.120 | 0.020 | 0.040 | 0.149 | 0.49 | |
+| 0.15, L0 | 2999 | 0 % | 0.145 | **0.008** | 0.028 | **0.180 (−4 %)** | 0.49 | 4.0 cm |
+| 0.15, L5 | 2999 | 0 % | 0.145 | 0.015 | 0.039 | 0.181 | 0.49 | |
+| 0.15, L0, no drops | 2999 | 0 % | 0.145 | 0.007 | 0.028 | 0.180 | 0.49 | |
+| stand, L0 | 2999 | 0 % | 0.005 | — | 0.030 | drift 5.7 cm, Σ\|q̇\| 6.8 rad/s | 0.51 | |
+
+(0.15 m/s is below the 0.16 m/s knee of the clock, so f_ref = 0.8 Hz at both evaluation speeds; all legs
+swing 0.85–0.86 /s.) Gates: falls ✓, cycle-RMSE tracking ✓ (per-step RMSE, which includes the within-stride
+velocity oscillation, would fail at 0.10), drops vs drop-free ✓ (drops 0.0191 vs 0.0198 — no degradation at the
+provisional rate), stride ✓ at 0.15 and ✗ at 0.10 (+18 %, i.e. the residual 0.019 m/s overspeed). Per-leg stride
+is asymmetric (right 0.12–0.13 m, left 0.17 m at 0.10) and right-back duty is 0.39: the old right-side imbalance
+is partly back.
+
+### 2.1.5 Standing mode not learned — one leg held in the air
+
+**Observed:** at zero command the policy stops walking (0.08–0.15 swings/s per leg) but freezes mid-gait with the
+right-back leg lifted (RB contact duty 0.20) and jitters (Σ|q̇| 6.8 rad/s, 5.7 cm drift per episode).
+**Root cause:** the standing incentive was too weak. `standing_contact` ×1 pays 1/6 per step per planted leg,
+and `stance_rigidity_contact` only looks at legs in contact — a lifted, jittering leg costs nothing.
+Measured (`reward_economy.py --ckpt <run 1> --cmd 0 0 0`): rest-pose standing beat the policy's pose by only
+≈ 0.046/step (dt-scaled). **Fix:** `standing_contact` ×5 (a lifted leg now costs 0.83/step) and a new
+standing-only `standing_joint_speed` penalty (−0.2·Σ|q̇|, all joints). Same measurement, new weights
+(`logs/s0b_economy_v3.txt`): rest pose +0.554 vs the policy +0.446 per step on L0 (+0.543 vs +0.447 on L5), gap
+0.108. Only standing segments are affected, so the walking economics above are unchanged.
+
+The 0.10 m/s overspeed is not treated as a reward bias: it shrank with training (stride 0.167 → 0.148 m between
+iterations 1,500 and 3,000) and 0.15 m/s undershoots slightly, so the policy is still moving off π_S0a's longer
+stride rather than being pulled to a faster speed.
+
+### 2.1.6 S0b run 2 (continuation of run 1, standing fix)
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-21_19-59-42_s0b_seed42_r1 --checkpoint model_2999.pt --run_name s0b_seed42_r2_from_r1
+```
+
+Finished at iteration 4,998 (3,468 s): `logs/rsl_rl/hexapod_s0b/2026-09-21_21-36-27_s0b_seed42_r2_from_r1/model_4998.pt`.
+`scripts/rsl_rl/eval_s0b_gates.sh <ckpt> s0b_r2_it4998` (`logs/eval_s0b_r2_it4998.txt`):
+
+| Condition | Falls | v_x | Cycle RMSE | Step RMSE | Stride (ref) | Duty |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.10, L0 | 0 % | 0.117 | 0.017 | 0.031 | 0.145 (0.125, **+16 %**) | 0.49 |
+| 0.10, L5 | 0 % | 0.117 | 0.021 | 0.042 | 0.147 | 0.49 |
+| 0.10, L0, no drops | 0 % | 0.117 | 0.017 | 0.031 | 0.145 | 0.49 |
+| 0.15, L0 | 0 % | 0.148 | **0.005** | 0.025 | **0.187 (0.1875)** | 0.49 |
+| 0.15, L5 | 0 % | 0.149 | 0.011 | 0.033 | 0.188 | 0.49 |
+| 0.15, L0, no drops | 0 % | 0.148 | 0.005 | 0.025 | 0.187 | 0.49 |
+| stand, L0 / L5 | 0 % | 0.004 | — | 0.027 | drift 5.2 cm, Σ\|q̇\| 4.8 rad/s | 0.56 |
+
+Gates: falls ✓, tracking ✓ (cycle RMSE ≤ 0.021 everywhere), drops ✓ (no degradation at the provisional rate),
+stride ✓ at 0.15, **✗ at 0.10** — v_x plateaued (0.119 → 0.117 over 2,000 more iterations), so the "still
+leaving π_S0a's stride" reading of §2.1.5 was wrong for 0.10 m/s: there is an equilibrium at ≈ 0.145 m stride
+whose economic cause is not yet identified. Left/right stride asymmetry is gone (0.139–0.154 m); right-back
+contact duty stays 0.41.
+
+Standing improved but is not a clean six-leg stand: legs rarely swing (≈ 0.1 /s) but contact flickers (per-leg
+duty 0.33–0.73, micro-lifts up to 0.6 /s at the 1 N contact threshold) — the weight sits on 3–4 legs while the
+rest barely touch — with 0.27 rad/s per-joint jitter and 5 cm drift per 10 s.
+
+**Status: π_S0 not yet declared.** Open: (1) the 0.10 m/s stride equilibrium (+16 %) — diagnose with a per-term
+reward comparison at 0.10 vs 0.117 m/s before changing anything; (2) standing load sharing; (3) the from-scratch
+control arm (§4.2), which needs the final S0b budget; (4) the +5 harder terrain levels. V_0 RMSE under DR is
+0.047 m/s (S0a flat: 0.031).
+
+**Deviations added in S0b** (spec text unchanged):
+
+| # | Deviation | Where |
+| --- | --- | --- |
+| D13 | Standing mode at zero command (clock frozen, CPG terms masked, standing terms) — spec silent | 2.1.1, 2.1.5 |
+| D14 | Per-env contact physics on the foot material (terrain μ 1, multiply), not a sampled ground μ: one terrain mesh carries one material. μ_eff equals the sampled value (2.1.3) | 2.1.1 |
+| D15 | twist_cmd resampled every 5 s, not per episode | Decisions |
+| D16 | Tracking gate on gait-cycle-averaged v_x (per-step RMSE includes the within-stride oscillation; reported alongside) | 2.1.3 |
+| D17 | Full DR brought into S0b (spec does not fix its stage) | Decisions |

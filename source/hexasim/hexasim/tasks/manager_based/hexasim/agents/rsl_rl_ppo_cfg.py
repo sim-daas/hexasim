@@ -90,3 +90,10 @@ class PPORunnerCfg_S0a(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class PPORunnerCfg_S0b(PPORunnerCfg_S0a):
+    """S0b from π_S0a (actor widened 114 → 117 by the twist_cmd block, zero columns); same batch and S0PPO."""
+
+    experiment_name = "hexapod_s0b"

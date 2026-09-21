@@ -13,10 +13,18 @@ Metrics, per env over the steps before its first termination, then averaged:
   micro_lifts      touchdowns after a lift of ≤ 5 mm (stutter), per leg per second
   coxa_hf_power    coxa joint-angle power above 5 Hz, rad² (mean over coxa joints)
   v0_rmse          V_0 vs true base velocity (S0a tasks only), m/s
+S0b (fixed --cmd for the whole episode; clearance is toe height above the terrain):
+  vx_rmse_step     per-step v_x − v_cmd,x RMSE (includes the within-stride velocity oscillation), m/s
+  vx_rmse_cycle    RMSE of v_x averaged over gait-period windows (1/f_ref), first window (start from rest)
+                   dropped — the tracking gate
+  stride           per-leg touchdown-to-touchdown toe displacement (world xy), m; stride_ref = |v_cmd|/f_ref
+  standing (all-zero cmd): base xy drift over the episode (m), mean Σ|q̇| (rad/s), feet-in-contact fraction
 
 Usage:
   python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-Flat-v0 --ckpt <π_base.pt> [--rest_tibia_deg 30]
   python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-S0a-v0 --ckpt <π_S0a.pt>
+  python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-S0b-v0 --ckpt <π_S0.pt> --cmd 0.10 0 0 \
+      --terrain_level 0 [--no_drops]
 """
 
 import argparse
@@ -32,6 +40,9 @@ parser.add_argument("--num_envs", type=int, default=256)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--rest_tibia_deg", type=float, default=None, help="override the rest-pose tibia angle")
 parser.add_argument("--out", default=None, help="write metrics JSON here")
+parser.add_argument("--cmd", type=float, nargs=3, default=None, metavar=("VX", "VY", "WZ"), help="S0b: fixed twist_cmd")
+parser.add_argument("--terrain_level", type=int, default=None, help="S0b: pin every env to this terrain level")
+parser.add_argument("--no_drops", action="store_true", help="S0a/S0b: disable dropped reads")
 parser.add_argument("--stall", type=float, default=None, help="diagnosis: override the AX-12A stall torque, N·m")
 parser.add_argument("--servo", nargs="*", default=[], help="diagnosis: AX-12A cfg overrides, e.g. compliance_slope=4")
 parser.add_argument(
@@ -66,6 +77,14 @@ def toe_pos_w(robot, tibia_ids):
 cfg = parse_env_cfg(args.task, num_envs=args.num_envs)
 cfg.seed = args.seed
 cfg.curriculum = None
+s0b = hasattr(cfg, "commands") and cfg.commands is not None
+if s0b:
+    from hexasim.tasks.manager_based.hexasim.mdp import pin_command, pin_terrain_level
+
+    assert args.cmd is not None, "S0b evaluation needs --cmd"
+    pin_command(cfg, *args.cmd)
+if args.no_drops:
+    cfg.drop_p0 = cfg.drop_k = 0.0
 if args.rest_tibia_deg is not None:
     cfg.scene.robot.init_state.joint_pos[".*_tibia"] = math.radians(args.rest_tibia_deg)
 if "mast" in args.ablate:
@@ -112,6 +131,8 @@ s0a = hasattr(cfg, "v0_ramp_steps")
 if s0a:
     cfg.v0_ramp_steps = (0, 1)  # evaluate on the deployable estimate only
 env = gym.make(args.task, cfg=cfg).unwrapped
+if args.terrain_level is not None:
+    pin_terrain_level(env, args.terrain_level)
 ckpt = torch.load(args.ckpt, map_location=env.device, weights_only=False)
 obs, _ = env.reset()
 if s0a:
@@ -121,7 +142,12 @@ if s0a:
 td = TensorDict({"policy": obs["policy"]}, batch_size=[env.num_envs])
 dist = {"class_name": "GaussianDistribution", "init_std": 1.0}
 policy = MLPModel(td, {"actor": ["policy"]}, "actor", 18, [256, 128, 64], "elu", True, dist).to(env.device)
-policy.load_state_dict(ckpt["actor_state_dict"])
+state = ckpt["actor_state_dict"]
+if state["mlp.0.weight"].shape[1] < td["policy"].shape[1]:  # older layout (π_S0a on S0b): zero-widen
+    from hexasim.rl.s0_ppo import widen_actor_state
+
+    state = widen_actor_state({k: v.cpu() for k, v in state.items()}, td["policy"].shape[1], 0.05)
+policy.load_state_dict({k: v.to(env.device) for k, v in state.items()})
 policy.eval()
 
 robot, sensor = env.scene["robot"], env.scene["contact_forces"]
@@ -140,6 +166,14 @@ micro_count = torch.zeros(N, 6, device=env.device)
 apexes = []
 v0_se = torch.zeros(N, device=env.device)
 coxa_traj = torch.zeros(T, N, len(coxa), device=env.device)
+vx_traj = torch.zeros(T, N, device=env.device)
+live_traj = torch.zeros(T, N, dtype=torch.bool, device=env.device)
+last_td = torch.full((N, 6, 2), float("nan"), device=env.device)
+stride_sum = torch.zeros(N, 6, device=env.device)
+stride_count = torch.zeros(N, 6, device=env.device)
+qd_sum = torch.zeros(N, device=env.device)
+xy0 = robot.data.root_pos_w.torch[:, :2].clone()
+xy_end = xy0.clone()
 
 with torch.inference_mode():
     for t in range(T):
@@ -150,7 +184,8 @@ with torch.inference_mode():
         vx_sum += robot.data.root_lin_vel_b.torch[:, 0] * live
         contact = torch.norm(sensor.data.net_forces_w.torch, dim=-1) > 1.0
         contact_sum += contact * live.unsqueeze(1)
-        toe_z = toe_pos_w(robot, tibia)[..., 2]
+        toe = toe_pos_w(robot, tibia)
+        toe_z = toe[..., 2] - env.terrain_z(toe[..., :2])
         swing_peak = torch.where(contact, swing_peak, torch.maximum(swing_peak, toe_z))
         touchdown = contact & (swing_peak > 0) & live.unsqueeze(1)
         real = touchdown & (swing_peak > 0.005)  # a swing with apex > 5 mm; below that it is a micro-lift/stutter
@@ -158,10 +193,19 @@ with torch.inference_mode():
         peak_sum += swing_peak * real
         swing_count += real
         micro_count += touchdown & ~real
+        step_len = torch.norm(toe[..., :2] - last_td, dim=-1)
+        counted = real & ~torch.isnan(step_len)
+        stride_sum += torch.nan_to_num(step_len) * counted
+        stride_count += counted
+        last_td = torch.where(real.unsqueeze(-1), toe[..., :2], last_td)
         swing_peak = torch.where(contact, torch.zeros_like(swing_peak), swing_peak)
         if s0a:
             v0_se += (env.v_in - robot.data.root_lin_vel_b.torch).pow(2).sum(-1) * live
         coxa_traj[t] = robot.data.joint_pos.torch[:, coxa]
+        vx_traj[t] = robot.data.root_lin_vel_b.torch[:, 0]
+        live_traj[t] = live
+        qd_sum += robot.data.joint_vel.torch.abs().sum(-1) * live
+        xy_end = torch.where(live.unsqueeze(1), robot.data.root_pos_w.torch[:, :2], xy_end)
         steps += live
         fell |= alive & terminated
         alive &= ~(terminated | truncated)
@@ -190,6 +234,24 @@ m = {
 }
 if s0a:
     m["v0_rmse"] = (v0_se.sum() / steps.sum()).sqrt().item()
+if s0b:
+    vx_c, vy_c, wz_c = args.cmd
+    m.update(cmd=args.cmd, terrain_level=args.terrain_level, no_drops=args.no_drops)
+    m["vx_rmse_step"] = ((vx_traj - vx_c).pow(2) * live_traj).sum().div(live_traj.sum()).sqrt().item()
+    standing = vx_c == vy_c == wz_c == 0.0
+    if standing:
+        m["stand_drift_m"] = torch.norm(xy_end - xy0, dim=1).mean().item()
+        m["stand_joint_speed"] = (qd_sum / steps).mean().item()
+    else:
+        f_ref = min(max(vx_c / 0.20, 0.8), 2.5)
+        w = round(1.0 / (f_ref * env.step_dt))
+        k = T // w
+        win_v = vx_traj[: k * w].view(k, w, N).mean(1)[1:]
+        win_live = live_traj[: k * w].view(k, w, N).all(1)[1:]
+        m["vx_rmse_cycle"] = ((win_v - vx_c).pow(2) * win_live).sum().div(win_live.sum()).sqrt().item()
+        m["stride"] = (stride_sum.sum() / stride_count.sum()).item()
+        m["stride_per_leg"] = (stride_sum.sum(0) / stride_count.sum(0).clamp(min=1)).tolist()
+        m["stride_ref"] = math.hypot(vx_c, vy_c) / f_ref
 print("EVAL", json.dumps(m, indent=1))
 if args.out:
     with open(args.out, "w") as f:
