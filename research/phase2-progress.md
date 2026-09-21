@@ -315,15 +315,6 @@ saturation, 1.1 % drops; Phase 1 pose sags to 0.127 m, tibia 7 % saturated.
 produced with the flag off and describes the solver artefact, not the servo. Run 1 is superseded by run 2
 (2.0.10). The lever-arm torque envelope (2.0.3) used the implicit Flat task and stands.
 
-### Open items raised by Phase 2.0
-
-* Bench: AX-12A gain/compliance/backlash, bus drop rate vs load, mast mass, per-surface μ (ground μ 0.75 is a
-  placeholder).
-* The spec's duty-factor gate (0.5 ± 10 %) is measured here as contact duty (|F| > 1 N), which π_base itself
-  fails (0.63–0.65); the definition needs agreeing before the gate is applied.
-* Pre-commit: the repo's `insert-license` hook points to a missing `.github/LICENSE_HEADER.txt` and fails for
-  every file; `play_debug.py:229` has a pre-existing SIM115.
-
 ### 2.0.10 S0a run 2 (seed 42, PhysX fix) — stopped at iteration 700: termination exploit
 
 ```
@@ -395,6 +386,8 @@ Economic reading:
 python scripts/rsl_rl/train.py --task Hexapod-S0a-v0 --headless --num_envs 4096 --seed 42 --max_iterations 3000 \
   --warmstart logs/rsl_rl/hexapod_flat/2026-09-06_19-45-34/model_14998.pt agent.run_name=s0a_seed42_r3
 ```
+Code: commit `fe78300` + the diff stored in the run's `git/hexasim.diff`. Run 3 used σ = 0.02 m, the value at the time.
+On the current code, reproduce it with `'env.rewards.cpg_z_target.params.sigma=0.02'` appended.
 
 Training (`logs/train_s0a_seed42_r3.txt`): frozen-actor falls 57 % → after the unfreeze 23 % (it 400) → 3.4 % (600)
 → 0 % from 800 on. The V_0 ramp to α = 1 (it 1,500) caused no regression. Forward reward 0.15 → 0.40 per 10 s.
@@ -461,7 +454,7 @@ default False, so it silently started from a random actor; it was stopped after 
 
 ### 2.0.14 S0a run 4 (σ 1 cm, continued from run 3) — leg imbalance resolved; π_S0a
 
-Log `logs/rsl_rl/hexapod_s0a/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/` (iterations 3,000 → 4,498, 1,194 s,
+Log `logs/rsl_rl/hexapod_s0a/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/` (iterations 3,000 → 4,498, 1,194 s,
 `logs/train_s0a_seed42_r4.txt`). No falls after the first iteration; forward reward 0.45 → 0.49 per 10 s; swing
 kernel 3.95 → 4.14 of 5 at the tighter σ.
 
@@ -481,10 +474,78 @@ deterministic, V_0 only, AX-12A, drops, payload):
 | V_0 RMSE | — | 0.037 m/s | **0.031 m/s** | — |
 
 Result: every leg now steps at the same rate. The right-middle and right-rear crutch legs, present since Phase 1,
-are gone. **π_S0a = `…/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/model_4498.pt`** (actor 114-D + V_0 in the
+are gone. **π_S0a = `…/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/model_4498.pt`** (actor 114-D + V_0 in the
 checkpoint). S0a gates: all met, with the clearance gate reinterpreted as agreed with the user.
 
 Caveats for the paper: one seed; the warm start came through three reward/solver fixes (2.0.9–2.0.13), so π_S0a
 is the product of runs 3 + 4 (4,498 iterations × 4,096 × 16 ≈ 295 M env steps after the warm start, run-1/2
 iterations not counted); servo, drop and IMU parameters are provisional (datasheet); flat ground at μ 0.75.
 Not in S0a by spec: commands, terrain, full dynamics randomisation (S0b onward).
+
+### 2.0.15 Phase 2.0 closure — reproduction, spec checklist, deviations, open items
+
+**Reproducing π_S0a** (Isaac Sim / Isaac Lab as installed, rsl_rl 5.0.1, one RTX A4000):
+
+```
+# run 3 — warm start from π_base (code: commit fe78300 + logs/…/2026-09-21_15-39-59_s0a_seed42_r3/git/hexasim.diff)
+python scripts/rsl_rl/train.py --task Hexapod-S0a-v0 --headless --num_envs 4096 --seed 42 --max_iterations 3000 \
+  --warmstart logs/rsl_rl/hexapod_flat/2026-09-06_19-45-34/model_14998.pt agent.run_name=s0a_seed42_r3 \
+  'env.rewards.cpg_z_target.params.sigma=0.02'
+# run 4 — continuation (code: commit 5face31 + logs/…/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/git/hexasim.diff)
+python scripts/rsl_rl/train.py --task Hexapod-S0a-v0 --headless --num_envs 4096 --seed 42 --max_iterations 1500 \
+  --resume --load_run 2026-09-21_15-39-59_s0a_seed42_r3 --checkpoint model_2999.pt \
+  --run_name s0a_seed42_r4_from_r3 'env.v0_ramp_steps=[0,1]'
+# evaluation
+python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-S0a-v0 \
+  --ckpt logs/rsl_rl/hexapod_s0a/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/model_4498.pt
+```
+
+Every run directory holds `params/env.yaml`, `params/agent.yaml` and `git/` (commit + diff); the values above were
+checked against them. Runs 1 (`…14-09-06_s0a_seed42`) and 2 (`…15-11-28_s0a_seed42_r2`) are superseded (2.0.9,
+2.0.10) and kept only as evidence. π_S0a comes from a two-segment lineage (σ 2 cm for 3,000 iterations, then σ 1 cm
+for 1,500); the final configuration has not been run from π_base in a single segment.
+
+**Statistics.** Gate numbers are single-seed, 256 deterministic episodes. 0 falls in 256 → 95 % upper bound on the
+fall rate ≈ 1.2 % (rule of three), inside the +2 pp gate. Per spec §4.2, S0 is one shared run; seed variance is
+reported from S1 onward, conditional on π_S0 — state this in the paper.
+
+**Spec checklist (paradigm spec v2 §4.1–4.3, §12 step 1–4) for S0a**
+
+| Item | Status |
+| --- | --- |
+| §4.1 audit of π_base | Done (spec table) + corrected: batch 4,096 × 16; v_x 0.159 m/s over 256 episodes (not 0.209); two crutch legs; π_base's return rested on the abs-coxa term (2.0.10) |
+| §4.2 prerequisite: static torque envelope | Done in sim (2.0.3), incl. payload up to +1.0 kg; rest pose changed. Bench measurement open |
+| §1 toe point, friction combine (with sim sliding test), joint-velocity pipeline, dropped reads + mask | Done (2.0.2, 2.0.5); friction test with negative control |
+| §4.2 S0a: AX-12A model, drops, velocity pipeline, obs noise, V_0 substitution ramp, action clip, std floor 0.05, normaliser re-estimation | Done (2.0.5, 2.0.6) |
+| §4.3 widening: function-preserving, zero-init new columns, std carried, per-block handling, 1e-6 test | Done; test passes in float64 (2.7e-7; fp32 summation order alone gives ~4e-6) |
+| §8.2 gradient tests | Value-loss → actor grads None: done. PPO → encoder and L_probe/L_jepa → FAH: no encoders/FAH exist yet (S1+) |
+| S0a gates | Fall, duty, coxa > 5 Hz: PASS. Clearance: reinterpreted with the user (2.0.13) |
+| §4.2 from-scratch control arm | Pending — spec runs it "through S0a/S0b at the same budget", so it follows S0b |
+| §12 step 1 remaining: contract P (683-D), sequence buffer, β-NLL, phase-free floors, remaining routing tests | Pending — S0b (floors) and S1 (the rest) |
+
+**Deviations from the paradigm spec / v7, with reasons** (the spec text is unchanged; reasons in the sections cited)
+
+| # | Deviation | Where |
+| --- | --- | --- |
+| D1 | Batch 4,096 × 16, not 8,192 × 16 (the base run's real batch; compute limit) | Decisions table |
+| D2 | V_0 = 5-frame o_p MLP trained online in the env, output detached | 2.0.6 |
+| D3 | S0a clock driven by the same ramped v_x the actor sees (spec defines the clock only from S0b) | Decisions table |
+| D4 | S0a critic privileged block = 22-D subset of contract P | 2.0.6 |
+| D5 | Rest pose femur/tibia +30° (spec: "offsets kept"), forced by the §4.2 torque gate; warm start folded | 2.0.3, 2.0.4 |
+| D6 | Payload U[0.1, 1.0] kg brought forward into S0a (user request) | Decisions table |
+| D7 | Flat-ground μ 0.75 = π_base's effective training friction (placeholder until per-surface bench) | 2.0.2 |
+| D8 | Drop probability driven by servo load, not tracking error | 2.0.5 |
+| D9 | Coxa excluded from `cpg_stance_rigidity` (documented, as v7 §2.6 allows) | 2.0.2 |
+| D10 | S0a swing term = bounded toe-kernel reward (σ 1 cm, ×5); alive ×10; stand_still −75 (reward economics) | 2.0.11, 2.0.13 |
+| D11 | PhysX `enable_external_forces_every_iteration=True` in S0a (required for explicit servo torques) | 2.0.9 |
+| D12 | Duty-factor gate measured as contact duty (|F| > 1 N); clearance gate reinterpreted | 2.0.2, 2.0.13 |
+
+**Open items carried forward**
+
+* Bench (hardware, deferred by the user): AX-12A gain/compliance/backlash/latency, bus drop rate vs load, static
+  torque envelope on the robot, mast mass, per-surface μ, IMU noise. Every sim value above is provisional.
+* S0b: commands + command-referenced clock (replaces D3), terrain curriculum, phase-free floors, surface-normal
+  force projection (currently world-Z, flat only), full dynamics randomisation (recommended to start here), the
+  from-scratch control arm, S0b gates incl. tracking at the hardware drop rate.
+* Tooling: the pre-commit `insert-license` hook needs `.github/LICENSE_HEADER.txt`; `play_debug.py:229` SIM115
+  (pre-existing).

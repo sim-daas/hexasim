@@ -45,7 +45,7 @@ Correctness fixes (spec §12 step 1) and S0a reconditioning (spec §4.2) of the 
   134 % of servo stall in tripod stance); PhysX `enable_external_forces_every_iteration=True` (without it explicit
   servo torques barely act); reward economics rebuilt so that walking > standing > falling (bounded toe-swing
   reward, alive/stand_still rescaled), signed coxa term kept.
-- **Policy:** π_S0a = `logs/rsl_rl/hexapod_s0a/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/model_4498.pt` (seed 42).
+- **Policy:** π_S0a = `logs/rsl_rl/hexapod_s0a/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/model_4498.pt` (seed 42).
 
 ### Metric Results (256 episodes × 10 s, deterministic, `scripts/rsl_rl/eval_s0.py`)
 * **Fall rate:** 0 % (π_base: 0 % on its own env, 9 % with random reset phase)
@@ -56,3 +56,5 @@ Correctness fixes (spec §12 step 1) and S0a reconditioning (spec §4.2) of the 
 * **Toe swing apex (q25/50/75):** 3.7 / 3.8 / 3.9 cm (target 3.8 cm)
 * **Coxa power above 5 Hz:** 0.134 rad² (π_base 0.183)
 * **V_0 velocity-estimate RMSE:** 0.031 m/s
+* **Reproduction, spec checklist and deviations:** `research/phase2-progress.md` §2.0.15. Single seed (spec: S0 is one
+  shared run; seed variance from S1 on). Servo/drop/IMU parameters are datasheet placeholders until the bench.

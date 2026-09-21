@@ -127,7 +127,7 @@ code before relying on any line here.
   efforts barely act and a policy under them learns to stand. Explicit PD on these
   light links also needs armature (AX-12A model: 0.003 kg·m²) to be numerically
   stable at 5 ms. The USD `jointFriction` is not applied (sim friction reads 0).
-- **π_S0a (2026-09-21):** `logs/rsl_rl/hexapod_s0a/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/model_4498.pt`
+- **π_S0a (2026-09-21):** `logs/rsl_rl/hexapod_s0a/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/model_4498.pt`
   on `Hexapod-S0a-v0` — 0 % falls, v_x 0.29 m/s, all six legs 1.49 swings/s, toe apex
   3.8 cm, V_0 only. S0a reward economics differ from Flat (bounded toe-swing kernel
   σ 1 cm ×5, alive ×10, stand_still −75): check any reward change with
