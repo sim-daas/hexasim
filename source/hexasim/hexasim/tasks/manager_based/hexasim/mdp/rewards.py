@@ -437,7 +437,8 @@ def cpg_z_target_kernel_reward(
 
     S0 replacement for the L1 form (phase2-progress §2.0.11): same target, but bounded in [0, 1] and positive, so
     a gait that tracks the toe target earns up to 1 per step and a mismatch cannot outweigh survival. Stance legs
-    earn nothing; a leg dragged through its swing window earns ≈ 0.33 at step height 0.038 m and σ 0.02 m.
+    earn nothing; a leg dragged through its swing window earns ≈ 0.33 at step height 0.038 m and σ 0.02 m,
+    less at σ 0.01 m (the S0a setting).
     """
     robot: Articulation = env.scene[asset_cfg.name]
     phases = env.cpg_phase

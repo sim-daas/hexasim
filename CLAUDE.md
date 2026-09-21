@@ -127,6 +127,14 @@ code before relying on any line here.
   efforts barely act and a policy under them learns to stand. Explicit PD on these
   light links also needs armature (AX-12A model: 0.003 kg·m²) to be numerically
   stable at 5 ms. The USD `jointFriction` is not applied (sim friction reads 0).
+- **π_S0a (2026-09-21):** `logs/rsl_rl/hexapod_s0a/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/model_4498.pt`
+  on `Hexapod-S0a-v0` — 0 % falls, v_x 0.29 m/s, all six legs 1.49 swings/s, toe apex
+  3.8 cm, V_0 only. S0a reward economics differ from Flat (bounded toe-swing kernel
+  σ 1 cm ×5, alive ×10, stand_still −75): check any reward change with
+  `scripts/tests/reward_economy.py` (walk > stand > fall) before training.
+- Resuming: use `--resume --load_run … --checkpoint …`; a Hydra `agent.resume=True`
+  is silently overwritten by `cli_args`. Pin `env.v0_ramp_steps=[0,1]` when resuming S0a
+  (the ramp is keyed to the per-process step counter).
 - Isaac Lab here returns `ProxyArray`s from `robot.data.*` / sensor data: use `.torch`.
 - The pre-commit `insert-license` hook is broken repo-wide (missing
   `.github/LICENSE_HEADER.txt`). Never run `pre-commit run --all-files` blindly:

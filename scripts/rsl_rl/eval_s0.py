@@ -9,7 +9,8 @@ Metrics, per env over the steps before its first termination, then averaged:
   fall_rate        fraction of envs terminated (not timed out) within the episode
   vx_mean          body-frame forward velocity, m/s
   duty_factor      fraction of steps each foot is in contact (|F| > 1 N)
-  clearance        mean over swings of the peak toe height, m (toe point, spec §1)
+  clearance        mean over swings (apex > 5 mm) of the peak toe height, m (toe point, spec §1); plus quartiles
+  micro_lifts      touchdowns after a lift of ≤ 5 mm (stutter), per leg per second
   coxa_hf_power    coxa joint-angle power above 5 Hz, rad² (mean over coxa joints)
   v0_rmse          V_0 vs true base velocity (S0a tasks only), m/s
 
@@ -135,6 +136,8 @@ contact_sum = torch.zeros(N, 6, device=env.device)
 swing_peak = torch.zeros(N, 6, device=env.device)
 peak_sum = torch.zeros(N, 6, device=env.device)
 swing_count = torch.zeros(N, 6, device=env.device)
+micro_count = torch.zeros(N, 6, device=env.device)
+apexes = []
 v0_se = torch.zeros(N, device=env.device)
 coxa_traj = torch.zeros(T, N, len(coxa), device=env.device)
 
@@ -149,9 +152,12 @@ with torch.inference_mode():
         contact_sum += contact * live.unsqueeze(1)
         toe_z = toe_pos_w(robot, tibia)[..., 2]
         swing_peak = torch.where(contact, swing_peak, torch.maximum(swing_peak, toe_z))
-        touchdown = contact & (swing_peak > 0)
-        peak_sum += swing_peak * touchdown * live.unsqueeze(1)
-        swing_count += touchdown * live.unsqueeze(1)
+        touchdown = contact & (swing_peak > 0) & live.unsqueeze(1)
+        real = touchdown & (swing_peak > 0.005)  # a swing with apex > 5 mm; below that it is a micro-lift/stutter
+        apexes.append(swing_peak[real])
+        peak_sum += swing_peak * real
+        swing_count += real
+        micro_count += touchdown & ~real
         swing_peak = torch.where(contact, torch.zeros_like(swing_peak), swing_peak)
         if s0a:
             v0_se += (env.v_in - robot.data.root_lin_vel_b.torch).pow(2).sum(-1) * live
@@ -177,7 +183,9 @@ m = {
     "duty_factor": (contact_sum / steps.unsqueeze(1)).mean().item(),
     "duty_factor_per_leg": (contact_sum / steps.unsqueeze(1)).mean(0).tolist(),
     "clearance": (peak_sum.sum() / swing_count.sum().clamp(min=1)).item(),
+    "clearance_q25_50_75": torch.cat(apexes).quantile(torch.tensor([0.25, 0.5, 0.75], device=env.device)).tolist(),
     "swings_per_leg_per_s": (swing_count.sum(0) / (steps.sum() * env.step_dt)).tolist(),
+    "micro_lifts_per_leg_per_s": (micro_count.sum(0) / (steps.sum() * env.step_dt)).tolist(),
     "coxa_hf_power": spec[freqs > 5.0].sum(0).mean().item(),
 }
 if s0a:

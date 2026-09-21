@@ -422,3 +422,69 @@ asymmetry is reduced, not removed.
 
 Open: (1) clearance gate — the kernel (σ 2 cm) pays well for low swings; (2) RM stutter / RB under-loading;
 (3) one seed only.
+
+### 2.0.13 Clearance metric corrected; the remaining imbalance is the right-middle leg
+
+*Observed:* the gate table in 2.0.12 reported 2.9 cm clearance, but the reward-economics tool (swings with apex
+> 5 mm) put π_S0a's toe apex at 3.7 / 3.9 / 4.1 cm (q25 / median / q75), on the 3.8 cm target. The user's visual
+inspection also judged the clearance good. *Root cause:* `eval_s0.py` averaged the apex of every lift-off,
+including sub-5 mm stutter micro-lifts. *Fix:* `eval_s0.py` now counts a swing only if its apex is > 5 mm, reports
+quartiles, and counts micro-lifts per leg separately. Re-scored (`logs/eval/*_v2.json`):
+
+| | Real swings/s (RF RM RB LF LM LB) | Micro-lifts/s (RF RM RB LF LM LB) | Toe apex q25 / 50 / 75 |
+| --- | --- | --- | --- |
+| π_base, Phase 1 code | 0.81, **0.10, 0.11**, 0.82, 0.81, 0.82 | 0.09, 0.05, 0.07, 0.01, 0.00, 0.05 | 5.4 / 8.4 / 11.2 cm |
+| π_base, fixed Flat env | 1.12, **0.11, 0.13**, 1.11, 1.09, 1.11 | 1.20, 0.79, 0.25, 0.02, 0.07, 0.06 | 4.8 / 6.4 / 9.7 cm |
+| π_S0a run 3 | 1.36, **0.52**, 1.35, 1.35, 1.35, 1.35 | 0.05, **1.85**, 0.07, 0.03, 0.06, 0.05 | 3.7 / 3.9 / 4.1 cm |
+
+Reading:
+* π_base barely stepped with its right-middle and right-rear legs (0.10 and 0.11 swings/s against ~0.8): two crutch
+  legs. This is the leg imbalance seen since Phase 1. S0a run 3 fixed the right-rear leg completely; the
+  right-middle leg now mostly stutters (1.85 micro-lifts/s, 0.52 real swings/s).
+* Clearance gate, reinterpreted with the user (2026-09-21): π_S0a tracks the 3.8 cm toe target tightly. π_base's
+  6–8 cm apex was high-stepping produced by its tibia-origin target, so "± 10 % of π_base" does not measure what
+  the gate intends. Clearance is judged adequate; no change to the target height.
+
+*Next (run 4):* σ 2 → 1 cm, continued from run 3's final checkpoint. Economics check (`logs/reward_economy_r3.txt`,
+run-3 actor as the walker): σ 2 cm walk +33.3 / stand +2.42; σ 1 cm walk +32.0 / stand +0.65; fall −0.1. The
+tighter kernel costs a well-tracking gait ~10 % of its swing credit while stutter micro-lifts earn ≈ nothing,
+which puts the pressure on the right-middle leg.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0a-v0 --headless --num_envs 4096 --seed 42 --max_iterations 1500 \
+  --resume --load_run 2026-09-21_15-39-59_s0a_seed42_r3 --checkpoint model_2999.pt \
+  --run_name s0a_seed42_r4_from_r3 'env.v0_ramp_steps=[0,1]'
+```
+(A first attempt passed `agent.resume=True` as a Hydra override. `cli_args` overwrites it with `--resume`'s
+default False, so it silently started from a random actor; it was stopped after a few iterations and deleted.)
+(α pinned to 1: the ramp is keyed to the env step counter, which restarts at 0 in a new process.)
+
+### 2.0.14 S0a run 4 (σ 1 cm, continued from run 3) — leg imbalance resolved; π_S0a
+
+Log `logs/rsl_rl/hexapod_s0a/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/` (iterations 3,000 → 4,498, 1,194 s,
+`logs/train_s0a_seed42_r4.txt`). No falls after the first iteration; forward reward 0.45 → 0.49 per 10 s; swing
+kernel 3.95 → 4.14 of 5 at the tighter σ.
+
+`python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-S0a-v0 --ckpt <run4>/model_4498.pt` (256 episodes,
+deterministic, V_0 only, AX-12A, drops, payload):
+
+| Metric | π_base (Phase 1 code) | Run 3 | **Run 4 = π_S0a** | Gate |
+| --- | --- | --- | --- | --- |
+| Fall rate | 0 % | 0 % | **0 %** | PASS |
+| Contact duty (mean) | 0.648 | 0.513 | **0.487** | PASS (0.5 ± 10 %) |
+| Duty per leg RF RM RB LF LM LB | 0.53 0.99 0.82 0.52 0.49 0.53 | 0.48 0.79 0.36 0.50 0.48 0.47 | **0.48 0.54 0.43 0.50 0.49 0.47** | — |
+| Real swings/s per leg | 0.81 0.10 0.11 0.82 0.81 0.82 | 1.36 0.52 1.35 1.35 1.35 1.35 | **1.49 1.50 1.48 1.49 1.49 1.49** | — |
+| Micro-lifts/s, RM | 0.05 | 1.85 | **0.06** | — |
+| Toe apex q25 / 50 / 75 | 5.4 / 8.4 / 11.2 cm | 3.7 / 3.9 / 4.1 cm | **3.7 / 3.8 / 3.9 cm** | Adequate (reinterpreted, 2.0.13) |
+| Coxa power > 5 Hz (rad²) | 0.183 | 0.143 | **0.134** | PASS |
+| v_x | 0.159 m/s | 0.262 m/s | **0.291 m/s** | — |
+| V_0 RMSE | — | 0.037 m/s | **0.031 m/s** | — |
+
+Result: every leg now steps at the same rate. The right-middle and right-rear crutch legs, present since Phase 1,
+are gone. **π_S0a = `…/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/model_4498.pt`** (actor 114-D + V_0 in the
+checkpoint). S0a gates: all met, with the clearance gate reinterpreted as agreed with the user.
+
+Caveats for the paper: one seed; the warm start came through three reward/solver fixes (2.0.9–2.0.13), so π_S0a
+is the product of runs 3 + 4 (4,498 iterations × 4,096 × 16 ≈ 295 M env steps after the warm start, run-1/2
+iterations not counted); servo, drop and IMU parameters are provisional (datasheet); flat ground at μ 0.75.
+Not in S0a by spec: commands, terrain, full dynamics randomisation (S0b onward).

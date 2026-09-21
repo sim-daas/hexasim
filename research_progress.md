@@ -32,3 +32,27 @@ Based on a 500-step (10.0 s) headless evaluation run:
 * **Tripod A (RF, LM, RB):** 52.6% swing time
 * **Tripod B (LF, RM, LB):** 47.4% swing time
 *(A perfect tripod gait operates at exactly 50.0% swing per tripod)*
+## Phase 2.0 (S0a) Summary
+
+Correctness fixes (spec §12 step 1) and S0a reconditioning (spec §4.2) of the Phase 1 base policy; full log in
+`research/phase2-progress.md`.
+
+### Final State Reached
+- **Environment:** `Hexapod-S0a-v0`: AX-12A servo model (explicit, datasheet values), dropped reads with ZOH and
+  validity mask, two-sample joint velocity, IMU noise, deployable 114-D actor input (111-D o_p + V_0 velocity
+  estimate), separate critic with privileged block, camera-mast mass + payload U[0.1, 1.0] kg, flat ground μ 0.75.
+- **Key fixes found on the way:** toe point everywhere; rest pose moved to femur/tibia +30° (the Phase 1 pose needs
+  134 % of servo stall in tripod stance); PhysX `enable_external_forces_every_iteration=True` (without it explicit
+  servo torques barely act); reward economics rebuilt so that walking > standing > falling (bounded toe-swing
+  reward, alive/stand_still rescaled), signed coxa term kept.
+- **Policy:** π_S0a = `logs/rsl_rl/hexapod_s0a/2026-09-21_16-42-14_s0a_seed42_r4_from_r3/model_4498.pt` (seed 42).
+
+### Metric Results (256 episodes × 10 s, deterministic, `scripts/rsl_rl/eval_s0.py`)
+* **Fall rate:** 0 % (π_base: 0 % on its own env, 9 % with random reset phase)
+* **Mean forward velocity:** 0.291 m/s (π_base 0.159 m/s; the Phase 1 "0.209 m/s" came from a single 10 s run)
+* **Contact duty factor:** 0.487 (π_base 0.648)
+* **Per-leg real swings/s (RF RM RB LF LM LB):** 1.49 1.50 1.48 1.49 1.49 1.49. π_base: 0.81 0.10 0.11 0.82 0.81
+  0.82 — its right-middle and right-rear legs were crutches.
+* **Toe swing apex (q25/50/75):** 3.7 / 3.8 / 3.9 cm (target 3.8 cm)
+* **Coxa power above 5 Hz:** 0.134 rad² (π_base 0.183)
+* **V_0 velocity-estimate RMSE:** 0.031 m/s

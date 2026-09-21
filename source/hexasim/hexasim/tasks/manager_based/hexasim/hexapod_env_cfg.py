@@ -753,7 +753,9 @@ class HexapodS0aEnvCfg(HexapodFlatResumeEnvCfg):
         # and an alive bonus sized so that standing > falling and walking > standing. Weights set from
         # scripts/tests/reward_economy.py measurements.
         self.rewards.cpg_z_target.func = hex_mdp.cpg_z_target_kernel_reward
-        self.rewards.cpg_z_target.params["sigma"] = 0.02
+        # σ 1 cm (run 4 on; 2 cm in run 3): swings on target keep ~90 % of their credit, stutter micro-lifts
+        # earn ≈ nothing — pressure on the right-middle leg's inherited stutter (phase2-progress §2.0.13).
+        self.rewards.cpg_z_target.params["sigma"] = 0.01
         self.rewards.cpg_z_target.weight = 5.0
         self.rewards.alive.weight = 10.0
         # stand_still at v = 0 costs 1.5 × alive, so standing (+0.029/step) stays below a falling-prone π_base gait
