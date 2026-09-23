@@ -749,3 +749,693 @@ control arm (§4.2), which needs the final S0b budget; (4) the +5 harder terrain
 | D15 | twist_cmd resampled every 5 s, not per episode | Decisions |
 | D16 | Tracking gate on gait-cycle-averaged v_x (per-step RMSE includes the within-stride oscillation; reported alongside) | 2.1.3 |
 | D17 | Full DR brought into S0b (spec does not fix its stage) | Decisions |
+
+### 2.1.7 Diagnosis of the 0.10 m/s stride equilibrium; standing load sharing
+
+**Method.** `reward_economy.py --cmd 0.10 0 0 --obs_cmd <c> 0 0` scores every reward against a 0.10 m/s command
+while the actor *sees* command c, which drives the run 2 policy at other speeds (the clock is 0.8 Hz for all of
+them). Run 2 checkpoint, level 0, 256 envs (`logs/s0b_stride_diag.txt`), dt-scaled reward per step:
+
+| actual v_x (episode mean) | 0.085 | 0.098 | 0.107 | 0.117 | 0.129 |
+| --- | --- | --- | --- | --- | --- |
+| total | 0.444 | 0.481 | **0.494** | 0.492 | 0.470 |
+| tracking (exp + L1) | 0.108 | 0.134 | **0.142** | 0.136 | 0.110 |
+| cpg_coxa_contact | 0.122 | 0.127 | 0.131 | 0.133 | 0.136 |
+| cpg_z_target | 0.070 | 0.073 | 0.074 | 0.076 | 0.077 |
+
+**Root cause.** The reward itself peaks near 0.11 m/s, so the policy is at the reward optimum, not stuck.
+(1) Main part: both tracking terms scored the *instantaneous* body velocity. The within-stride surge is skewed,
+so the exp kernel and the L1 term are maximised when the typical (modal/median) instant is at the command, which
+puts the mean ≈ 7 % above it. The gate — and "walk at v" — is the mean. (2) Smaller: the coxa-sweep and swing terms
+grow with speed (≈ +0.46 per m/s together).
+
+**Fix.** One term `track_lin_vel_avg` on the body velocity averaged over about one gait period (EMA, τ = 1.25 s =
+one period at the 0.8 Hz floor): exp(−|e|²/0.05²) − |e|₁, weight 10 — the same magnitudes as the per-step pair it
+replaces (`track_lin_vel_xy_l1` deleted). Same sweep, new reward (`logs/s0b_stride_diag_v2.txt`): tracking now
+peaks between 0.098 and 0.107 m/s episode-mean (which includes the start from rest), total reward between 0.10
+and 0.11. Near the command the tracking slope (≥ 1.2 per m/s at 6 mm/s error) exceeds the speed-seeking terms'
+0.46, so no change to the coxa term.
+
+**Standing.** New standing-only `standing_load_share` = Σ_feet |F_n − W/6| / W (0 = even load, ≈ 1 on three
+legs), L1 on the terrain-normal force, weight −5: a continuous signal where the 1 N contact test flickers.
+Economics at zero command (`logs/s0b_stride_diag_v2.txt`, run 2 policy vs rest pose): rest pose +0.547, policy
++0.439 per step at weight −2 (load share −0.008 vs −0.039); at −5 the gap grows from 0.108 to ≈ 0.155.
+
+### 2.1.8 S0b run 3 (continuation of run 2: averaged-velocity tracking, load sharing)
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-21_21-36-27_s0b_seed42_r2_from_r1 --checkpoint model_4998.pt --run_name s0b_seed42_r3_from_r2
+```
+
+Finished at iteration 6,997 (3,533 s): `logs/rsl_rl/hexapod_s0b/2026-09-21_23-04-11_s0b_seed42_r3_from_r2/model_6997.pt`
+(`logs/eval_s0b_r3_final.txt`). **Result: worse.** 0.10 m/s → v_x 0.128 (stride 0.158, +27 %; run 2: 0.117),
+per-step error 0.059 (run 2: 0.031) — the within-stride surge grew once only its average was scored. 0.15 m/s:
+0.146, stride −4 %. Standing: contact duty 0.56 → 0.63, but Σ|q̇| 4.8 → 5.6 rad/s, drift 4.9 cm. Falls 0 %.
+
+### 2.1.9 The real problem: the policy barely responds to slow commands
+
+**Observed.** Same sweep on the run 3 policy (`logs/s0b_stride_diag_v3.txt`): shown commands 0.03 / 0.05 / 0.07 /
+0.085 / 0.10 → walked 0.106 / 0.110 / 0.117 / 0.123 / 0.128 m/s. Gate eval at commands 0.05 / 0.10 / 0.15 →
+0.110 / 0.128 / 0.146 m/s: a slope of ≈ 0.36 instead of 1. The policy has one gait near 0.11–0.15 m/s and only
+nudges it; §2.1.7's "reward optimum at 0.11" was partly this — the sweep could not drive it below 0.106.
+
+**Ruled out: V_0.** `eval_s0.py --gt_velocity` (actor sees true velocity) gives the same speeds (0.110 / 0.128 /
+0.146), and V_0's mean bias is |≤ 0.003| m/s at all three commands (`logs/eval/s0b_r3_{v0,gt}diag_*.json`).
+
+**Root cause (working hypothesis).** The twist_cmd columns start at zero (warm start) and must be learned against
+terms that do not depend on the command and are several times larger per step (alive 10, cpg_z_target ≤ 5,
+cpg_coxa_contact ≈ 5, against tracking ≤ 10 at ×10). The economic gain from slowing to a 0.05 m/s command is real
+(≈ 0.15/step dt-scaled from tracking against ≈ 0.03 lost on the coxa term), but it is a small share of the
+advantage variance PPO sees. Below the 0.16 m/s knee the clock gives no speed cue, so stride length is the only
+speed variable and only the command inputs can set it.
+
+**Fix (run 4).** Back to per-step tracking (the averaged form is deleted, §2.1.8 result), weight ×3 (exp σ 0.05
+and L1, ×30) so tracking dominates, as is usual for command-tracking locomotion. Branches from run 2 (the better
+tracker); standing terms of §2.1.7 kept.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-21_21-36-27_s0b_seed42_r2_from_r1 --checkpoint model_4998.pt --run_name s0b_seed42_r4_from_r2
+```
+
+After 1,000 iterations (model_6000, 128 envs, L0): commands 0.05 / 0.10 / 0.15 → 0.066 / 0.1055 / 0.146 m/s
+(run 3: 0.110 / 0.128 / 0.146). Finished at 6,997 (3,675 s):
+`logs/rsl_rl/hexapod_s0b/2026-09-22_00-18-12_s0b_seed42_r4_from_r2/model_6997.pt` (`logs/eval_s0b_r4_final.txt`):
+
+| Condition | Falls | v_x | Cycle RMSE | Step RMSE | Stride (ref) |
+| --- | --- | --- | --- | --- | --- |
+| 0.05, L0 (not a gate) | 0 % | 0.062 | — | — | 0.079 (0.0625) |
+| 0.10, L0 | 0 % | 0.104 | 0.005 | 0.020 | 0.130 (0.125, **+4 %**) |
+| 0.10, L5 | 0 % | 0.105 | 0.009 | 0.027 | 0.132 (+5 %) |
+| 0.10, L0, no drops | 0 % | 0.104 | 0.005 | 0.020 | 0.130 |
+| 0.15, L0 | 0 % | 0.148 | 0.005 | 0.020 | 0.188 (0.1875, **0 %**) |
+| 0.15, L5 | 0 % | 0.148 | 0.008 | 0.026 | 0.187 |
+| 0.15, L0, no drops | 0 % | 0.148 | 0.004 | 0.020 | 0.189 |
+
+**All four walking gates pass** at both terrain levels, and the per-step error also fell below 0.03 (so D16's
+cycle-averaging no longer decides the gate). Standing is still not clean: per-leg contact duty 0.40–0.78, Σ|q̇|
+4.6 rad/s (rest pose, zero action: ≈ 0.5), drift 4.6 cm per 10 s — §2.1.10.
+
+### 2.1.10 Standing: the actor kept obeying the frozen clock
+
+**Observed.** Run 4 at zero command: per-leg contact duty 0.40–0.78, Σ|q̇| 4.6 rad/s, 4.6 cm drift. The reward
+signal is not weak: rest pose (zero action) +0.930/step vs the policy +0.742 (gap 0.19, ≈ 25 % of the reward;
+`logs/s0b_stand_diag.txt`). Dropped reads are not the cause (no drops: Σ|q̇| 4.0, duty 0.63).
+**Root cause.** In standing mode the clock stops, but the actor still saw its frozen (sin, cos) values. Measured
+over 256 standing envs (`logs/s0b_stand_phase.txt`): legs whose frozen phase reads "swing" are in contact 39 % of
+the time, legs reading "stance" 87 % (every leg individually shows the same split, e.g. right-back 14 % vs 82 %).
+The walking policy's "this leg is in swing" association survives into standing.
+**Fix.** The o_p clock block is zero while the clock is stopped (`cpg_active` false) — the spec's own "clock
+absent" flag (§5: (sin, cos) never equals (0, 0)), used again for the S2 clock dropout. Part of D13.
+
+### 2.1.11 S0b run 5 (continuation of run 4, zero clock when standing)
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_00-18-12_s0b_seed42_r4_from_r2 --checkpoint model_6997.pt --run_name s0b_seed42_r5_from_r4
+```
+
+At iteration 8,000 (128 envs, L0): standing contact duty 0.40–0.78 → **0.85–0.97 on five legs**, Σ|q̇| 3.2 rad/s,
+drift 4.1 cm; 0.10 m/s walking unchanged (0.102, stride +3 %). But the right-back leg stayed up (contact 11 %).
+Run 5 was stopped at iteration 8,142 (`…/2026-09-22_01-30-32_s0b_seed42_r5_from_r4/model_8100.pt`) for the next fix.
+
+### 2.1.12 Right-back coxa parked beyond its servo limit — no gradient returns it
+
+**Observed** (`logs/s0b_stand_load*.txt`, 128 standing envs, normal force per leg / fair share W/6). Rest pose,
+zero action: 1.07 0.98 0.95 1.03 1.02 0.94 — the robot can stand evenly. Policy (run 5, iter 8000): 0.87 1.25
+**0.12** 1.09 1.00 1.66, with the right-back coxa at **−54.9° from rest**, i.e. at the −55° action clip (servo
+CW/CCW limit, `S0aActionsCfg`).
+**Root cause.** Once the requested target is past the clip, the reward no longer depends on that action
+component, so PPO gets no signal to bring it back — a dead zone. Right-back's weak stance in walking since S0a
+(contact duty ≈ 0.40 vs ≈ 0.50 for the other legs) is plausibly the same stop.
+**Fix.** `action_beyond_clip` = Σ |requested target − clipped target| (rad), weight −1, always on (zero while all
+targets are inside the limits, so it does not change the economics of any in-range gait).
+
+### 2.1.13 S0b run 6 (continuation of run 5 at 8,100, action-clip penalty)
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_01-30-32_s0b_seed42_r5_from_r4 --checkpoint model_8100.pt --run_name s0b_seed42_r6_from_r5
+```
+
+At 9,100 (128 envs, L0): 0.10 m/s → 0.0995 m/s, stride 0.126 (+1 %); standing contact 0.87–0.98 on five legs,
+right-back 0.04; Σ|q̇| 3.1, drift 3.2 cm. The clip excess fell only 2.4 → 2.1 (per second), and the requested
+right-back coxa target is −69° (q10–q90 −72° to −64°), 14° past the stop, with femur −21.5° and tibia +9°
+(`logs/s0b_stand_load3.txt`): the leg is deliberately **tucked** (raised as well as swung back), not merely stuck
+past the clip. The coxa sign table was re-checked against the layout probe (every right leg's +coxa moves the
+toe forward, `logs/probe_layout.txt`) — not a sign bug. Run 6 stopped at 9,201
+(`…/2026-09-22_02-07-00_s0b_seed42_r6_from_r5/model_9200.pt`); the clip penalty is kept.
+
+### 2.1.14 Standing pose term; S0b run 7
+
+The tucked pose is a local optimum: rest-pose standing pays ≈ 0.19/step more, but no small change of the tucked
+leg improves the load-share / contact terms until the foot actually reaches the ground. Standard remedy: a
+standing-only `standing_pose` = Σ|q − q_rest| (rad), weight −1, a dense per-joint pull home (tucked right-back
+≈ 1.5 rad → −1.5/step unscaled). On slopes the few-degree adjustments it penalises are small against the
+load-share and contact terms.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_02-07-00_s0b_seed42_r6_from_r5 --checkpoint model_9200.pt --run_name s0b_seed42_r7_from_r6
+```
+
+At 10,200 (128 envs, L0): right-back standing contact 0.01 — unchanged; 0.10 m/s 0.102 (stride +4 %). Over run 7 the
+standing pose penalty per standing step stayed at ≈ −3.6 to −4.0 and the clip excess at ≈ 1.8–1.9 per second
+(mostly walking envs): no trend. The right-back habit is inherited — π_base already had right-side "crutch" legs
+(2.0.14) — and survives every warm start. Run 7 stopped at 10,257 (`…/2026-09-22_02-41-40_s0b_seed42_r7_from_r6/
+model_10250.pt`).
+
+### 2.1.15 S0b run 8: stronger pulls (clip ×10, standing pose ×3)
+
+`action_beyond_clip` −1 → −10 (still zero for every in-range target), `standing_pose` −1 → −3.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_02-41-40_s0b_seed42_r7_from_r6 --checkpoint model_10250.pt --run_name s0b_seed42_r8_from_r7
+```
+
+At 11,250: clip excess 1.8 → ≈ 0.28 per second; 0.10 m/s 0.103 (stride +4 %); standing right-back contact still
+0.02. Run 8 stopped at 11,400 (`…/2026-09-22_03-15-45_s0b_seed42_r8_from_r7/model_11400.pt`).
+
+### 2.1.16 Standing is a barely-trained input region, not a one-leg problem
+
+`reward_economy.py --cmd 0 0 0 --pin_joints 'right_back_.*'` (`logs/s0b_stand_pin.txt`): policy +0.109/step, rest
+pose +0.904, policy with right-back pinned at rest +0.147 — pinning one leg does not help, because the whole
+stance is off. Posture probe (`logs/s0b_stand_posture.txt`, 128 envs, run 8 at 11,250), joint offsets from rest (°):
+
+| | RF | RM | RB | LF | LM | LB |
+| --- | --- | --- | --- | --- | --- | --- |
+| coxa | +54 | −53 | −46 | +54 | +49 | +52 |
+| femur | +57 | +45 | −13 | +12 | +36 | +7 |
+| tibia | −67 | −75 | +6 | −11 | −19 | +2 |
+
+(rest pose, zero action: all within 1.7°; base height 0.169 m vs 0.180 m under the policy). Almost every coxa sits
+near its ±55° stop. The actor is training normally (not frozen; explained variance 0.96–0.99 in runs 5–8), so this
+is data, not plumbing: standing is 10 % of segments, and with twist_cmd = 0 and the clock zeroed the input lies in a
+region the network barely saw — its output there is extrapolation from walking, and 4,000 iterations of 10 %
+standing data have not reshaped it.
+
+### 2.1.17 S0b run 9: standing share 50 % for 1,000 iterations
+
+Temporary schedule change (D18): zero-command segments 10 % → 50 %, then back to the spec's 10 % for a final
+segment so π_S0 finishes on the spec distribution.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 1000 \
+  --resume --load_run 2026-09-22_03-15-45_s0b_seed42_r8_from_r7 --checkpoint model_11400.pt \
+  --run_name s0b_seed42_r9_from_r8_stand50 env.commands.base_velocity.rel_standing_envs=0.5
+```
+
+Run 9 at 11,900 (128 envs, L0): standing unchanged (right-back contact 0.05, same contorted pose), walking fine
+(0.0994 m/s, stride 0.125). Five times the standing data did not move it either. Finished at 12,399
+(`…/2026-09-22_03-54-55_s0b_seed42_r9_from_r8_stand50/model_12399.pt`).
+
+### 2.1.18 Root cause of the standing failures: the pose can only change by stepping
+
+With six feet planted the legs form closed loops through the ground, so the joint angles are fixed by where the
+feet are; returning to the rest pose needs a leg lifted and re-placed. Every hold term added in §2.1.5–2.1.16
+(contact ×5, load share, joint speed, stance floor) charges exactly that. Wherever the robot stops mid-stride,
+re-posing costs more in the short run than holding a contorted stance, so the learned standing pose is a
+compromise of those stop points — which is why it contorts itself even from a rest-pose start. It also explains
+why each stronger hold penalty failed: it made the remedy (stepping) dearer too.
+
+**Fix (settle window, agreed with the user).** For the first `stand_settle_s` = 1.5 s of a stand (one gait period
+at 0.8 Hz, rounded up) only `standing_pose` (the rest-pose pull) acts; `standing_contact`, `standing_load_share`
+and `standing_joint_speed` apply from then on (`env.stand_hold`). The robot may take a step or two to square up,
+then hold. The actor does not observe the timer; it can tell "not yet at rest" from its own joint positions.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 1500 \
+  --resume --load_run 2026-09-22_03-54-55_s0b_seed42_r9_from_r8_stand50 --checkpoint model_12399.pt \
+  --run_name s0b_seed42_r10_from_r9_settle env.commands.base_velocity.rel_standing_envs=0.5
+```
+
+### 2.1.19 Terrain difficulty — discussion with the user (before implementing)
+
+Robot numbers: body 25 cm long, 13–20 cm wide; coxa 5.3 cm, femur 6.2 cm, tibia ≈ 13 cm (URDF). Base origin
+≈ 0.17 m above the terrain when standing and the base bottom plate 3.3 cm below it → **belly clearance ≈ 13–14 cm**,
+not a binding limit. The binding limit is **swing height ≈ 3.8 cm** (`cpg_z_target` step height; measured apex
+3.7–4.0 cm): taller obstacles need more lift than the gait reward pays for. Slopes: servo torque is not binding
+(femur ≈ 12 % of stall standing); friction is — at the lowest sampled μ 0.3 anything above ≈ 17° slides whatever
+the policy does.
+
+Proposal: gates also at L9 (hardest built level, untested so far; the curriculum's mean level sits near 6); then
+levels 10–14 as already laid out in `S0B_TERRAIN_CFG` (rough ±2.25 cm, slopes 15°, bumps 3 cm) plus pyramid
+stairs with 1.5 → 3 cm risers, capped there: beyond it needs a higher step-height target, and harder geometry
+makes blind arms fail for geometric reasons, blurring the friction/compliance comparison the paper is about
+(v7 §5.4: geometry ⟂ physics). Gates required on L0/L5/L9, L14 reported as robustness. Pending the user's decision.
+
+L9 gate check, run 4 policy (`…r4_from_r2/model_6997.pt`, 256 episodes, `logs/eval/s0b_r4_final_v*_L9.json`):
+0.10 m/s → 0 % falls, v_x 0.104, cycle RMSE 0.014, stride 0.132 (+6 %); 0.15 m/s → 0 % falls, 0.146, 0.014,
+0.185 (−1 %). All walking gates pass on the hardest built level too — there is headroom for levels 10–14.
+
+Run 10 at 13,150 (128 envs, L0) — first standing fix that moves it: right-back contact 0.05 → **0.57**, all-leg
+contact duty 0.78 → 0.86 (0.90 0.98 0.57 0.79 0.98 0.97), Σ|q̇| 3.7 → 2.7 rad/s, drift 4.0 → **1.9 cm** per 10 s,
+0 % falls. Walking unaffected: 0.10 m/s → 0.1035, stride 0.131 (+5 %).
+
+Run 10 finished at 13,898 (2,772 s): `logs/rsl_rl/hexapod_s0b/2026-09-22_12-11-04_s0b_seed42_r10_from_r9_settle/model_13898.pt`.
+`eval_s0b_gates.sh` now covers L0, L5 and L9 (`logs/eval_s0b_r10_final.txt`, 256 episodes each):
+
+| Condition | L0 | L5 | L9 |
+| --- | --- | --- | --- |
+| 0.10 m/s: v_x / stride (ref 0.125) / cycle RMSE | 0.100 / 0.125 (+0.3 %) / 0.004 | 0.101 / 0.127 (+1.6 %) / 0.006 | 0.101 / 0.128 (+2.2 %) / 0.010 |
+| 0.15 m/s: v_x / stride (ref 0.1875) / cycle RMSE | 0.145 / 0.185 (−1.5 %) / 0.005 | 0.146 / 0.185 (−1.6 %) / 0.007 | 0.145 / 0.183 (−2.2 %) / 0.011 |
+| falls (walking and standing) | 0 % | 0 % | 0 % |
+| standing: contact duty / drift / Σ\|q̇\| | 0.85 / 1.8 cm / 2.3 | 0.82 / 1.8 cm / 2.5 | 0.79 / 2.0 cm / 2.6 |
+
+No drops vs drops: identical (0.10: RMSE 0.0034 vs 0.0036). **All walking gates pass on L0/L5/L9** — the best
+walking so far. Standing posture (`logs/s0b_stand_posture_r10.txt`): right-back fixed (load 1.12 × fair share), but
+the stance is still off rest — left-back coxa at its +55° stop, LF coxa +35°, RF femur/tibia +29°/−32°; per-leg load
+0.45–1.82 × fair share; total |q − q_rest| ≈ 5 rad (run 8: ≈ 11). The last 750 iterations changed it little (drift
+1.9 → 1.8 cm). Next, proposed to the user: settle window 1.5 → 2.5 s (two gait periods, time to re-place more than
+one leg), then the terrain extension (§2.1.19) and a final segment at the spec's 10 % standing share.
+
+### 2.1.20 Decisions after run 10 (with the user, 2026-09-22)
+
+Standing accepted as is (run 10). Next, before declaring π_S0: (1) an evaluation-only terrain stress sweep to find
+where the gates break; (2) turning; (3) training on harder terrain up to the break point + 1–2 levels (capped at
+level 14), the levels above it kept as a held-out suite; (4) that suite recorded in both specs as a secondary,
+sim-only result marked TBD. Reasoning (agreed): training on levels beyond the robot's reach (obstacles ≥ 3 cm vs
+the 3.8 cm CPG swing) wastes samples on failures and pays for lifting feet above the CPG target, distorting the
+gait handed to S1/S2; the training terrain becomes an all-arm invariant at S1; levels above the training top give a
+clean held-out test where F vs B2 is the fair comparison (depth arms beating blind arms on geometry is expected and
+not a claim).
+
+**Terrain sweep (eval only).** `mdp/terrain.py`: `EVAL_TERRAIN_TYPES` = the training sub-terrains + pyramid stairs
+up/down (riser 0 → 3 cm at difficulty 1, tread 0.3 m; not in the training mix); `single_type_generator(name)` builds
+one type over 15 levels with difficulty (ℓ + U)/15 exactly as in training, so levels 0–9 match the training rows.
+`eval_s0.py --terrain_type <name>`; `scripts/rsl_rl/eval_terrain_sweep.sh <ckpt> <tag>`: 6 types × levels
+{0, 3, 6, 9, 10–14} × v_x {0.10, 0.15}, 128 episodes per cell. (Naming fix: Isaac Lab's plain pyramid has the
+platform on top — the robot walks *down*; the training keys `slope_up`/`slope_down` were swapped and are now
+correct, order and terrain unchanged.) First attempt discarded: cells launched while the env code was being edited
+crashed at import, and Kit exited 0, so `set -e` did not stop the script — cells are now judged by their JSON
+(`MISSING …` otherwise).
+
+### 2.1.21 Turning (design)
+
+**Problem.** `cpg_coxa_contact` paid every leg for a *backward* coxa sweep. Turning needs the two sides to sweep in
+opposite directions (and sideways motion needs sweeps along other directions), so the reward fought every turn —
+the main reason a CPG-shaped policy resists anything but straight walking. v7 §2.6 already asks for the signed
+velocity "projected on commanded heading".
+**Fix.** `mdp.rewards.coxa_sweep_sign(env, twist)`: per leg, a planted toe must move at v_toe = −(v + ω ẑ × p_toe)
+(body frame); +coxa moves it along t⁺ = ẑ × (p_toe − p_coxa); the leg is paid for coxa rate × sign(cos(t⁺, v_toe)),
+0 where |cos| < 0.2. For straight walking it equals the old `COXA_BACKWARD_SIGN` (asserted at env build). Only S0b
+uses it (`env.coxa_sign()`); Flat/S0a keep the fixed sign, so their rewards are unchanged.
+**Commands (D19).** Segments: 10 % standing (independent); of the rest 15 % turn on the spot (v_x = v_y = 0,
+|yaw| ~ U[0.1, 0.4] rad/s, random sign — clock at the 0.8 Hz floor, not standing), 30 % walk with v_y ±0.05 m/s
+and yaw ±0.4 rad/s, 55 % straight. Lateral goals are meant to be reached by turning then walking; the spec's small
+v_y stays in the mix. The evaluation conditions of the arms (v_x 0.10/0.15, v_y = yaw = 0) are unaffected.
+**Yaw tracking** on the same footing as linear (§2.1.9 lesson): `track_ang_vel_z` = exp(−e²/0.1²) − |e|, ×10
+(was Isaac Lab's exp σ 0.25, ×3). Gate script adds turn on the spot ±0.3 rad/s and walk 0.10 m/s + 0.2 rad/s on
+L0/L5; provisional turning gates (not in the spec): yaw-rate cycle RMSE ≤ 0.05 rad/s, falls ≤ 5 %.
+**Economics** (`reward_economy.py --cmd <vx vy wz> --terrain_level 0`, run 10 policy — never trained to turn —
+vs zero-action standing, dt-scaled per step; `logs/s0b_economy_turn.txt`): turn on the spot 0.3 rad/s: policy +0.280
+(drifts 0.032 m/s, does not turn), stand +0.696, perfect turning ≈ +1.05 (stand's terms + yaw tracking +0.26 + CPG
+terms, now aligned); walk 0.10 + yaw 0.2: policy +0.687 (walks, yaw error ≈ full), stand +0.076, perfect ≈ +0.91;
+straight 0.10: walk +0.751, stand +0.309. Turning > standing > falling in every command class.
+
+### 2.1.22 Terrain sweep result — no break point within the agreed cap
+
+`scripts/rsl_rl/eval_terrain_sweep.sh <run 10 model_13898.pt> r10` (`logs/eval/sweep_r10_*.json`, 128 episodes per
+cell; a second, stray copy of the loop — Ctrl-C had killed only its Python child — ran alongside and was left to
+finish; every cell was then re-run by one loop on the final code, 108/108 present). Cell = falls / cycle RMSE /
+stride error; levels 0–9 = training range, 10–14 = harder (level 14: rough ±2.25 cm, slopes 15°, bumps 3 cm, stairs
+3 cm risers):
+
+| v_x | type | L0 | L9 | L12 | L13 | L14 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.10 | rough | 0 / .005 / −2 % | 0 / .012 / +2 % | 0 / .019 / +2 % | 0 / .018 / +2 % | 0 / .021 / +2 % |
+| 0.10 | slope up | 0 / .004 / 0 % | 0 / .012 / +1 % | 0 / .017 / +1 % | 0 / .019 / +1 % | 0 / .021 / +2 % |
+| 0.10 | slope down | 0 / .004 / 0 % | 0 / .011 / +3 % | 0 / .016 / +5 % | 0 / .017 / +5 % | 0 / .020 / +6 % |
+| 0.10 | bumps | 0 / .005 / −3 % | 0 / .007 / −1 % | 0 / .008 / −1 % | 0 / .011 / −2 % | 0 / .010 / −1 % |
+| 0.10 | stairs up | 0 / .004 / −1 % | 0 / .011 / +1 % | 0 / .018 / −1 % | 0 / .022 / −1 % | 0 / .025 / −2 % |
+| 0.10 | stairs down | 0 / .004 / −1 % | 0 / .011 / +6 % | 0 / .015 / +7 % | 0 / .017 / +7 % | 0 / .018 / +8 % |
+| 0.15 | rough | 0 / .008 / −3 % | 0 / .013 / −4 % | 0 / .019 / −7 % | 0 / .021 / −8 % | 0 / .026 / −9 % |
+| 0.15 | slope up | 0 / .005 / −2 % | 0 / .016 / −4 % | 0 / .029 / −8 % | **0 / .032 / −8 %** | **0 / .038 / −10 %** |
+| 0.15 | slope down | 0 / .005 / −1 % | 0 / .009 / −1 % | 0 / .014 / 0 % | 0 / .016 / 0 % | 0 / .018 / +1 % |
+| 0.15 | bumps | 0 / .009 / −4 % | 0 / .009 / −4 % | 0 / .010 / −5 % | 0 / .012 / −5 % | 0 / .017 / −5 % |
+| 0.15 | stairs up | 0 / .006 / −2 % | 0 / .014 / −5 % | 0 / .020 / −8 % | 0 / .023 / −10 % | **0 / .027 / −11 %** |
+| 0.15 | stairs down | 0 / .006 / −2 % | 0 / .010 / −1 % | 0 / .015 / −1 % | 0 / .016 / −1 % | 0 / .016 / −2 % |
+
+**0 % falls in all 108 cells**; the only gate failures (bold) are uphill at 0.15 m/s (slopes L13–14, stairs L14),
+where the robot slows. Within the agreed cap (≤ 3 cm obstacles, ≤ 15°) the policy has no break point — trained on
+levels 0–9 only. Step 3 of the plan (train to break point + 1–2, hold out the rest) therefore needs re-deciding with
+the user.
+
+### 2.1.23 S0b run 11: turning (continuation of run 10)
+
+`eval_s0.py` now reports `wz_mean` and `wz_rmse_cycle` for yaw commands (stride only when a translation is
+commanded). Standing share back at the spec's 10 %.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_12-11-04_s0b_seed42_r10_from_r9_settle --checkpoint model_13898.pt \
+  --run_name s0b_seed42_r11_from_r10_turning
+```
+
+### 2.1.24 Held-out levels 15–20 (decision: train 0–14, hold out 15–20)
+
+Decided with the user: train on levels 0–14 (the agreed cap), keep 15–20 — beyond the cap, eval-only — as the
+held-out suite for the secondary result. `single_type_generator` now builds 21 levels with difficulty (ℓ + U)/15
+(levels 0–14 unchanged; level 20: rough ±3.0 cm, slopes ≈ 19.7°, bumps and stairs 4.0 cm, at/over the 3.8 cm foot
+lift). `eval_terrain_sweep.sh <run 10> r10x 15 16 17 18 19 20` (`logs/eval/sweep_r10x_*.json`, 72/72 cells):
+
+| v_x | type | L15 | L17 | L20 |
+| --- | --- | --- | --- | --- |
+| 0.10 | rough | 0 / .023 / +1 % | 0 / .027 / −2 % | **0 / .042 / −10 %** |
+| 0.10 | slope up | 0 / .025 / +1 % | **0 / .035 / −2 %** | **0 / .044 / −4 %** |
+| 0.10 | slope down | 0 / .024 / +8 % | **0 / .030 / +11 %** | **0 / .043 / +16 %** |
+| 0.10 | bumps | 0 / .013 / −1 % | 0 / .015 / −1 % | 0 / .019 / −5 % |
+| 0.10 | stairs up | 0 / .025 / −1 % | **0 / .034 / −5 %** | **0 / .048 / −19 %** |
+| 0.10 | stairs down | 0 / .019 / +8 % | 0 / .021 / +8 % | 0 / .024 / −5 % |
+| 0.15 | rough | **0 / .028 / −10 %** | **0 / .035 / −13 %** | **0 / .048 / −20 %** |
+| 0.15 | slope up | **0 / .046 / −12 %** | **0 / .060 / −15 %** | **0 / .075 / −19 %** |
+| 0.15 | slope down | 0 / .022 / +1 % | **0 / .031 / +2 %** | **0 / .042 / +5 %** |
+| 0.15 | bumps | 0 / .015 / −5 % | 1 / .023 / −7 % | **0 / .030 / −10 %** |
+| 0.15 | stairs up | **0 / .030 / −13 %** | **0 / .041 / −16 %** | **0 / .068 / −30 %** |
+| 0.15 | stairs down | 0 / .019 / −3 % | 0 / .021 / −3 % | **0 / .033 / −18 %** |
+
+Falls stay ≈ 0 (one cell 1 %) even at 4 cm stairs and ≈ 20° slopes: beyond the cap the policy degrades in *speed
+and stride accuracy* (uphill and rough first), not in survival. The held-out suite therefore has headroom, but its
+metrics must include tracking error and stride, not only falls — noted for the secondary result (TBD).
+
+Run 11 finished at 15,897 (4,354 s): `logs/rsl_rl/hexapod_s0b/2026-09-22_16-11-22_s0b_seed42_r11_from_r10_turning/model_15897.pt`
+(`logs/eval_s0b_r11_final.txt`, 256 episodes per condition):
+
+| Condition | L0 | L5 |
+| --- | --- | --- |
+| turn on the spot −0.3 rad/s: ω̄_z / yaw cycle RMSE | −0.228 / 0.063 | −0.218 / 0.079 |
+| turn on the spot +0.3 rad/s | **+0.081 / 0.228** | +0.082 / 0.228 |
+| walk 0.10 m/s + yaw 0.2 rad/s: v_x / ω̄_z / yaw RMSE | 0.106 / 0.153 / 0.049 | 0.106 / 0.155 / 0.054 |
+| straight 0.10 (L0/L5/L9): v_x, stride | 0.106–0.107, +6 / +6.5 / +8 % | |
+| straight 0.15 (L0/L5/L9): v_x, stride | 0.151, +1 / +1 / +0.5 % | |
+| standing contact duty (L0/L5/L9) | 0.71 / 0.70 / 0.69 (run 10: 0.85) | |
+
+Falls 0 % everywhere. Turning is partly learned and **lopsided**: right turns track (≈ 75 % of the command), left
+turns barely (27 %). The coxa sign is mirror-symmetric by construction, so the asymmetry is the policy's — the
+right-side weakness it has carried since π_base — plus only 2,000 iterations. Straight walking still passes every
+gate (0.10 stride +6–8 %, inside ±10 %). Standing contact slipped with the standing share back at 10 %.
+
+### 2.1.25 S0b run 12: training terrain = levels 0–14 + stairs; turning continues
+
+`S0B_TERRAIN_CFG`: 15 rows, difficulty (0, 1); mix flat 0.15, rough 0.20, slope down 0.15, slope up 0.15, bumps 0.15,
+stairs down 0.10, stairs up 0.10 (stairs: 0 → 3 cm risers, tread 0.3 m). Levels 0–9 keep their per-level
+parameters; the mix changed (stairs added), so the training distribution of levels 0–9 is not identical to runs ≤ 11.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 3000 \
+  --resume --load_run 2026-09-22_16-11-22_s0b_seed42_r11_from_r10_turning --checkpoint model_15897.pt \
+  --run_name s0b_seed42_r12_from_r11_terrain14
+```
+
+Run 12 first launch crashed inside Kit start-up (thread in `libomni.kit.telemetry.plugin`, `__throw_regex_error`),
+before any project code ran; the identical relaunch worked — a Kit flake, not the import-order bug of §2.1.2.
+At 17,400: curriculum mean level 9.3 of 14, 0 falls; turn on the spot +0.3 → +0.108 rad/s (RMSE 0.196), −0.3 →
+−0.272 (RMSE 0.029): left turns still barely work.
+
+### 2.1.26 Lopsided turning: the coxa stroke term was farmable by tucked toes
+
+**Observed** (`logs/s0b_turn_probe2.txt`, run 12 at 17,400, 128 envs, turn on the spot). The needed coxa sign
+(`coxa_sweep_sign`) during stance: left turn — left-middle and left-back get the *opposite* sign to the other legs
+99 % / 94 % of stance steps, and the policy sweeps them that way at 2.0–2.2 rad/s; yaw rate only +0.05 of +0.3.
+Right turn — only right-front flipped (54 % of steps); yaw −0.26 of −0.3.
+**Root cause.** The sign is kinematically right: the needed coxa rate is θ̇ = (r × v_toe)_z / |r|² = −ω (r·p_toe)/|r|²
+for a pure turn (r = toe − coxa, p_toe = toe − base), so it flips when a toe sits inside its coxa relative to the
+base. But in this tall stance the horizontal toe reach |r_xy| is only 5.5–8 cm (`logs/s0b_sign_debug.txt`), and
+the term paid coxa *angular* rate: with a toe tucked near/under its coxa, a large coxa spin barely moves the toe but
+earns full reward. The policy tucked the left-middle/left-back toes and spun them — a reward exploit that fights
+left turns. (Geometry at rest was checked: all six signs −1 for a left turn.)
+**Fix.** `coxa_stroke_weight` = sign × |r_xy| / (that leg's rest-pose reach, measured at env build): the term pays
+toe stroke speed, not coxa spin; at the rest pose the magnitude is unchanged, tucked toes earn ≈ 0. Flat/S0a keep
+the fixed sign. Run 12 stopped at 17,630 (`…/2026-09-22_17-41-23_s0b_seed42_r12_from_r11_terrain14/model_17600.pt`).
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2500 \
+  --resume --load_run 2026-09-22_17-41-23_s0b_seed42_r12_from_r11_terrain14 --checkpoint model_17600.pt \
+  --run_name s0b_seed42_r13_from_r12_coxareach
+```
+
+Run 13 at 18,600 (128 envs, L0): turn on the spot −0.3 → −0.291 rad/s (RMSE 0.032); **+0.3 → +0.096** (RMSE 0.211);
+walk 0.10 + 0.2 rad/s → 0.098 m/s, +0.152 rad/s (RMSE 0.046); straight 0.10 → 0.097, stride 0.120 (−4 %); 0 falls.
+Probe (`logs/s0b_turn_probe3.txt`): the spin exploit is gone (tucked legs now stroke 0.1–0.3 rad/s), but the
+**tucked posture remains in both turn directions** — right-front, left-front, left-middle, left-back stand with
+|r_xy| at 3–10 % of their rest reach (toes almost under the hips); only right-middle and right-back reach out (60–
+70 %). Toes under the hips cannot yaw the body through the coxa; the working right turn relies on the two right legs
+that do reach. The fix removed the pay for the pose, not the learned pose (2,000+ iterations old); run 13 continues.
+
+Run 13 finished at 20,099 (4,924 s): `logs/rsl_rl/hexapod_s0b/2026-09-22_18-39-41_s0b_seed42_r13_from_r12_coxareach/model_20099.pt`
+(`logs/eval_s0b_r13_final.txt`, 256 episodes per condition, training terrain now levels 0–14):
+
+| Condition | L0 | L5 / L9 |
+| --- | --- | --- |
+| straight 0.10: v_x / stride / cycle RMSE | 0.098 / 0.123 (−1.4 %) / 0.004 | L9: 0.099 / 0.125 (0 %) / 0.008 |
+| straight 0.15 | 0.146 / 0.184 (−2 %) / 0.004 | L9: 0.146 / 0.182 (−3 %) / 0.008 |
+| turn on the spot −0.3: ω̄_z / yaw RMSE | −0.294 / 0.026 | L5: −0.287 / 0.033 |
+| turn on the spot +0.3 | **+0.114 / 0.192** | L5: **+0.110 / 0.198** |
+| walk 0.10 + yaw 0.2: v_x / ω̄_z / yaw RMSE | 0.099 / 0.155 / 0.044 | L5: 0.099 / 0.154 / 0.048 |
+| standing: contact duty / drift | 0.68 / 1.8 cm | |
+
+Falls 0 % everywhere. All straight-walking gates pass on L0–L9; walk-and-turn passes the provisional yaw gate
+(≤ 0.05); right turns on the spot pass; **left turns on the spot fail** (38 % of the command) — unchanged across
+runs 11–13 despite the coxa fix. Status: open, discussed with the user (§2.1.27).
+
+### 2.1.27 Left–right mirror augmentation (user decision, D21)
+
+**Why.** The policy has been left/right lopsided since π_base (right-side crutch legs, 2.0.14; right-back tucked
+when standing, 2.1.12; left turns on the spot at 38 %, §2.1.26) while every reward is mirror-symmetric. Each reward
+fix removed a cause but not the inherited habit. Decision with the user: train with mirror-symmetric data
+augmentation (Mittal et al. 2024, rsl_rl's `symmetry_cfg`), then move on to the from-scratch control run. This is a
+training-algorithm change shared by every arm; it must stay on from S1 onward (paradigm spec note pending).
+
+**Mapping** (`mdp/symmetry.py`): reflection y → −y; legs RF↔LF, RM↔LM, RB↔LB; coxa angle, rate, tracking error, last
+action and action flip sign (+coxa moves right toes forward, left toes backward), femur/tibia keep it; polar vectors
+(IMU accel, gravity, V_0, true velocity, CoM offset) negate y; angular velocity (ω_x, ω_y, ω_z) → (−ω_x, ω_y, −ω_z);
+twist_cmd (v_x, v_y, ω_z) → (v_x, −v_y, −ω_z); per-leg clock, read mask, foot forces and contacts are permuted with
+the legs (the tripods swap = the clock shifted by π, a state the phase jitter already produces); height, foot
+material, mass and servo scalars unchanged. `rsl_rl` trains every mini-batch on original + mirrored samples.
+**Tests.** `python …/mdp/symmetry.py` — the mirror is an involution on all three layouts. `scripts/tests/mirror_test.py`
+(gravity off, floating, 16 env pairs holding q and mirror(q), servo randomisation off): toe positions mirror to a
+median 0.91 mm, max 3.6 mm; joint-observation block to ≤ 0.010 rad → **PASS** (`logs/mirror_test.txt`). With servo
+randomisation on the error was 7 mm / 0.02 rad (backlash, gains); a wrong joint sign would show as cm / 0.3 rad.
+
+### 2.1.28 S0b run 14: mirror augmentation (continuation of run 13)
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_18-39-41_s0b_seed42_r13_from_r12_coxareach --checkpoint model_20099.pt \
+  --run_name s0b_seed42_r14_from_r13_mirror
+```
+
+Finished at 22,098 (4,172 s, 2.1 s/iteration with the doubled mini-batches):
+`logs/rsl_rl/hexapod_s0b/2026-09-22_20-30-48_s0b_seed42_r14_from_r13_mirror/model_22098.pt`. rsl_rl's symmetry loss
+(action mismatch between a sample and its mirror; not optimised, logged only) 0.87 → 0.77 (21,100) → 0.75.
+`logs/eval_s0b_r14_final.txt` (256 episodes per condition):
+
+| Condition | run 13 | run 14 |
+| --- | --- | --- |
+| straight 0.10, L0 / L5 / L9: stride error, cycle RMSE | −1.4 % … 0 %, ≤ 0.008 | −0.1 / −0.4 / −0.2 %, 0.003 / 0.005 / 0.008 |
+| straight 0.15, L0 / L5 / L9 | −2 … −3 %, ≤ 0.008 | −2.0 / −2.5 / −3.5 %, 0.005 / 0.006 / 0.008 |
+| walk 0.10 + yaw 0.2 (L0 / L5): ω̄_z, yaw RMSE | 0.155 / 0.154, 0.044 / 0.048 | **0.172 / 0.170, 0.030 / 0.035** |
+| turn on the spot −0.3 (L0 / L5) | −0.294 / −0.287, 0.026 / 0.033 | −0.278 / −0.273, 0.026 / 0.033 |
+| turn on the spot +0.3 (L0 / L5) | +0.114 / +0.110, 0.19 / 0.20 | **+0.155 / +0.149, 0.151 / 0.157** |
+| standing (L0): contact duty, drift | 0.68, 1.8 cm | **0.80**, 1.7 cm |
+
+Falls 0 % everywhere; drops vs drop-free identical. Mirror augmentation helped every asymmetric measure (left turn on
+the spot 38 % → 52 % of the command; walk-and-turn now passes the provisional yaw gate clearly; standing contact
+0.68 → 0.80) without costing straight walking, but did not close the left/right gap within the agreed 1–2 h of
+training. Per the user's plan, the next item is the from-scratch control arm (spec §4.2), which also tests whether
+the asymmetry is inherited from the π_base lineage.
+
+### 2.1.29 π_S0 (provisional) and the from-scratch control arm
+
+**π_S0 = `logs/rsl_rl/hexapod_s0b/2026-09-22_20-30-48_s0b_seed42_r14_from_r13_mirror/model_22098.pt`** (seed 42,
+4,096 envs × 16 steps, 22,098 S0b iterations on top of π_S0a's 4,498; declared with the user, provisional).
+Spec §4.2 S0b gates, 256 deterministic episodes per condition, terrain levels 0/5/9 (`logs/eval_s0b_r14_final.txt`):
+v_x tracking RMSE ≤ 0.008 (limit 0.03) ✓; stride within −0.1 … −3.5 % (limit ±10 %) ✓; falls 0 % (limit 5 %) ✓;
+tracking at the provisional drop rate identical to drop-free ✓. Our own (not in the spec) turning gates: walk-and-turn
+✓, turn on the spot right ✓, **turn on the spot left ✗ (52 % of a 0.3 rad/s command)** — the open caveat, carried
+into the paper's honesty section unless the from-scratch arm or later stages close it. Standing: 80 % contact duty,
+1.7 cm drift per 10 s, no falls.
+
+**From-scratch control arm (spec §4.2), decisions with the user:** budget = the warm-start reconditioning effort,
+S0a + S0b = 4,498 + 22,098 = 26,596 iterations ≈ 1.74 B env steps (Phase 1's π_base is treated as sunk cost);
+the control arm gets 1.2× ≈ 32,000 iterations. Setup: the **final** S0b task from a random actor (init std 1.0,
+floored at 0.05), same env, rewards, DR, terrain curriculum, mirror augmentation and batch as π_S0's last run, with
+the S0PPO actor freeze disabled (it exists to protect a warm-started gait). Gates evaluated at 4k, 8k, 16k, 24k and
+32k iterations; if it passes the S0b gates within the budget, the warm start and the KL anchor (§4.4) are dropped
+for every arm.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 32000 \
+  --run_name s0_fromscratch_seed42 agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0
+```
+
+**Deviations added in S0b stage 2** (spec text updated where noted):
+
+| # | Deviation | Where |
+| --- | --- | --- |
+| D18 | Standing share raised to 50 % for runs 9–10 (training schedule), back to the spec's 10 % from run 11 | 2.1.17 |
+| D19 | Commands: 15 % of non-standing segments turn on the spot (\|yaw\| 0.1–0.4 rad/s), yaw range ±0.4 (was ±0.25); `cpg_coxa_contact` pays the stroke the commanded twist needs (v7 §2.6's "projected on commanded heading"), reach-weighted | 2.1.21, 2.1.26 |
+| D20 | Training terrain = levels 0–14 of the 15-level generator + stairs (0 → 3 cm risers); levels 15–20 eval-only | 2.1.24, 2.1.25; paradigm spec §1 terrain row and §10.4 updated |
+| D21 | Left–right mirror data augmentation in PPO, every arm from S0b | 2.1.27; paradigm spec §1 training-algorithm row |
+| D22 | Held-out harder-terrain suite recorded as a secondary result marked TBD | paradigm spec §10.4, v7 §5.3 |
+
+### 2.1.30 From-scratch control arm — progress
+
+Gate evaluation of `logs/rsl_rl/hexapod_s0b/<…>_s0_fromscratch_seed42/` checkpoints (256 episodes per condition,
+`logs/eval_fs_it*.txt`):
+
+| Iteration (of 32,000) | falls | 0.10: v_x / stride err / RMSE | 0.15: v_x / stride err / RMSE | turn ±0.3 | standing duty / drift |
+| --- | --- | --- | --- | --- | --- |
+| 4,000 | 0 % (L0/L5/L9) | 0.095 / **−36 %** / 0.006 | 0.144 / **−29 %** / 0.007 | **+0.064 / −0.063** | 0.90 / 1.5 cm |
+| 8,000 | 0 % (L0/L5/L9) | 0.094 / −4.9 % / 0.006 | 0.140 / −6.8 % / 0.009 | +0.187 / −0.191 | 0.97 / 1.0 cm |
+
+**At 8,000 iterations — 0.30 × the warm-start budget — the from-scratch arm passes all four spec §4.2 S0b gates**
+(falls 0 % on L0/L5/L9; v_x cycle RMSE ≤ 0.011; stride −4.6 … −8.3 %; drops identical to drop-free), well inside the
+1.2 × rule. It also beats π_S0 on the extras: standing contact duty 0.97 vs 0.80 and drift 1.0 vs 1.7 cm,
+walk-and-turn yaw RMSE 0.024 vs 0.030, and turning on the spot is **symmetric** (+0.187 / −0.191 of ±0.3) where the
+warm-started lineage sits at +0.155 / −0.278. Per §4.2 this means **the warm start and the KL anchor (§4.4) are
+dropped for every arm**; π_S0 becomes this run's policy (training continues to the full budget for quality).
+
+At 15 % of the budget a random-init policy already walks at the commanded speed with no falls and stands better than
+π_S0 (contact duty 0.90 vs 0.80), but its gait does not match the 0.8 Hz clock — it takes shorter, faster steps
+(stride −29 … −36 %, contact duty 0.58 vs 0.50) — and it barely turns. Notably the turning is **symmetric**
+(+0.064 / −0.063), unlike the π_base lineage: evidence that the left/right asymmetry of §2.1.26 is inherited.
+
+| 18,750 | 0 % (L0/L5/L9) | 0.097 / −1.8 % / 0.004 | 0.146 / −1.8 % / 0.003 | +0.257 / −0.254 (RMSE 0.040 / 0.042) | 0.95 / 0.8 cm |
+
+At 18,750 iterations (0.70 × the warm-start budget) the from-scratch arm passes **every** gate including both
+provisional turning gates, and beats the warm-started π_S0 on all of them: stride error −1.8 % vs −0.1 … −3.5 %,
+v_x cycle RMSE ≤ 0.005 vs ≤ 0.008, walk-and-turn yaw RMSE 0.012 vs 0.030, standing contact duty 0.95 vs 0.80 and
+drift 0.8 vs 1.7 cm, and symmetric turning on the spot (+0.257 / −0.254 of ±0.3) against the lineage's +0.155 /
+−0.278. Per the user's instruction the run continues to ~22,000 iterations and is then stopped for the final S0
+evaluation at 1,024 episodes per condition (`eval_s0b_gates.sh <ckpt> <tag> 1024`; the spec floor is ≥ 200, and
+1,024 tightens the 95 % upper bound on a 0 % fall rate from 1.2 % to 0.3 % at no extra wall time).
+
+**Training stopped at 20,749 iterations** (user: the mean return plateaued at ≈ 400 for ~2,000 iterations on
+TensorBoard), final checkpoint `logs/rsl_rl/hexapod_s0b/2026-09-22_22-50-43_s0_fromscratch_seed42/model_20700.pt`
+= **0.78 × the warm-start budget**, of which the S0b gates were first met at 0.30 ×.
+
+*Why the from-scratch stride error at 0.10 m/s (−1.8 %) is larger than the warm-started one (−0.1 %) while every
+other number is better:* the stride gate measures speed accuracy more than gait shape. Stride = v_x / f_actual
+against v_cmd / f_ref. At 0.10 the from-scratch policy walks 0.0966 (−3.4 % on the command) and steps at 0.787 Hz
+(−1.6 % on the 0.8 Hz reference), leaving −1.8 %; the warm-started one walked 0.0984 at ≈ 0.800 Hz. At 0.15 the
+from-scratch policy tracks better (0.1461 vs 0.1447) and its stride error is the smaller of the two. Both sit far
+inside the ±10 % gate; the difference is ≈ 2 mm per step.
+
+### 2.1.31 π_S0 — final (from scratch, 2026-09-23)
+
+**π_S0 = `logs/rsl_rl/hexapod_s0b/2026-09-22_22-50-43_s0_fromscratch_seed42/model_20700.pt`** (seed 42, 4,096 envs ×
+16 steps, 20,749 iterations ≈ 1.36 B env steps, no warm start, mirror augmentation on). Reproduce:
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 32000 \
+  --run_name s0_fromscratch_seed42 agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0
+# stopped at 20,749 (return plateaued ≈ 400 for ~2,000 iterations)
+scripts/rsl_rl/eval_s0b_gates.sh <ckpt> pi_s0_final 1024
+```
+
+Final gates, **1,024 episodes per condition**, 17 conditions = 17,408 episodes, `logs/eval_pi_s0_final.txt`:
+
+| Condition | L0 | L5 | L9 |
+| --- | --- | --- | --- |
+| 0.10 m/s: v_x / stride (ref 0.125) / cycle RMSE | 0.1024 / 0.1299 (+3.9 %) / 0.0041 | 0.1022 / 0.1303 (+4.2 %) / 0.0043 | 0.1021 / 0.1307 (+4.6 %) / 0.0050 |
+| 0.15 m/s: v_x / stride (ref 0.1875) / cycle RMSE | 0.1508 / 0.1902 (+1.4 %) / 0.0031 | 0.1502 / 0.1898 (+1.2 %) / 0.0035 | 0.1495 / 0.1888 (+0.7 %) / 0.0047 |
+| turn +0.3 / −0.3: ω̄_z, yaw RMSE | +0.258, 0.038 / −0.264, 0.032 | +0.258, 0.039 / −0.264, 0.032 | — |
+| walk 0.10 + yaw 0.2: ω̄_z, yaw RMSE | 0.202, 0.011 | 0.201, 0.012 | — |
+| standing: contact duty / drift | 0.95 / 0.85 cm | 0.87 / 1.03 cm | 0.84 / 1.24 cm |
+| falls | 0 % | 0 % | 0 % |
+| 0.10 / 0.15 with vs without dropped reads | 0.0041 vs 0.0043 / 0.0031 vs 0.0032 | — | — |
+
+**All spec §4.2 S0b gates pass**, with zero falls in 17,408 episodes (95 % upper bound 0.29 % per condition), and both
+of our own turning gates pass symmetrically. Toe clearance 3.9–4.2 cm walking. The spec §4.2 control-arm rule fired:
+the warm start and the KL anchor are dropped for every arm (paradigm spec §1, §4.2, §4.4 updated 2026-09-23).
+
+### 2.1.32 Demonstration script (keyboard teleoperation + video)
+
+`scripts/rsl_rl/demo_teleop.py` (needs the Isaac Sim GUI for key input): one difficulty (`--level`, 0–20) with the
+seven terrain types as columns — flat, rough, slope down, slope up, bumps, stairs down, stairs up — three rows deep,
+so walking sideways crosses types. Arrow keys drive (v_x 0–0.20, v_y ±0.05), Z/X turn (±0.4 rad/s), no key is the
+standing mode, R starts/stops a video take (`logs/videos/demo/*.mp4`, Isaac Lab's RecordVideo), N resets with a fresh
+dynamics-randomisation draw. Commands are clamped to the trained ranges; DR, sensor noise and dropped reads stay on;
+the camera follows the robot. `--selftest N` runs N scripted steps headless (no keyboard) and writes one take —
+used to verify the script: level 12, 300 steps, base 0.169 m above terrain, `s0_demo_L12_take1.mp4` written.
+
+### 2.1.33 π_S0 terrain characterisation (180 cells)
+
+`scripts/rsl_rl/eval_terrain_sweep.sh <π_S0> pis0 0 3 6 9 10 … 20` (128 episodes per cell,
+`logs/eval/sweep_pis0_*.json`; one cell, slope_up L17 v0.10, failed on a contended GPU and was re-run:
+0 falls, RMSE 0.011, stride +4.5 %). Cell = falls / cycle RMSE / stride error:
+
+| v_x | type | L0 | L9 | L14 (training ceiling) | L17 (held out) | L20 (held out) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.10 | rough | 0 / .003 / +3 % | 0 / .005 / +4 % | 0 / .009 / +2 % | 0 / .015 / −3 % | **0 / .032 / −15 %** |
+| 0.10 | slope up | 0 / .004 / +4 % | 0 / .004 / +5 % | 0 / .007 / +6 % | 0 / .011 / +4.5 % | 0 / .020 / +2 % |
+| 0.10 | slope down | 0 / .004 / +4 % | 0 / .006 / +2 % | 0 / .009 / +2 % | 0 / .017 / +3 % | **0 / .031 / +3 %** |
+| 0.10 | bumps | 0 / .003 / +2 % | 0 / .003 / +3 % | 0 / .004 / +2 % | 0 / .008 / +1 % | 0 / .018 / −4 % |
+| 0.10 | stairs up | 0 / .004 / +4 % | 0 / .004 / +5 % | 0 / .007 / +1 % | 0 / .009 / −2 % | **0 / .053 / −26 %** |
+| 0.10 | stairs down | 0 / .004 / +4 % | 0 / .006 / +4 % | 0 / .008 / +2 % | 0 / .009 / 0 % | **0 / .022 / −13 %** |
+| 0.15 | rough | 0 / .002 / 0 % | 0 / .005 / −1 % | 0 / .014 / −6 % | **0 / .024 / −14 %** | **0 / .048 / −24 %** |
+| 0.15 | slope up | 0 / .003 / +1 % | 0 / .004 / +1 % | 0 / .011 / 0 % | 0 / .021 / −2 % | **0 / .037 / −6 %** |
+| 0.15 | slope down | 0 / .003 / +1 % | 0 / .006 / +1 % | 0 / .009 / +1 % | 0 / .013 / +1 % | 0 / .028 / 0 % |
+| 0.15 | bumps | 0 / .002 / 0 % | 0 / .003 / −1 % | 0 / .007 / −2 % | 0 / .020 / −5 % | 0 / .028 / −8 % |
+| 0.15 | stairs up | 0 / .003 / +1 % | 0 / .006 / −1 % | 0 / .011 / −6 % | **0 / .015 / −12 %** | **0 / .085 / −38 %** |
+| 0.15 | stairs down | 0 / .003 / +1 % | 0 / .006 / 0 % | 0 / .007 / −4 % | 0 / .008 / −7 % | **0 / .023 / −19 %** |
+
+**Every cell of the training range (levels 0–14) passes, with zero falls**; the warm-started policy already failed
+uphill at L13 (§2.1.22). Falls stay at 0 % through the held-out levels too — degradation there is in speed and
+stride (first failures at L17 on rough and stairs at 0.15 m/s, large by L20), which is the headroom §10.4 needs and
+confirms the suite must be scored on tracking and stride, not falls.
+
+### 2.1.34 Gait geometry: the feet migrated under the hips (open question)
+
+The user saw in the teleop demo and `play.py` that the tibia points inwards rather than outwards.
+`scripts/rsl_rl/record_gait.py` (new) walks a checkpoint at 0.15 m/s on flat ground, records a video
+(`logs/videos/gait/*.mp4`) and prints per-leg joint angles, toe position in the body frame, **reach** (toe distance
+from its own coxa joint projected on that hip's outward direction; rest pose ≈ 0.06 m) and **tibia_lat** (lateral
+component of the tibia direction, + = shin outboard). `logs/gait_geometry.txt`, middle-leg values:
+
+| policy | middle reach (m) | middle tibia° | tibia_lat | stance half-width (m) |
+| --- | --- | --- | --- | --- |
+| π_base | 0.184 | −28 | +0.090 | 0.201 |
+| π_S0a | 0.102 | −44 | +0.048 | 0.161 |
+| S0b r2 / r4 | 0.097 / 0.103 | −44 | +0.045 | 0.140 / 0.139 |
+| S0b r10 / r13 / r14 | 0.126 / 0.135 / 0.136 (right) | +32…+34 (left) | −0.02…−0.03 (left) | 0.149 / 0.145 / 0.154 |
+| **π_S0 (from scratch)** | **0.011–0.018** | **+34…+39** | **−0.047…−0.062** | **0.108** |
+
+In π_S0 the four middle and back feet stand almost directly under their hips, knees splayed out and shins slanting
+inward; the front legs are near normal (reach 0.08–0.10). Left and right mirror each other to ≈ 2 mm — the mirror
+augmentation working.
+**Why:** static joint torque scales with the horizontal distance from joint to foot, so pulling the foot under the
+hip drives the torque-excess penalty, the servo sag (which the swing-height kernel punishes) and the stance-rigidity
+cost toward their minima. Nothing in the reward set asks for stance width or leg extension, so the cheapest posture
+wins; a narrow stance also shortens the moment arm for turning on the spot, which fits π_S0 being the best turner.
+S0a did not show it because it inherited π_base's wide stance and only trained 4,498 iterations; the from-scratch run
+optimised straight to the torque optimum.
+**Risk:** all measured gates pass (0 falls to level 20), and the posture is kinder to the AX-12As, but the support
+polygon is ~25 % narrower than the rest-pose footprint, and with the shin slanted inward the ground contact sits near
+the edge of the foot rather than the rubber tip — a sim2real contact-geometry risk (v7 §5.1's foot model). It will
+not resolve itself: S1–S3 keep this reward set minus the CPG terms, and nothing there pushes the feet outward.
+**Open with the user:** (1) add a light stance-footprint term (keep stance toes near the rest-pose footprint) and
+retrain S0b ~1–2 h; (2) cap the tibia angle; (3) accept and document.
+
+**Swing-phase check** (the user saw "unnecessary tibia motion in the air"). Probe: per leg, per swing (foot off the
+ground ≥ 3 steps), joint excursion, path length and direction reversals (deadband 0.0025 rad), 128 envs, flat, 0.15
+m/s, steps 100–400 (`logs/swing_probe.txt`). A clean swing folds and unfolds once: path/excursion ≈ 2, ≈ 2 reversals.
+
+| per swing, RF RM RB LF LM LB | π_S0a | S0b r14 | π_S0 |
+| --- | --- | --- | --- |
+| tibia excursion ° | 17 1 26 16 11 20 | 27 37 26 51 31 42 | 43 18 25 42 17 25 |
+| tibia path / excursion | 2.3 1.8 1.7 1.9 **3.1** 1.9 | 1.3 1.7 1.9 1.5 1.8 1.9 | 1.6 2.0 1.9 1.6 2.0 1.9 |
+| tibia reversals | 3.1 0.8 **4.0** 1.4 **3.0** 3.2 | 2.0 2.7 2.3 2.1 1.3 2.4 | 1.2 2.4 2.3 1.2 2.3 2.2 |
+| femur excursion ° | 28 28 34 13 23 25 | 35 41 16 27 40 42 | 26 38 **49** 26 38 **49** |
+| coxa excursion ° | 57 48 47 56 55 57 | 74 57 57 60 94 90 | 65 **95** 72 64 **96** 73 |
+
+π_S0's tibia is not jittery — it is the smoothest of the three (π_S0a wiggles: up to 3.1 × path/excursion and 3–4
+reversals). What looks unnecessary is **amplitude**: middle-leg coxa arcs of 95° (π_S0a ≈ 50°), close to the ±55°
+limit on each side, and larger femur/tibia arcs. It follows from the tucked stance: toe travel = coxa angle × reach,
+and with the middle toes ≈ 1 cm outboard of their hips the coxa must sweep far to make the same ≈ 19 cm stride. The
+inward shins and the large arcs are one problem. Proposed to the user: a stance-footprint term (L1 on each stance
+foot's reach minus that leg's rest-pose reach, measured at env build), weight sized with `reward_economy.py`,
+continue π_S0 ~2,000 iterations, then gates, sweep, geometry table and video.

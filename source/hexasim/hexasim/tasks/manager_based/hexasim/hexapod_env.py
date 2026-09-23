@@ -12,7 +12,7 @@ from rsl_rl.modules.normalization import EmpiricalNormalization
 from isaaclab.envs import ManagerBasedRLEnv
 
 from .mdp.proprio import ProprioReader
-from .mdp.rewards import LEG_NAMES, toe_pos_w
+from .mdp.rewards import COXA_BACKWARD_SIGN, LEG_NAMES, coxa_leg_geometry, coxa_stroke_weight, toe_pos_w
 from .mdp.terrain import HeightMap
 
 
@@ -28,9 +28,11 @@ class HexapodEnv(ManagerBasedRLEnv):
         # CPG state must exist before the observation/reward managers probe their terms.
         robot = self.scene["robot"]
         self._tibia_body_ids = [i for i, n in enumerate(robot.data.body_names) if "tibia" in n]
+        self._coxa_body_ids = [i for i, n in enumerate(robot.data.body_names) if "coxa" in n]
         tibia_names = [robot.data.body_names[i] for i in self._tibia_body_ids]
+        coxa_names = [robot.data.body_names[i] for i in self._coxa_body_ids]
         sensor_names = self.scene["contact_forces"].body_names
-        for names in (tibia_names, sensor_names):
+        for names in (tibia_names, coxa_names, sensor_names):
             assert len(names) == 6 and all(leg in n for leg, n in zip(LEG_NAMES, names)), f"leg order: {names}"
         joints_per_type = [[n for n in robot.joint_names if n.endswith(t)] for t in ("_coxa", "_femur", "_tibia")]
         for names in joints_per_type:
@@ -49,9 +51,19 @@ class HexapodEnv(ManagerBasedRLEnv):
         # Per-env, per-leg peak load in tripod stance: total weight / 3, (N, 1). Read after the startup
         # events added mast and payload, which differ per env.
         self.tripod_leg_load = robot.data.body_mass.torch.sum(dim=1, keepdim=True) * 9.81 / 3.0
+        # Rest-pose horizontal toe reach from each coxa (env 0, at build = rest pose); normalises the coxa stroke term.
+        self.coxa_rest_reach = coxa_leg_geometry(self)[1][0, :, :2].norm(dim=-1)
+        # The command-projected coxa stroke sign must reduce to the fixed backward sign for straight walking.
+        forward = torch.tensor([[0.1, 0.0, 0.0]], device=self.device).expand(self.num_envs, 3)
+        sign = torch.sign(coxa_stroke_weight(self, forward))
+        assert (sign == torch.tensor(COXA_BACKWARD_SIGN, device=self.device)).all(), f"coxa stroke sign: {sign[0]}"
 
     def _velocity_input(self) -> torch.Tensor:
         return self.scene["robot"].data.root_lin_vel_b.torch
+
+    def coxa_stroke_weight(self) -> torch.Tensor:
+        """(N, 6) multiplier turning coxa rate into the stance stroke the gait needs; Flat/S0a: fixed backward sign."""
+        return torch.tensor(COXA_BACKWARD_SIGN, device=self.device).expand(self.num_envs, 6)
 
     def _clock_frequency(self) -> torch.Tensor:
         # f = v_x / 0.20 m stride, clamped [0.8, 2.5] Hz (v7 §2.2 stall floor).
@@ -153,7 +165,10 @@ class HexapodS0aEnv(HexapodEnv):
                 noise(imu.lin_acc_b.torch + self.imu_bias[:, :3], c.imu_acc_std),
                 noise(imu.ang_vel_b.torch + self.imu_bias[:, 3:], c.imu_gyro_std),
                 noise(robot.data.projected_gravity_b.torch, c.gravity_std),
-                torch.stack((torch.sin(self.cpg_phase), torch.cos(self.cpg_phase)), dim=-1).view(self.num_envs, 12),
+                # Clock; zeros (the spec's "absent" flag) while the clock is stopped — a frozen phase kept the
+                # "swing" legs of that phase light in standing mode (phase2-progress §2.1.10).
+                torch.stack((torch.sin(self.cpg_phase), torch.cos(self.cpg_phase)), dim=-1).view(self.num_envs, 12)
+                * self.cpg_active.unsqueeze(1),
                 p.mask,
             ],
             dim=-1,
@@ -177,6 +192,7 @@ class HexapodS0aEnv(HexapodEnv):
                 self.v0_loss = loss.detach()
         start, end = c.v0_ramp_steps
         self.v0_alpha = min(max((self.common_step_counter - start) / (end - start), 0.0), 1.0)
+        self.v0_last = v_hat.detach()
         self.v_in = (1.0 - self.v0_alpha) * v_true + self.v0_alpha * v_hat.detach()
         self.extras.setdefault("log", {}).update(
             {"S0a/v0_huber": self.v0_loss.item(), "S0a/v0_alpha": self.v0_alpha, "S0a/read_valid": p.mask.mean().item()}
@@ -191,7 +207,9 @@ class HexapodS0bEnv(HexapodS0aEnv):
     """S0b env (paradigm spec §4.2): twist_cmd, command-referenced clock, standing mode, terrain, full DR.
 
     Clock f_ref = clamp(v_cmd,x / 0.20, 0.8, 2.5) Hz from the command (replaces S0a's V_0-driven clock); standing
-    envs (zero command) freeze the clock and drop every CPG term (``cpg_active``). Terrain height and normal come
+    envs (zero command) freeze the clock and drop every CPG term (``cpg_active``); for the first
+    ``cfg.stand_settle_s`` of a stand only the rest-pose pull acts, so the robot may step to re-pose, then the
+    hold terms (contact, load share, joint speed) start (``stand_hold``). Terrain height and normal come
     from a height map raycast once from the terrain mesh. ``foot_material`` (N, 5) is set by the prestartup
     material event; the IMU bias is resampled per episode.
     """
@@ -200,6 +218,9 @@ class HexapodS0bEnv(HexapodS0aEnv):
         self.heightmap = HeightMap(self.scene.terrain.cfg.prim_path + "/terrain/mesh", self.device)
         self.spawn_xy = torch.zeros(self.num_envs, 2, device=self.device)
         self.cmd_dist = torch.zeros(self.num_envs, device=self.device)  # commanded path length this episode
+        # Standing: seconds since the zero command began; the standing hold terms start after the settle window.
+        self.stand_time = torch.zeros(self.num_envs, device=self.device)
+        self.stand_hold = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         super().load_managers()
         self.cmd_term = self.command_manager.get_term("base_velocity")
 
@@ -209,12 +230,17 @@ class HexapodS0bEnv(HexapodS0aEnv):
     def terrain_normal(self, xy: torch.Tensor) -> torch.Tensor:
         return self.heightmap.normal(xy)
 
+    def coxa_stroke_weight(self) -> torch.Tensor:
+        return coxa_stroke_weight(self, self.cmd_term.command)
+
     def _clock_frequency(self) -> torch.Tensor:
         cmd = self.cmd_term.command
         return torch.clamp(cmd[:, 0] / 0.20, min=0.8, max=2.5) * self.cpg_active
 
     def step(self, action: torch.Tensor):
         self.cpg_active = ~self.cmd_term.is_standing_env
+        self.stand_time = torch.where(self.cpg_active, 0.0, self.stand_time + self.step_dt)
+        self.stand_hold = ~self.cpg_active & (self.stand_time >= self.cfg.stand_settle_s)
         self.cmd_dist += torch.norm(self.cmd_term.command[:, :2], dim=1) * self.step_dt
         return super().step(action)
 
@@ -222,6 +248,7 @@ class HexapodS0bEnv(HexapodS0aEnv):
         super()._reset_idx(env_ids)  # curriculum reads spawn_xy / cmd_dist before they are reset here
         self.spawn_xy[env_ids] = self.scene["robot"].data.root_pos_w.torch[env_ids, :2]
         self.cmd_dist[env_ids] = 0.0
+        self.stand_time[env_ids] = 0.0
         c = self.cfg
         n = len(env_ids)
         self.imu_bias[env_ids] = torch.randn(n, 6, device=self.device) * torch.tensor(

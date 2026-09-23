@@ -121,11 +121,12 @@ Your message repeats v1's E1–E8 almost verbatim, including the pasted paradigm
 | Dropped reads *(new)* | Per-servo drops with probability rising with commanded torque or tracking error; ZOH of q and of the last valid q̇; 18-bit validity mask in every per-step input, B1-K's kinesthetic history included; one fill implementation for sim and robot | v7 §4.2a. Drops concentrate on rough terrain; an arm that never sees them is off-distribution exactly there |
 | Joint velocity *(new, closes A10)* | Two-sample backward difference of ZOH-filled, quantised positions: q̇\_t = (q\_t − q\_{t−2}) / 2Δt. If either endpoint is a held value, hold the last valid q̇. No recursive filter. Quantum 0.128 rad/s, group delay 20 ms. Frozen before S0 | A one-sample difference halves the delay but doubles the quantum (0.256 rad/s). A recursive filter adds delay the 60 ms horizon cannot afford. π\_S0 bakes this choice in |
 | Rewards | v7 §2 set with the §2.2/§2.3/§2.6 fixes; anneal and floors per §5 of this document | — |
-| Terrain | One generator, one material library (v7 §5.4, matte-slippery and shiny-grippy entries included), one set of transition profiles, one curriculum | — |
+| Training algorithm *(new)* | PPO with left–right mirror data augmentation (rsl\_rl `symmetry_cfg`, augmentation only): reflection y → −y, legs RF↔LF, RM↔LM, RB↔LB, coxa angle/rate/action sign flipped, femur and tibia kept, axial quantities (ω, yaw command) negated, per-leg blocks permuted (the tripods swap = the clock shifted by π). On from S0b for every arm; mapping verified against the simulator to < 1 mm toe error (research/phase2-progress §2.1.27) | The platform is mirror-symmetric but the π\_base lineage was not: it turned one way and stood on one side. An arm trained without it would carry a different asymmetry into the comparison |
+| Terrain | One generator, one material library (v7 §5.4, matte-slippery and shiny-grippy entries included), one set of transition profiles, one curriculum. Training uses levels 0–14 of the 15-level generator (level 14: rough ±2.25 cm, slopes 15°, bumps 3 cm, stairs 3 cm risers — the ceiling the 3.8 cm swing height allows); levels 15–20 are evaluation-only (§10.4) | — |
 | Dynamics randomisation | v7 §5.6 in full, including rolling shutter and specular depth dropout | — |
 | Critic | Separate network, same architecture; input sg\[actor obs\] ⊕ privileged contract P, with P identical for all arms (§3.5) | Value quality must not differ by privileged content |
 | Probes | Universal probe set (§3.2), β-NLL, constant weight — B1-K excepted by design | Equal supervision budget |
-| Warm start | Same π\_S0 and normaliser; widening per §4.3; KL anchor per §4.4 | — |
+| Warm start | **Removed 2026-09-23** (§4.2 control-arm outcome): every arm starts from π\_S0, which is itself trained from scratch; no KL anchor (§4.4 is void). Widening per §4.3 still applies at S1 | The blind from-scratch control passed the S0b gates at 0.30 × the warm-start budget, so the warm start bought nothing and would only carry the π\_base lineage's asymmetries into every arm |
 | Envs and batch *(new)* | S0/S1: 8,192 × 16 (base run; unverified optimum). S2/S3: N\_v envs × T\_v steps for **every** arm, blind arms included, with N\_v·T\_v ≥ 24,576 | Equal env steps and equal updates imply equal batch. Otherwise B0 at 8,192 envs gets a 16× larger batch than a vision arm at 512 |
 | Camera, vision arms | Colour intrinsics (§7.5); extrinsics ±2° / ±5 mm; 30 Hz, rendered on camera ticks only (§7.3); latency up to the measured hardware p99, with drops; rolling shutter; depth corruption (§7.3); one image operator (§7.5). B1-K also at 30 Hz | Platform properties, not method parameters |
 | Staleness, vision arms *(new)* | rem\_60, rem\_200, rem\_400 and the 150 ms vision-loss cutoff (v7 §4.9a) | Asynchrony is a platform property; an arm without these features is handicapped by an unmodelled input |
@@ -391,6 +392,8 @@ The ≤ 0.03 m/s and ≤ 5 % thresholds are proposals; tune them in the pilot.
 
 **Control arm.** One blind from-scratch run through S0a/S0b at the same budget. If it reaches the S0b gates within 1.2× the warm-start env steps, drop the warm start and the KL anchor (§4.4) for all arms.
 
+**Outcome (2026-09-23): the warm start is dropped.** The control arm — random init, final S0b task, same rewards, dynamics randomisation, terrain curriculum, mirror augmentation and batch — passed every S0b gate at 8,000 iterations, i.e. **0.30 ×** the 26,596-iteration warm-start budget (S0a 4,498 + S0b 22,098), far inside the 1.2 × rule: 0 % falls on terrain levels 0/5/9, v\_x cycle RMSE ≤ 0.011 m/s, stride −4.6 … −8.3 %, dropped reads no worse than drop-free. It is also better than the warm-started policy where the lineage was weakest: standing contact duty 0.97 vs 0.80, and symmetric turning (+0.187 / −0.191 rad/s of ±0.3) against the lineage's +0.155 / −0.278. **π\_S0 is therefore this from-scratch policy**, and §4.4's KL anchor is void for every arm. Evidence: research/phase2-progress.md §2.1.30.
+
 Output: π\_S0 and its normaliser. Seed variance is reported from S1 onward, conditional on the shared π\_S0; say so in the paper.
 
 ### 4.3 Function-preserving input widening
@@ -408,7 +411,9 @@ Each item below is a known way to destroy a warm start silently:
 
 The actor is widened once, at S1, to the final union layout (§2.9). The critic is not widened: it is a separate network rebuilt at S1 for contract P (§3.5), with the actor frozen during burn-in.
 
-### 4.4 KL anchor — fixed
+### 4.4 KL anchor — void since 2026-09-23 (kept for the record)
+
+**Not used: the warm start was dropped (§4.2 outcome), so there is no π\_S0 lineage to anchor to.** The design below stands only if a future run reinstates a warm start.
 
 ```latex
 \mathcal{L}_{KL} = \beta\,\mathrm{KL}\!\left(\pi_{S0}(\cdot \mid o^{\text{anchor}}) \,\big\|\, \pi_\theta(\cdot \mid o)\right)
@@ -722,6 +727,17 @@ Run order: O and B0 (the headroom gate) → B2 → F → B1-M → B1-K → B3.
 - Report IQM with stratified bootstrap 95 % CIs (rliable), probability of improvement of F over B2, all five per-seed F − B2 differences individually, and the pre-registered sign test.
 - Behaviour metrics: stride shortening and stance extension primary, CoM lowering secondary (v7 §5.2); lead time and peak GRF as headline.
 - Hardware checkpoint: the **median** seed by a fixed sim validation metric, pre-registered. Mandatory on hardware: B0, B2, F. Recommended: B1-M.
+
+### 10.4 Secondary result (TBD): held-out harder-terrain suite
+
+**Status: TBD — placeholder agreed 2026-09-22, to be finalised manually.** Levels 15–20 of the terrain generator
+(beyond the training ceiling: rough to ±3 cm, slopes to ≈ 20°, bumps and stairs to 4 cm, i.e. at and over the robot's
+3.8 cm swing height) are never trained on and form an evaluation-only suite, identical for every arm, run per terrain
+type at v_x ∈ {0.10, 0.15}. Purpose: whether anticipation also helps foot placement on rough geometry. The fair
+comparison is **F vs B2** (both see depth, differing only by the §2 predictor deltas); a vision arm beating a blind
+arm here is expected and is not a claim. Metrics must include tracking error and stride, not only falls: π_S0 keeps
+0 % falls to level 20 and degrades in speed and stride accuracy instead (research/phase2-progress §2.1.24).
+Sim-only unless rough hardware surfaces are built; the headline claim stays friction/compliance transitions (§11).
 
 ## 11. Falsification logic and causal-use tests
 

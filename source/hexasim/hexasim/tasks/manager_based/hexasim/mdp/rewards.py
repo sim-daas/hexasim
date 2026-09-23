@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
-from isaaclab.utils.math import quat_apply, wrap_to_pi
+from isaaclab.utils.math import quat_apply, quat_apply_inverse, wrap_to_pi
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -477,20 +477,55 @@ def cpg_force_target_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg)
     return torch.abs(force_z - target).mean(dim=1) * env.cpg_active
 
 
+def coxa_leg_geometry(env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor]:
+    """Body-frame toe positions from the base, p_toe, and from each coxa joint, r (both (N, 6, 3))."""
+    robot = env.scene["robot"]
+    quat = robot.data.root_quat_w.torch.unsqueeze(1).expand(-1, 6, -1)
+    toe = toe_pos_w(robot, env._tibia_body_ids)
+    p_toe = quat_apply_inverse(quat, toe - robot.data.root_pos_w.torch.unsqueeze(1))
+    r = quat_apply_inverse(quat, toe - robot.data.body_pos_w.torch[:, env._coxa_body_ids])
+    return p_toe, r
+
+
+def coxa_stroke_weight(env: ManagerBasedRLEnv, twist: torch.Tensor) -> torch.Tensor:
+    """Per leg (N, 6): sign × reach — the coxa rate multiplier that pays the toe stroke the body twist needs.
+
+    A planted toe must move at v_toe = −(v + ω ẑ × p_toe) in the body frame; +coxa moves it along
+    t⁺ = ẑ × r, r = p_toe − p_coxa. Sign of cos(t⁺, v_toe), 0 where |cos| < 0.2 (sweep nearly orthogonal); for a
+    pure forward twist it equals ``COXA_BACKWARD_SIGN`` (asserted in ``HexapodEnv.load_managers``). The sign flips,
+    correctly, when a toe sits inside its coxa relative to the base, and there a tiny toe motion needs a large coxa
+    rate — so the rate is weighted by the horizontal reach |r_xy| relative to that leg's rest-pose reach: the term
+    pays toe stroke speed, not coxa spin (phase2-progress §2.1.26: tucked toes spun at 2 rad/s for reward).
+    """
+    p_toe, r = coxa_leg_geometry(env)
+    robot = env.scene["robot"]
+    quat = robot.data.root_quat_w.torch.unsqueeze(1).expand(-1, 6, -1)
+    toe = toe_pos_w(robot, env._tibia_body_ids)
+    p_toe = quat_apply_inverse(quat, toe - robot.data.root_pos_w.torch.unsqueeze(1))
+    r = quat_apply_inverse(quat, toe - robot.data.body_pos_w.torch[:, env._coxa_body_ids])
+    t = torch.stack((-r[..., 1], r[..., 0]), dim=-1)
+    v_toe = -(twist[:, None, :2] + twist[:, None, 2:3] * torch.stack((-p_toe[..., 1], p_toe[..., 0]), dim=-1))
+    cos = (t * v_toe).sum(-1) / (t.norm(dim=-1) * v_toe.norm(dim=-1)).clamp(min=1e-6)
+    return torch.sign(cos) * (cos.abs() >= 0.2) * r[..., :2].norm(dim=-1) / env.coxa_rest_reach
+
+
 def cpg_coxa_contact_reward(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,
     sensor_cfg: SceneEntityCfg,
     max_rate: float = math.pi,
 ) -> torch.Tensor:
-    """Signed backward coxa sweep on planted stance legs, clipped to ±max_rate per leg.
+    """Signed coxa sweep in the direction the commanded motion needs (v7 §2.6: "projected on commanded heading"), on
+    planted stance legs, clipped to ±max_rate per leg.
 
-    Signed, not abs: over a stance the integral is the net backward stroke, so buzzing the coxa
-    back and forth earns ~0 instead of farming |q̇| in both directions (v7 §2.6).
+    Signed, not abs: over a stance the integral is the net stroke, so buzzing the coxa back and forth earns ~0.
+    ``env.coxa_stroke_weight()``: the fixed backward sign in Flat/S0a; in S0b ``coxa_stroke_weight`` of the command
+    (reach-weighted), so turning
+    pays the two sides in opposite directions (phase2-progress §2.1.21) — the fixed sign fought every turn.
     """
     robot: Articulation = env.scene[asset_cfg.name]
     joint_vel = robot.data.joint_vel.torch[:, asset_cfg.joint_ids]
-    sign = torch.tensor(COXA_BACKWARD_SIGN, device=env.device)[joint_leg_index(robot, asset_cfg.joint_ids)]
+    sign = env.coxa_stroke_weight()[:, joint_leg_index(robot, asset_cfg.joint_ids)]
     planted = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
     is_stance = env.cpg_phase >= _swing_end(env)
     rate = torch.clamp(sign * joint_vel, -max_rate, max_rate)
@@ -510,10 +545,20 @@ def cpg_stance_rigidity_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCf
 # ---------------------------------------------------------------------------
 
 
-def track_lin_vel_xy_l1(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
-    """|v_xy − v_cmd,xy|₁ (body frame). Dense slope far from the command, where the exp kernel is flat."""
-    v = env.scene["robot"].data.root_lin_vel_b.torch[:, :2]
-    return torch.abs(v - env.command_manager.get_command(command_name)[:, :2]).sum(dim=1)
+def track_lin_vel_xy(env: ManagerBasedRLEnv, command_name: str, std: float, l1_scale: float) -> torch.Tensor:
+    """Command tracking of the body xy velocity: exp(−|e|²/σ²) − l1_scale·|e|₁, e = v − v_cmd (per step).
+
+    The L1 part keeps a slope far from the command, where the kernel is flat. A gait-period-averaged v was tried
+    and made tracking worse (phase2-progress §2.1.8).
+    """
+    e = env.scene["robot"].data.root_lin_vel_b.torch[:, :2] - env.command_manager.get_command(command_name)[:, :2]
+    return torch.exp(-e.square().sum(dim=1) / std**2) - l1_scale * e.abs().sum(dim=1)
+
+
+def track_ang_vel_z(env: ManagerBasedRLEnv, command_name: str, std: float, l1_scale: float) -> torch.Tensor:
+    """Yaw-rate tracking: exp(−e²/σ²) − l1_scale·|e|, e = ω_z − ω_z,cmd (body frame, per step)."""
+    e = env.scene["robot"].data.root_ang_vel_b.torch[:, 2] - env.command_manager.get_command(command_name)[:, 2]
+    return torch.exp(-e.square() / std**2) - l1_scale * e.abs()
 
 
 class swing_clearance(ManagerTermBase):
@@ -560,14 +605,44 @@ def stance_rigidity_contact_penalty(
 
 
 def standing_contact_reward(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Standing mode only: fraction of feet in contact."""
+    """Standing hold phase only (after the settle window): fraction of feet in contact."""
     contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
-    return contact.float().mean(dim=1) * ~env.cpg_active
+    return contact.float().mean(dim=1) * env.stand_hold
 
 
 def standing_joint_speed_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Standing mode only: Σ|q̇| over all joints (rad/s) — the stance floor misses legs held in the air."""
-    return env.scene["robot"].data.joint_vel.torch.abs().sum(dim=1) * ~env.cpg_active
+    """Standing hold phase only: Σ|q̇| over all joints (rad/s) — the stance floor misses legs held in the air."""
+    return env.scene["robot"].data.joint_vel.torch.abs().sum(dim=1) * env.stand_hold
+
+
+def standing_load_share_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Standing hold phase only: Σ_feet |F_n − W/6| / W — 0 when all six feet carry an equal share, ≈ 1 on a tripod.
+
+    L1 on the terrain-normal force (PhysX contact spikes, rule 3); smooth where the 1 N contact test flickers.
+    W = robot weight per env (``tripod_leg_load`` = W/3).
+    """
+    fn = foot_forces_nt(env, sensor_cfg)[0]
+    w = 3.0 * env.tripod_leg_load  # (N, 1)
+    return (fn - w / 6.0).abs().sum(dim=1) / w.squeeze(1) * env.stand_hold
+
+
+def standing_pose_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Standing mode only: Σ|q − q_rest| (rad). A dense pull home for every joint — the policy otherwise kept the
+    right-back leg tucked (coxa at its stop, femur up) although standing evenly paid more (phase2-progress §2.1.14).
+    """
+    robot = env.scene["robot"]
+    return (robot.data.joint_pos.torch - robot.data.default_joint_pos.torch).abs().sum(dim=1) * ~env.cpg_active
+
+
+def action_beyond_clip_penalty(env: ManagerBasedRLEnv, action_name: str) -> torch.Tensor:
+    """Σ |requested joint target − clipped target| (rad): 0 while every target is inside the servo limits.
+
+    Past the clip the reward cannot depend on the action, so a joint parked beyond its limit gets no gradient back
+    (phase2-progress §2.1.12: right-back coxa held at its −55° stop). This gives it one.
+    """
+    term = env.action_manager.get_term(action_name)
+    requested = term.raw_actions * term._scale + term._offset
+    return (requested - term.processed_actions).abs().sum(dim=1)
 
 
 def root_height_above_terrain_below(env: ManagerBasedRLEnv, minimum_height: float) -> torch.Tensor:

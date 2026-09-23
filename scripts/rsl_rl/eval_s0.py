@@ -19,6 +19,8 @@ S0b (fixed --cmd for the whole episode; clearance is toe height above the terrai
                    dropped — the tracking gate
   stride           per-leg touchdown-to-touchdown toe displacement (world xy), m; stride_ref = |v_cmd|/f_ref
   standing (all-zero cmd): base xy drift over the episode (m), mean Σ|q̇| (rad/s), feet-in-contact fraction
+  turning (yaw cmd ≠ 0): wz_mean, and wz_rmse_cycle — yaw rate averaged over gait-period windows, as vx_rmse_cycle
+  (stride and its reference only when a translation is commanded)
 
 Usage:
   python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-Flat-v0 --ckpt <π_base.pt> [--rest_tibia_deg 30]
@@ -42,7 +44,13 @@ parser.add_argument("--rest_tibia_deg", type=float, default=None, help="override
 parser.add_argument("--out", default=None, help="write metrics JSON here")
 parser.add_argument("--cmd", type=float, nargs=3, default=None, metavar=("VX", "VY", "WZ"), help="S0b: fixed twist_cmd")
 parser.add_argument("--terrain_level", type=int, default=None, help="S0b: pin every env to this terrain level")
+parser.add_argument(
+    "--terrain_type",
+    default=None,
+    help="S0b stress sweep: one terrain type, 15 levels (mdp.terrain.EVAL_TERRAIN_TYPES), e.g. stairs_up",
+)
 parser.add_argument("--no_drops", action="store_true", help="S0a/S0b: disable dropped reads")
+parser.add_argument("--gt_velocity", action="store_true", help="diagnosis: actor sees true base velocity, not V_0")
 parser.add_argument("--stall", type=float, default=None, help="diagnosis: override the AX-12A stall torque, N·m")
 parser.add_argument("--servo", nargs="*", default=[], help="diagnosis: AX-12A cfg overrides, e.g. compliance_slope=4")
 parser.add_argument(
@@ -83,6 +91,10 @@ if s0b:
 
     assert args.cmd is not None, "S0b evaluation needs --cmd"
     pin_command(cfg, *args.cmd)
+    if args.terrain_type is not None:
+        from hexasim.tasks.manager_based.hexasim.mdp.terrain import single_type_generator
+
+        cfg.scene.terrain.terrain_generator = single_type_generator(args.terrain_type)
 if args.no_drops:
     cfg.drop_p0 = cfg.drop_k = 0.0
 if args.rest_tibia_deg is not None:
@@ -129,7 +141,8 @@ for kv in args.servo:
     setattr(cfg.scene.robot.actuators["ax12a"], k, type(getattr(cfg.scene.robot.actuators["ax12a"], k))(float(v)))
 s0a = hasattr(cfg, "v0_ramp_steps")
 if s0a:
-    cfg.v0_ramp_steps = (0, 1)  # evaluate on the deployable estimate only
+    # evaluate on the deployable estimate only (or, for diagnosis, on ground truth)
+    cfg.v0_ramp_steps = (10**9, 10**9 + 1) if args.gt_velocity else (0, 1)
 env = gym.make(args.task, cfg=cfg).unwrapped
 if args.terrain_level is not None:
     pin_terrain_level(env, args.terrain_level)
@@ -165,8 +178,10 @@ swing_count = torch.zeros(N, 6, device=env.device)
 micro_count = torch.zeros(N, 6, device=env.device)
 apexes = []
 v0_se = torch.zeros(N, device=env.device)
+v0_bias_x = torch.zeros(N, device=env.device)
 coxa_traj = torch.zeros(T, N, len(coxa), device=env.device)
 vx_traj = torch.zeros(T, N, device=env.device)
+wz_traj = torch.zeros(T, N, device=env.device)
 live_traj = torch.zeros(T, N, dtype=torch.bool, device=env.device)
 last_td = torch.full((N, 6, 2), float("nan"), device=env.device)
 stride_sum = torch.zeros(N, 6, device=env.device)
@@ -201,8 +216,10 @@ with torch.inference_mode():
         swing_peak = torch.where(contact, torch.zeros_like(swing_peak), swing_peak)
         if s0a:
             v0_se += (env.v_in - robot.data.root_lin_vel_b.torch).pow(2).sum(-1) * live
+            v0_bias_x += (env.v0_last[:, 0] - robot.data.root_lin_vel_b.torch[:, 0]) * live
         coxa_traj[t] = robot.data.joint_pos.torch[:, coxa]
         vx_traj[t] = robot.data.root_lin_vel_b.torch[:, 0]
+        wz_traj[t] = robot.data.root_ang_vel_b.torch[:, 2]
         live_traj[t] = live
         qd_sum += robot.data.joint_vel.torch.abs().sum(-1) * live
         xy_end = torch.where(live.unsqueeze(1), robot.data.root_pos_w.torch[:, :2], xy_end)
@@ -234,9 +251,11 @@ m = {
 }
 if s0a:
     m["v0_rmse"] = (v0_se.sum() / steps.sum()).sqrt().item()
+    m["v0_bias_x"] = (v0_bias_x.sum() / steps.sum()).item()  # mean V_0 − true v_x
+    m["gt_velocity"] = args.gt_velocity
 if s0b:
     vx_c, vy_c, wz_c = args.cmd
-    m.update(cmd=args.cmd, terrain_level=args.terrain_level, no_drops=args.no_drops)
+    m.update(cmd=args.cmd, terrain_level=args.terrain_level, terrain_type=args.terrain_type, no_drops=args.no_drops)
     m["vx_rmse_step"] = ((vx_traj - vx_c).pow(2) * live_traj).sum().div(live_traj.sum()).sqrt().item()
     standing = vx_c == vy_c == wz_c == 0.0
     if standing:
@@ -249,9 +268,14 @@ if s0b:
         win_v = vx_traj[: k * w].view(k, w, N).mean(1)[1:]
         win_live = live_traj[: k * w].view(k, w, N).all(1)[1:]
         m["vx_rmse_cycle"] = ((win_v - vx_c).pow(2) * win_live).sum().div(win_live.sum()).sqrt().item()
-        m["stride"] = (stride_sum.sum() / stride_count.sum()).item()
-        m["stride_per_leg"] = (stride_sum.sum(0) / stride_count.sum(0).clamp(min=1)).tolist()
-        m["stride_ref"] = math.hypot(vx_c, vy_c) / f_ref
+        if math.hypot(vx_c, vy_c) > 0.0:
+            m["stride"] = (stride_sum.sum() / stride_count.sum()).item()
+            m["stride_per_leg"] = (stride_sum.sum(0) / stride_count.sum(0).clamp(min=1)).tolist()
+            m["stride_ref"] = math.hypot(vx_c, vy_c) / f_ref
+        if wz_c != 0.0:
+            m["wz_mean"] = ((wz_traj * live_traj).sum() / live_traj.sum()).item()
+            win_w = wz_traj[: k * w].view(k, w, N).mean(1)[1:]
+            m["wz_rmse_cycle"] = ((win_w - wz_c).pow(2) * win_live).sum().div(win_live.sum()).sqrt().item()
 print("EVAL", json.dumps(m, indent=1))
 if args.out:
     with open(args.out, "w") as f:

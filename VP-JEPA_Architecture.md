@@ -524,6 +524,12 @@ Powder grades best and photographs best but will not survive 10–20 trials with
 
 **Friction must be measured per surface.** Hardware `μ_s` and `μ_d` come from a tilt test and a drag test on the robot itself (servos powered, rest pose), 5 repeats each, reported as mean ± SD. Generic handbook values are not acceptable for defining transition conditions. The simulator's friction range must contain every measured hardware value. PhysX combine mode must be **multiply** (foot `μ = 1.0`) or **min**, never the default **average**.
 
+**Secondary result (TBD): held-out harder-terrain suite.** Placeholder agreed 2026-09-22, finalised manually later.
+Terrain levels beyond the training ceiling (rough to ±3 cm, slopes to ≈ 20°, bumps and stairs to 4 cm, at and over the
+3.8 cm swing height) are evaluated but never trained on, identically for every arm; see paradigm spec §10.4. F vs B2
+is the fair comparison there. Geometry stays sampled independently of friction and compliance (§5.4), so this is a
+separate, secondary question from the friction claim.
+
 **Two transition conditions, both reported.** The observation that real environments span this range is correct and should be made explicit in the paper rather than left implicit:
 
 | Condition | Description | What it tests |

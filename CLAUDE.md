@@ -132,13 +132,21 @@ code before relying on any line here.
   3.8 cm, V_0 only. S0a reward economics differ from Flat (bounded toe-swing kernel
   σ 1 cm ×5, alive ×10, stand_still −75): check any reward change with
   `scripts/tests/reward_economy.py` (walk > stand > fall) before training.
-- **S0b (in progress, research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
+- **π_S0 (final, 2026-09-23, trained from scratch):**
+  `logs/rsl_rl/hexapod_s0b/2026-09-22_22-50-43_s0_fromscratch_seed42/model_20700.pt` — 20,749 iterations, no warm
+  start, mirror augmentation. All spec §4.2 S0b gates pass at 1,024 episodes per condition (0 falls in 17,408
+  episodes; v_x RMSE ≤ 0.005; stride +0.7 … +4.6 %), plus symmetric turning (±0.26 of ±0.3) and standing (95 %
+  contact, 0.9 cm drift). **The blind from-scratch control arm passed the gates at 0.30 × the warm-start budget, so
+  the warm start and the KL anchor (spec §4.4) are dropped for every arm**; the π_base → S0a → S0b lineage
+  (research/phase2-progress §2.0–2.1) is history, kept for the record and for the paper's honesty section.
+- **S0b (research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
   clock, standing mode at zero command (`env.cpg_active`), terrain curriculum (`mdp/terrain.py`, height map gives
   `env.terrain_z` / `terrain_normal`; never use absolute z), full DR incl. per-env foot material (bound on the tibia
-  rigid body — the colliders are instance proxies). Never import `pxr` or Isaac Lab command/marker classes at
-  module level in `mdp/` (train.py loads the cfg before Kit starts → crash). Latest:
-  `logs/rsl_rl/hexapod_s0b/2026-09-21_21-36-27_s0b_seed42_r2_from_r1/model_4998.pt` — not yet π_S0 (0.10 m/s stride
-  +16 %, standing load sharing). Gates: `scripts/rsl_rl/eval_s0b_gates.sh`.
+  rigid body — the colliders are instance proxies), training terrain levels 0–14 incl. stairs (levels 15–20 are the
+  eval-only held-out suite), left–right mirror data augmentation (`mdp/symmetry.py`, on for every arm from here).
+  Never import `pxr` or Isaac Lab command/marker classes at module level in `mdp/` (train.py loads the cfg before Kit
+  starts → crash). Gates: `scripts/rsl_rl/eval_s0b_gates.sh`; terrain stress sweep:
+  `scripts/rsl_rl/eval_terrain_sweep.sh`; mirror check: `scripts/tests/mirror_test.py`.
 - Resuming: use `--resume --load_run … --checkpoint …`; a Hydra `agent.resume=True`
   is silently overwritten by `cli_args`. Pin `env.v0_ramp_steps=[0,1]` when resuming S0a
   (the ramp is keyed to the per-process step counter).

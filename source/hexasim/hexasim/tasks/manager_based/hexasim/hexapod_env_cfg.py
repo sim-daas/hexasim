@@ -833,17 +833,20 @@ class S0bObservationsCfg:
 
 @configclass
 class S0bCommandsCfg:
-    """twist_cmd (spec §1): resampled every 5 s; 10 % standing, 30 % with small v_y / yaw rate."""
+    """twist_cmd (spec §1 + D19): resampled every 5 s; 10 % standing; of the rest 15 % turn on the spot
+    (|yaw| 0.1–0.4 rad/s), 30 % walk with v_y ±0.05 m/s and yaw ±0.4 rad/s, 55 % walk straight."""
 
     base_velocity = hex_mdp.HexapodVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(5.0, 5.0),
         rel_standing_envs=0.1,
         rel_side_envs=0.3,
+        rel_turn_envs=0.15,
+        turn_yaw_range=(0.1, 0.4),
         heading_command=False,
         debug_vis=False,
         ranges=hex_mdp.HexapodVelocityCommandCfg.Ranges(
-            lin_vel_x=(0.05, 0.20), lin_vel_y=(-0.05, 0.05), ang_vel_z=(-0.25, 0.25)
+            lin_vel_x=(0.05, 0.20), lin_vel_y=(-0.05, 0.05), ang_vel_z=(-0.4, 0.4)
         ),
     )
 
@@ -855,11 +858,20 @@ class S0bRewardsCfg(RewardsCfg):
     Economics (phase2-progress §2.1): tracking is the primary signal; the floors are small next to it.
     """
 
+    # Per-step velocity tracking (τ = dt), exp σ 0.05 and L1, ×30: the policy was nearly command-insensitive at ×10
+    # (0.05 / 0.10 / 0.15 m/s commanded → 0.110 / 0.128 / 0.146 walked); tracking must dominate the gait-shaping
+    # terms (phase2-progress §2.1.9).
     track_lin_vel = RewTerm(
-        func=mdp.track_lin_vel_xy_exp, weight=10.0, params={"std": 0.05, "command_name": "base_velocity"}
+        func=hex_mdp.track_lin_vel_xy,
+        weight=30.0,
+        params={"command_name": "base_velocity", "std": 0.05, "l1_scale": 1.0},
     )
-    track_lin_vel_l1 = RewTerm(func=hex_mdp.track_lin_vel_xy_l1, weight=-10.0, params={"command_name": "base_velocity"})
-    track_yaw = RewTerm(func=mdp.track_ang_vel_z_exp, weight=3.0, params={"std": 0.25, "command_name": "base_velocity"})
+    # Yaw-rate tracking on the same footing as linear (phase2-progress §2.1.21): exp σ 0.1 rad/s + L1, ×10.
+    track_yaw = RewTerm(
+        func=hex_mdp.track_ang_vel_z,
+        weight=10.0,
+        params={"command_name": "base_velocity", "std": 0.1, "l1_scale": 1.0},
+    )
     swing_clearance = RewTerm(
         func=hex_mdp.swing_clearance,
         weight=5.0,
@@ -880,6 +892,18 @@ class S0bRewardsCfg(RewardsCfg):
         func=hex_mdp.standing_contact_reward, weight=5.0, params={"sensor_cfg": SceneEntityCfg("contact_forces")}
     )
     standing_joint_speed = RewTerm(func=hex_mdp.standing_joint_speed_penalty, weight=-0.2)
+    # Standing mode: distance of every joint from the rest pose (§2.1.14).
+    standing_pose = RewTerm(func=hex_mdp.standing_pose_penalty, weight=-3.0)
+    # Joint targets requested past the servo limits (§2.1.12): no gradient returns them otherwise.
+    action_beyond_clip = RewTerm(
+        func=hex_mdp.action_beyond_clip_penalty, weight=-10.0, params={"action_name": "joint_pos"}
+    )
+    # Even weight on all six feet (phase2-progress §2.1.7): the contact test above only says "touching" at 1 N.
+    standing_load_share = RewTerm(
+        func=hex_mdp.standing_load_share_penalty,
+        weight=-5.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces")},
+    )
 
 
 @configclass
@@ -906,6 +930,9 @@ class HexapodS0bEnvCfg(HexapodS0aEnvCfg):
     # Per-episode IMU bias, provisional (bench).
     imu_acc_bias_std: float = 0.05  # m/s²
     imu_gyro_bias_std: float = 0.01  # rad/s
+    # Standing settle window (phase2-progress §2.1.18): with six feet planted the pose can only change by stepping,
+    # so the hold terms wait one gait period (1.25 s at 0.8 Hz, rounded up) while the rest-pose pull brings it home.
+    stand_settle_s: float = 1.5
     # V_0 was ramped in during S0a; S0b runs on it alone.
     v0_ramp_steps: tuple[int, int] = (0, 1)
 

@@ -5,7 +5,9 @@
 
 from isaaclab.utils.configclass import configclass
 
-from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
+
+from ..mdp.symmetry import mirror_augmentation
 
 
 @configclass
@@ -94,6 +96,15 @@ class PPORunnerCfg_S0a(RslRlOnPolicyRunnerCfg):
 
 @configclass
 class PPORunnerCfg_S0b(PPORunnerCfg_S0a):
-    """S0b from π_S0a (actor widened 114 → 117 by the twist_cmd block, zero columns); same batch and S0PPO."""
+    """S0b from π_S0a (actor widened 114 → 117 by the twist_cmd block, zero columns); same batch and S0PPO.
+
+    From run 14 on: left–right mirror data augmentation (``mdp.symmetry``, phase2-progress §2.1.27, D21) — every
+    mini-batch is trained on its mirror image as well, so a turn to one side also teaches the other.
+    """
 
     experiment_name = "hexapod_s0b"
+
+    def __post_init__(self):
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True, use_mirror_loss=False, data_augmentation_func=mirror_augmentation
+        )

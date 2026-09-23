@@ -3,8 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""twist_cmd distribution (paradigm spec §1): v_x ~ U[0.05, 0.20] m/s; a fraction of segments also carries small
-v_y / yaw-rate commands, the rest have v_y = yaw = 0; ``rel_standing_envs`` of segments are all-zero (standing)."""
+"""twist_cmd distribution (paradigm spec §1, with D19): v_x ~ U[0.05, 0.20] m/s; some segments turn on the spot, some
+add small v_y and a yaw rate, the rest walk straight; ``rel_standing_envs`` of segments are all-zero (standing)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from isaaclab.utils.configclass import configclass
 class HexapodVelocityCommandCfg(UniformVelocityCommandCfg):
     class_type: str = "{DIR}.velocity_command:HexapodVelocityCommand"
     rel_side_envs: float = 0.3  # fraction of segments that keep their sampled v_y and yaw rate
+    rel_turn_envs: float = 0.0  # fraction of segments that turn on the spot
+    turn_yaw_range: tuple[float, float] = (0.1, 0.4)  # |yaw rate| of turn-on-the-spot segments, rad/s
 
 
 def pin_command(cfg, vx: float, vy: float = 0.0, wz: float = 0.0) -> None:
@@ -24,4 +26,5 @@ def pin_command(cfg, vx: float, vy: float = 0.0, wz: float = 0.0) -> None:
     c.ranges.lin_vel_x, c.ranges.lin_vel_y, c.ranges.ang_vel_z = (vx, vx), (vy, vy), (wz, wz)
     c.rel_standing_envs = 1.0 if vx == vy == wz == 0.0 else 0.0
     c.rel_side_envs = 1.0
+    c.rel_turn_envs = 0.0
     c.resampling_time_range = (1e9, 1e9)

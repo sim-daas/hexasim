@@ -20,6 +20,7 @@ Usage: python scripts/tests/reward_economy.py --headless --ckpt <S0a checkpoint>
 """
 
 import argparse
+import re
 
 from isaaclab.app import AppLauncher
 
@@ -28,6 +29,17 @@ parser.add_argument("--ckpt", required=True)
 parser.add_argument("--task", default="Hexapod-S0a-v0")
 parser.add_argument("--cmd", type=float, nargs=3, default=None, metavar=("VX", "VY", "WZ"))
 parser.add_argument("--terrain_level", type=int, default=None)
+parser.add_argument(
+    "--pin_joints", default=None, help="diagnosis: extra behaviour 'walk_pinned' = actor, these joints (regex) at rest"
+)
+parser.add_argument(
+    "--obs_cmd",
+    type=float,
+    nargs=3,
+    default=None,
+    metavar=("VX", "VY", "WZ"),
+    help="S0b diagnosis: the actor sees this twist_cmd while rewards and clock use --cmd (drives it at other speeds)",
+)
 parser.add_argument("--set", nargs="*", default=[], help="cfg overrides, dotted path=value")
 parser.add_argument("--num_envs", type=int, default=256)
 AppLauncher.add_app_launcher_args(parser)
@@ -108,11 +120,16 @@ def run(behaviour):
     vx = torch.zeros(N, device=env.device)
     with torch.inference_mode():
         for t in range(T):
+            o = obs["policy"].clone()
+            if args.obs_cmd is not None:
+                o[:, -3:] = torch.tensor(args.obs_cmd, device=env.device)
             a = (
-                actor(TensorDict({"policy": obs["policy"]}, [N]))
-                if behaviour == "walk"
+                actor(TensorDict({"policy": o}, [N]))
+                if behaviour.startswith("walk")
                 else torch.zeros(N, 18, device=env.device)
             )
+            if behaviour == "walk_pinned":
+                a[:, pinned] = 0.0
             obs, rew, term, trunc, _ = env.step(a)
             ret += (GAMMA**t) * rew * alive  # rew is already dt-scaled; includes the terminating term
             live = alive & ~term & ~trunc
@@ -140,9 +157,11 @@ def run(behaviour):
 
 
 w_term = cfg.rewards.terminating.weight
-print("SETTINGS", args.task, "cmd", args.cmd, "terrain_level", args.terrain_level, args.set)
+print("SETTINGS", args.task, "cmd", args.cmd, "obs_cmd", args.obs_cmd, "terrain_level", args.terrain_level, args.set)
 print(f"FALL (terminate on step 0): discounted return ≈ {w_term * dt:.4f}")
-for b in ("walk", "stand"):
+pinned = [i for i, n in enumerate(robot.joint_names) if args.pin_joints and re.match(args.pin_joints, n)]
+behaviours = ("walk",) if args.obs_cmd is not None else ("walk", "stand")
+for b in behaviours + (("walk_pinned",) if pinned else ()):
     r = run(b)
     print(
         f"{b.upper()}: fall {r['fall_rate']:.3f}, live steps {r['live_steps_per_env']:.0f}, vx {r['vx']:.3f}, "

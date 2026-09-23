@@ -5,9 +5,9 @@
 
 """S0b terrain (paradigm spec §4.2): generator config, command-referenced curriculum and a height map.
 
-The generator is laid out for 15 difficulty levels and builds the first 10 (``difficulty_range = (0, 10/15)``):
-level ℓ gets difficulty (ℓ + U)/15 either way, so adding the 5 harder levels later is ``num_rows=15,
-difficulty_range=(0, 1)`` (plus stairs), with levels 0–9 unchanged in distribution.
+Training uses all 15 designed levels, difficulty (ℓ + U)/15 (runs ≤ 11 built only levels 0–9, same per-level
+parameters). Level 14: rough ±2.25 cm, slopes 15°, bumps 3 cm, stairs 3 cm risers — the cap agreed with the user
+(3.8 cm swing height). Levels 15–20 are the held-out evaluation suite (``single_type_generator``).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-LEVELS_BUILT, LEVELS_DESIGNED = 10, 15
+LEVELS_DESIGNED = 15
 
 
 def scaled_rough_terrain(difficulty: float, cfg: HfScaledRoughTerrainCfg):
@@ -44,33 +44,34 @@ class HfScaledRoughTerrainCfg(terrain_gen.HfRandomUniformTerrainCfg):
 
 
 _BORDER = 0.25
+# Pyramid stairs: riser 0 → 3 cm at difficulty 1, tread 0.3 m (plain pyramid = walk down from the platform).
+_STAIRS = dict(step_height_range=(0.0, 0.03), step_width=0.3, platform_width=1.0, border_width=_BORDER)
 S0B_TERRAIN_CFG = terrain_gen.TerrainGeneratorCfg(
     size=(4.0, 4.0),  # ≥ 2 m from spawn at 0.2 m/s × 10 s
     border_width=5.0,
-    num_rows=LEVELS_BUILT,
+    num_rows=LEVELS_DESIGNED,
     num_cols=20,
     horizontal_scale=0.05,  # 5 cm cells: stride is 12–19 cm
     vertical_scale=0.002,
     slope_threshold=0.75,
     curriculum=True,
-    difficulty_range=(0.0, LEVELS_BUILT / LEVELS_DESIGNED),
+    difficulty_range=(0.0, 1.0),
     seed=0,
     use_cache=False,
     sub_terrains={
         "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.15),
-        "rough": HfScaledRoughTerrainCfg(
-            proportion=0.25, noise_step=0.002, downsampled_scale=0.1, border_width=_BORDER
+        "rough": HfScaledRoughTerrainCfg(proportion=0.2, noise_step=0.002, downsampled_scale=0.1, border_width=_BORDER),
+        # tan 15° at difficulty 1 → 10° at level 10. Plain pyramid = platform on top: the robot spawns there and walks
+        # down; inverted = walks up. (Keys were swapped before 2026-09-22; order, hence the terrain, is unchanged.)
+        "slope_down": terrain_gen.HfPyramidSlopedTerrainCfg(
+            proportion=0.15, slope_range=(0.0, math.tan(math.radians(15.0))), platform_width=1.0, border_width=_BORDER
         ),
-        # tan 15° at difficulty 1 → 10° at level 10
-        "slope_up": terrain_gen.HfPyramidSlopedTerrainCfg(
-            proportion=0.2, slope_range=(0.0, math.tan(math.radians(15.0))), platform_width=1.0, border_width=_BORDER
-        ),
-        "slope_down": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
-            proportion=0.2, slope_range=(0.0, math.tan(math.radians(15.0))), platform_width=1.0, border_width=_BORDER
+        "slope_up": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+            proportion=0.15, slope_range=(0.0, math.tan(math.radians(15.0))), platform_width=1.0, border_width=_BORDER
         ),
         # heights ∈ {±h, ±h/2}, h up to 3 cm at difficulty 1 → 2 cm at level 10
         "bumps": terrain_gen.HfDiscreteObstaclesTerrainCfg(
-            proportion=0.2,
+            proportion=0.15,
             obstacle_height_mode="choice",
             obstacle_width_range=(0.1, 0.4),
             obstacle_height_range=(0.0, 0.03),
@@ -78,8 +79,30 @@ S0B_TERRAIN_CFG = terrain_gen.TerrainGeneratorCfg(
             platform_width=1.0,
             border_width=_BORDER,
         ),
+        "stairs_down": terrain_gen.HfPyramidStairsTerrainCfg(proportion=0.1, **_STAIRS),
+        "stairs_up": terrain_gen.HfInvertedPyramidStairsTerrainCfg(proportion=0.1, **_STAIRS),
     },
 )
+
+
+# Evaluation-only single-type terrains for the stress sweep (phase2-progress §2.1.20): level ℓ at
+# difficulty (ℓ + U)/15 exactly as in training, so levels 0–9 match the training rows and 10–14 extend them.
+EVAL_TERRAIN_TYPES = S0B_TERRAIN_CFG.sub_terrains
+
+
+LEVELS_EVAL = 21  # 0–14 as designed; 15–20 the held-out suite beyond the cap (difficulty up to 21/15)
+
+
+def single_type_generator(name: str) -> terrain_gen.TerrainGeneratorCfg:
+    """Levels 0–20 of one terrain type, 4 columns (evaluation). Difficulty (ℓ + U)/15 as in training, so parameters
+    extrapolate linearly past level 14: at level 20 rough ±3.0 cm, slopes ≈ 19.7°, bumps and stairs 4.0 cm."""
+    sub = EVAL_TERRAIN_TYPES[name].replace(proportion=1.0)
+    return S0B_TERRAIN_CFG.replace(
+        num_rows=LEVELS_EVAL,
+        num_cols=4,
+        difficulty_range=(0.0, LEVELS_EVAL / LEVELS_DESIGNED),
+        sub_terrains={name: sub},
+    )
 
 
 class HeightMap:
