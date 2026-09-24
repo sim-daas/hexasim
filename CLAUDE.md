@@ -159,6 +159,25 @@ code before relying on any line here.
   `.github/LICENSE_HEADER.txt`). Never run `pre-commit run --all-files` blindly:
   it reformats untracked-by-you files, including the specs. Use `--files`.
 
+## Running things: tmux session 0 (user watches it live)
+
+Run every sim/training/eval/probe command through tmux session `0`, not the Bash tool (the user attaches with
+`tmux attach -t 0`). Pure-Python checks (ruff, self-tests, TensorBoard reads) may run in Bash.
+
+- Windows: `0:1` is the Claude session itself — **never send keys to it**. `0:2` = training, `0:3` = evals/probes/
+  videos (both zsh, repo cwd, `env_isaaclab` active). `0:4` nvtop, `0:5` scratch python.
+- Launch: `tmux send-keys -t 0:3 C-u` (clear the line), then `tmux send-keys -t 0:3 "clear; <cmd>; touch logs/.done_<tag>" Enter`.
+  `rm -f logs/.done_<tag>` first. Wait on the marker file (`until [ -f … ]; do sleep 30; done`, in a background Bash or
+  Monitor) — never grep scrollback for "done" (stale matches).
+- One training at a time on `0:2`; evals on `0:3` run alongside it (GPU shared, slower). Stop training with
+  `tmux send-keys -t 0:2 C-c`, then wait for its `.done_` marker; the last `model_*.pt` (saved every 50 iterations) is usable.
+- Gotchas: zsh does not word-split `$VAR` — use `${=CMD}`; Kit sometimes dies at start-up with `__throw_regex_error`
+  (telemetry flake) — just relaunch; a stuck pane ("not in a mode") needs `q` / `C-u`; Kit can exit 0 after a Python
+  error, so judge eval cells by their output JSON, not the exit code; sort checkpoints with
+  `ls $D | grep '^model_' | sort -t_ -k2 -n | tail -1` (paths contain underscores).
+- Long runs: `scripts/rsl_rl/milestone_review.sh <run_dir> <iter>` (videos + probes + reward slope every 2,000 iterations);
+  stop when the return gains < ≈ 1.5 % per 2,000 iterations.
+
 ## Experimental paradigm rules (from the specs)
 
 Stages: **S0a/S0b** recondition → **S1** blind trunk (union layout, 5+ seeds)
