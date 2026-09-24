@@ -376,12 +376,47 @@ TOE_OFFSET_TIBIA = (0.095, 0.0, -0.09)
 COXA_BACKWARD_SIGN = (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
 
 
+# Link capsules (start, end, radius) in each link's own frame, fitted to the right-front USD meshes (all legs share
+# them; phase2-progress §2.1.38). Tibia: knee-servo top → toe, radius covering 99 % of mesh points (bounding 3.6 cm).
+TIBIA_CAPSULE = ((-0.01, 0.0, 0.035), TOE_OFFSET_TIBIA, 0.030)
+FEMUR_CAPSULE = ((-0.01, 0.0, 0.0), (0.075, 0.0, 0.0), 0.040)
+# Same-side neighbours in LEG_NAMES order: RF-RM, RM-RB, LF-LM, LM-LB.
+ADJACENT_LEGS = ((0, 1), (1, 2), (3, 4), (4, 5))
+
+
 def toe_pos_w(robot: Articulation, tibia_ids) -> torch.Tensor:
     """World-frame toe positions (N, 6, 3) for the given tibia body ids."""
     pos = robot.data.body_pos_w.torch[:, tibia_ids]
     quat = robot.data.body_quat_w.torch[:, tibia_ids]
     off = torch.tensor(TOE_OFFSET_TIBIA, device=pos.device).expand_as(pos)
     return pos + quat_apply(quat, off)
+
+
+def segment_distance(p1, q1, p2, q2) -> torch.Tensor:
+    """Closest distance between segments p1–q1 and p2–q2, batched over leading dims (Ericson, RTCD §5.1.9)."""
+    d1, d2, r = q1 - p1, q2 - p2, p1 - p2
+    a, e, b = (d1 * d1).sum(-1), (d2 * d2).sum(-1), (d1 * d2).sum(-1)
+    c, f = (d1 * r).sum(-1), (d2 * r).sum(-1)
+    s = ((b * f - c * e) / (a * e - b * b).clamp(min=1e-12)).clamp(0.0, 1.0)
+    t = (b * s + f) / e
+    s = torch.where(t < 0.0, (-c / a).clamp(0.0, 1.0), torch.where(t > 1.0, ((b - c) / a).clamp(0.0, 1.0), s))
+    t = t.clamp(0.0, 1.0)
+    return ((p1 + d1 * s.unsqueeze(-1)) - (p2 + d2 * t.unsqueeze(-1))).norm(dim=-1)
+
+
+def adjacent_leg_gaps(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Surface gap (m) between same-side neighbouring legs, min over their tibia/femur capsule pairs: (N, 4)."""
+    robot = env.scene["robot"]
+    caps = []
+    for ids, (p, q, radius) in ((env._tibia_body_ids, TIBIA_CAPSULE), (env._femur_body_ids, FEMUR_CAPSULE)):
+        pos, quat = robot.data.body_pos_w.torch[:, ids], robot.data.body_quat_w.torch[:, ids]
+        ends = [pos + quat_apply(quat, torch.tensor(x, device=pos.device).expand_as(pos)) for x in (p, q)]
+        caps.append((*ends, radius))
+    a, b = (list(x) for x in zip(*ADJACENT_LEGS))
+    gaps = [
+        segment_distance(p1[:, a], q1[:, a], p2[:, b], q2[:, b]) - r1 - r2 for p1, q1, r1 in caps for p2, q2, r2 in caps
+    ]
+    return torch.stack(gaps).min(dim=0).values
 
 
 def joint_leg_index(robot: Articulation, joint_ids) -> torch.Tensor:
@@ -632,6 +667,71 @@ def standing_pose_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     """
     robot = env.scene["robot"]
     return (robot.data.joint_pos.torch - robot.data.default_joint_pos.torch).abs().sum(dim=1) * ~env.cpg_active
+
+
+def stance_footprint_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Σ over legs in contact of | |r_xy| − rest |r_xy| | (m): horizontal toe distance from its coxa axis vs the rest
+    pose. The distance is invariant to the coxa sweep, so the term keeps legs extended without touching the stride.
+
+    Without it the four middle/back toes migrated under their hips (|r_xy| ≈ 1 cm vs ≈ 6 cm at rest): the cheapest
+    holding-torque posture, 25 % narrower support polygon, inward shins, ±48° coxa arcs (phase2-progress §2.1.34).
+    """
+    _, r = coxa_leg_geometry(env)
+    contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
+    return ((r[..., :2].norm(dim=-1) - env.coxa_rest_reach).abs() * contact).sum(dim=1)
+
+
+class swing_radial_motion(ManagerTermBase):
+    """Σ over airborne legs of |Δ|r_xy|| / dt (m/s): in/out toe motion relative to the coxa axis during swing.
+
+    Coxa sweep (constant |r_xy|) and a vertical lift are free, so only a coordinated femur + tibia lift avoids it;
+    π_S0 folded the tibia (toe 5 cm in, back, in again) and π_S0a lifted with the femur (toe 7 cm out)
+    (phase2-progress §2.1.36–37). Standing envs score 0.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.prev = torch.zeros(env.num_envs, 6, device=env.device)
+        self.valid = torch.zeros(env.num_envs, 1, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids=None):
+        self.valid[slice(None) if env_ids is None else env_ids] = False
+
+    def __call__(self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+        reach = coxa_leg_geometry(env)[1][..., :2].norm(dim=-1)
+        air = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) <= 1.0
+        rate = ((reach - self.prev).abs() * air * self.valid).sum(dim=1) / env.step_dt
+        self.prev, self.valid[:] = reach, True
+        return rate * env.cpg_active
+
+
+class touchdown_reach(ManagerTermBase):
+    """Σ over legs touching down this step of | |r_xy| − rest |r_xy| | (m): the landing distance from the coxa axis.
+
+    Replaces the stance footprint, which π_S0 met by bending the tibia further (§2.1.35–37). Standing envs score 0.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.prev = torch.ones(env.num_envs, 6, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids=None):
+        self.prev[slice(None) if env_ids is None else env_ids] = True
+
+    def __call__(self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+        reach = coxa_leg_geometry(env)[1][..., :2].norm(dim=-1)
+        contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
+        landing = contact & ~self.prev
+        self.prev = contact
+        return ((reach - env.coxa_rest_reach).abs() * landing).sum(dim=1) * env.cpg_active
+
+
+def leg_proximity_penalty(env: ManagerBasedRLEnv, margin: float) -> torch.Tensor:
+    """Σ over same-side neighbouring leg pairs of max(0, margin − surface gap) (m). Self-collision is off in sim, so
+    without this the legs pass through each other; the margin covers real-robot backlash and tracking error
+    (phase2-progress §2.1.38). Zero while the legs keep the margin, so stride and turning are free when there is room.
+    """
+    return (margin - adjacent_leg_gaps(env)).clamp(min=0.0).sum(dim=1)
 
 
 def action_beyond_clip_penalty(env: ManagerBasedRLEnv, action_name: str) -> torch.Tensor:

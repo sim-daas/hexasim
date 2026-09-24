@@ -45,6 +45,8 @@ from hexasim.tasks.manager_based.hexasim.mdp.rewards import LEG_NAMES, coxa_leg_
 from rsl_rl.models import MLPModel  # noqa: E402
 from tensordict import TensorDict  # noqa: E402
 
+from isaacsim.core.rendering_manager import ViewportManager  # noqa: E402
+
 from isaaclab.terrains import MeshPlaneTerrainCfg  # noqa: E402
 
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
@@ -62,11 +64,11 @@ if s0b:
     )
 if hasattr(cfg, "v0_ramp_steps"):
     cfg.v0_ramp_steps = (0, 1)
-eye = {"side": (0.0, 1.3, 0.35), "front": (1.4, 0.0, 0.35), "diag": (1.1, 1.1, 0.5)}[args.view]
-cfg.viewer.origin_type = "asset_root"
-cfg.viewer.asset_name = "robot"
-cfg.viewer.eye = eye
-cfg.viewer.lookat = (0.0, 0.0, 0.12)
+# Chase camera, aimed at the robot every step below: headless runs create no viewport camera controller, so
+# ``cfg.viewer.origin_type = "asset_root"`` is ignored, and ``sim.set_camera_view`` does not move the recorder's
+# camera either — only ViewportManager on the Kit perspective camera does.
+EYE = torch.tensor({"side": (0.0, 1.3, 0.35), "front": (1.4, 0.0, 0.35), "diag": (1.1, 1.1, 0.5)}[args.view])
+LOOKAT = torch.tensor((0.0, 0.0, 0.0))
 
 env = gym.make(task, cfg=cfg, render_mode="rgb_array")
 steps = int(args.seconds / env.unwrapped.step_dt)
@@ -102,6 +104,10 @@ vx = 0.0
 n = 0
 with torch.inference_mode():
     for t in range(steps):
+        root = robot.data.root_pos_w.torch[0].cpu()
+        ViewportManager.set_camera_view(
+            "/OmniverseKit_Persp", eye=(root + EYE).tolist(), target=(root + LOOKAT).tolist()
+        )
         obs, *_ = env.step(policy(TensorDict({"policy": obs["policy"]}, batch_size=[1])))
         if t < steps // 5:  # let the gait settle before averaging
             continue

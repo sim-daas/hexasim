@@ -29,10 +29,10 @@ class HexapodEnv(ManagerBasedRLEnv):
         robot = self.scene["robot"]
         self._tibia_body_ids = [i for i, n in enumerate(robot.data.body_names) if "tibia" in n]
         self._coxa_body_ids = [i for i, n in enumerate(robot.data.body_names) if "coxa" in n]
-        tibia_names = [robot.data.body_names[i] for i in self._tibia_body_ids]
-        coxa_names = [robot.data.body_names[i] for i in self._coxa_body_ids]
+        self._femur_body_ids = [i for i, n in enumerate(robot.data.body_names) if "femur" in n]
+        ids = (self._tibia_body_ids, self._coxa_body_ids, self._femur_body_ids)
         sensor_names = self.scene["contact_forces"].body_names
-        for names in (tibia_names, coxa_names, sensor_names):
+        for names in [[robot.data.body_names[i] for i in b] for b in ids] + [sensor_names]:
             assert len(names) == 6 and all(leg in n for leg, n in zip(LEG_NAMES, names)), f"leg order: {names}"
         joints_per_type = [[n for n in robot.joint_names if n.endswith(t)] for t in ("_coxa", "_femur", "_tibia")]
         for names in joints_per_type:
@@ -51,8 +51,17 @@ class HexapodEnv(ManagerBasedRLEnv):
         # Per-env, per-leg peak load in tripod stance: total weight / 3, (N, 1). Read after the startup
         # events added mast and payload, which differ per env.
         self.tripod_leg_load = robot.data.body_mass.torch.sum(dim=1, keepdim=True) * 9.81 / 3.0
-        # Rest-pose horizontal toe reach from each coxa (env 0, at build = rest pose); normalises the coxa stroke term.
+        # Rest-pose horizontal toe reach from each coxa (env 0); normalises the coxa stroke term and is the footprint
+        # target. At this point the articulation is still in the USD zero pose (joints 0 → legs straight out, reach
+        # 0.208 m; the configured rest pose is applied at the first reset), so put it in the rest pose and let PhysX
+        # refresh the link transforms once before measuring (phase2-progress §2.1.35). Reach depends on joint angles
+        # only; the one 5 ms step before the first reset is harmless.
+        q0 = robot.data.default_joint_pos.torch
+        robot.write_joint_state_to_sim_index(position=q0, velocity=torch.zeros_like(q0))
+        self.sim.step(render=False)
+        self.scene.update(self.physics_dt)
         self.coxa_rest_reach = coxa_leg_geometry(self)[1][0, :, :2].norm(dim=-1)
+        assert (self.coxa_rest_reach < 0.15).all(), f"rest reach looks like the zero pose: {self.coxa_rest_reach}"
         # The command-projected coxa stroke sign must reduce to the fixed backward sign for straight walking.
         forward = torch.tensor([[0.1, 0.0, 0.0]], device=self.device).expand(self.num_envs, 3)
         sign = torch.sign(coxa_stroke_weight(self, forward))

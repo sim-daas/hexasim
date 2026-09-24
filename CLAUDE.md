@@ -132,13 +132,17 @@ code before relying on any line here.
   3.8 cm, V_0 only. S0a reward economics differ from Flat (bounded toe-swing kernel
   σ 1 cm ×5, alive ×10, stand_still −75): check any reward change with
   `scripts/tests/reward_economy.py` (walk > stand > fall) before training.
-- **π_S0 (final, 2026-09-23, trained from scratch):**
-  `logs/rsl_rl/hexapod_s0b/2026-09-22_22-50-43_s0_fromscratch_seed42/model_20700.pt` — 20,749 iterations, no warm
-  start, mirror augmentation. All spec §4.2 S0b gates pass at 1,024 episodes per condition (0 falls in 17,408
-  episodes; v_x RMSE ≤ 0.005; stride +0.7 … +4.6 %), plus symmetric turning (±0.26 of ±0.3) and standing (95 %
-  contact, 0.9 cm drift). **The blind from-scratch control arm passed the gates at 0.30 × the warm-start budget, so
+- **π_S0 (final, 2026-09-24, trained from scratch):**
+  `logs/rsl_rl/hexapod_s0b/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/model_12200.pt` — 12,214
+  iterations (7.3 h), no warm start, mirror augmentation, with the gait-quality terms of phase2-progress §2.1.37–38:
+  `swing_radial` (−2), `touchdown_reach` (−600), `leg_proximity` (−400, 2 cm capsule margin; self-collision is off
+  in sim). All §4.2 S0b gates pass at 1,024 episodes (0 falls in 17,408; stride −1.4 … +1.0 %; turning +0.32 /
+  −0.31 of ±0.3; standing 97 % contact), all 108 training-range sweep cells pass, 0 falls in all 180. The previous
+  π_S0 (`…/2026-09-22_22-50-43_s0_fromscratch_seed42/model_20700.pt`, tucked tibia-fold gait, legs overlapping in sim)
+  is superseded (§2.1.39). **The blind from-scratch control arm passed the gates at 0.30 × the warm-start budget, so
   the warm start and the KL anchor (spec §4.4) are dropped for every arm**; the π_base → S0a → S0b lineage
   (research/phase2-progress §2.0–2.1) is history, kept for the record and for the paper's honesty section.
+  Check gait changes with `scripts/tests/swing_radial_probe.py` and `scripts/tests/leg_gap_probe.py`, not only gates.
 - **S0b (research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
   clock, standing mode at zero command (`env.cpg_active`), terrain curriculum (`mdp/terrain.py`, height map gives
   `env.terrain_z` / `terrain_normal`; never use absolute z), full DR incl. per-env foot material (bound on the tibia

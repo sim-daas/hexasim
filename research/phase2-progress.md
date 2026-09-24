@@ -1439,3 +1439,274 @@ and with the middle toes ≈ 1 cm outboard of their hips the coxa must sweep far
 inward shins and the large arcs are one problem. Proposed to the user: a stance-footprint term (L1 on each stance
 foot's reach minus that leg's rest-pose reach, measured at env build), weight sized with `reward_economy.py`,
 continue π_S0 ~2,000 iterations, then gates, sweep, geometry table and video.
+
+### 2.1.35 Rest-reach bug (runs 13–14 and π_S0) and the stance-footprint term
+
+**Observed.** Sizing the footprint term on π_S0 (`reward_economy.py --set rewards.stance_footprint.weight=-1`):
+motionless rest-pose standing showed a *larger* footprint deviation (0.84 m summed) than the tucked walking policy
+(0.47 m) — impossible if the target were the rest pose. `env.coxa_rest_reach` read **0.2079 m for every leg**;
+standing at rest the actual reach is 0.054–0.093 m (`logs/reach_debug.txt`).
+**Root cause.** `HexapodEnv.load_managers` measured it while the articulation was still in the USD's zero pose
+(all joints 0 → legs straight out: 0.0529 + 0.06 + 0.095 = 0.2079 m); the configured rest pose is only applied at
+the first reset. **Consequence for trained policies:** `coxa_stroke_weight` (§2.1.26) divided the toe reach by 0.208
+instead of the rest reach, so from run 13 onward — including π_S0 — the coxa stroke term ran at ≈ 0.32 × its
+intended strength. §2.1.26's "at the rest pose the magnitude is unchanged" was therefore wrong; the sign logic was
+unaffected. Plausibly it contributed to the tucking: the coxa term is the one that pays more for extended legs.
+**Fix.** At build, write the rest pose to the joints, take one physics step so PhysX refreshes the link transforms,
+then measure; assert reach < 0.15 m. Now **0.0669 m for every leg** (`logs/reach_debug2.txt`). The coxa term on π_S0
+reads 0.077/step instead of 0.025 (dt-scaled, 0.15 m/s) — ×3.1 as expected; near the command the tracking slope
+(≈ 5 per m/s) still dwarfs the coxa term's (≈ 1.2), so no speed bias.
+
+**Stance-footprint term.** `stance_footprint_penalty` = Σ over feet in contact of | |r_xy| − rest reach | (m); the
+horizontal distance from the coxa axis is invariant to the coxa sweep, so it restores extension without touching the
+stride. Economics (`logs/s0b_economy_footprint2.txt`, π_S0, L0, per step dt-scaled at weight −1): walking 0.15 → 0.0015
+(≈ 7.5 cm summed, ≈ 2.5 cm per stance foot); turning on the spot → 0.0030; motionless rest-pose standing → 0.0007
+(servo sag, the floor any policy pays). The torque-excess term is ≈ 0 (0.0001), so the tucking was not bought with a
+large reward saving — it was simply unopposed. **Weight −20**: the tucked posture costs ≈ 0.03/step (≈ 3 % of the
+walking reward), on a par with the stance-rigidity and force terms; walking ≫ standing ≫ falling unchanged.
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_22-50-43_s0_fromscratch_seed42 --checkpoint model_20700.pt \
+  --run_name s0_fromscratch_seed42_footprint agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0
+```
+(total 22,700 iterations, still below the 32,000-iteration 1.2 × budget). Acceptance, agreed with the user: 1,024-episode
+gates, geometry table and video first; the terrain sweep only if the gait is visibly better and the gates hold.
+
+Finished at 22,699 (4,262 s; the first launch died in Kit start-up, the telemetry flake of §2.1.25, and was relaunched):
+`logs/rsl_rl/hexapod_s0b/2026-09-23_14-50-13_s0_fromscratch_seed42_footprint/model_22699.pt`.
+
+**Gates, 1,024 episodes per condition** (`logs/eval_pi_s0fp_final.txt`): all pass, 0 falls in 17,408 episodes, and
+slightly better than π_S0 everywhere — stride error at 0.10 m/s +1.4 / +2.3 / +2.9 % on L0 / L5 / L9 (π_S0 +3.9 /
++4.2 / +4.6 %), at 0.15 m/s −0.5 / −0.1 / −0.2 %; v_x cycle RMSE ≤ 0.005; turn on the spot +0.278 / −0.272 rad/s
+(RMSE 0.021 / 0.026; π_S0 0.038 / 0.032); walk-and-turn yaw RMSE 0.009; standing contact 0.97, drift 0.9 cm.
+
+**Posture** (`logs/gait_geometry_fp.txt`, `logs/swing_probe_fp.txt`): middle-leg reach 0.012 → 0.029 m, back-leg
+0.018 → 0.034 m (rest 0.067), stance half-width 0.108 → 0.122 m (π_S0a 0.161) — but the middle/back tibias went
+from +34…+39° to **+43…+44°** and still slant inward (tibia_lat −0.04…−0.06), and the middle-leg coxa swing arc is
+unchanged at 95°. The policy met the footprint target partway and the cheap way — bending the tibia further instead
+of straightening the leg. By eye "more or less the same", so per the user's acceptance rule no terrain sweep yet.
+Options put to the user: (1) add a light penalty on inward tibia slant in stance, keeping the footprint term;
+(2) raise the footprint weight to ≈ −60; (3) accept (this checkpoint or the committed π_S0) and document.
+
+### 2.1.36 Mid-air toe in/out motion: detection (no training yet)
+
+**Observed Behavior.** By eye (user) the four middle/back legs of π_S0 and of the footprint continuation swing the toe
+in and out mid-air: the shin "slants more, then less just before landing". The front pair and π_S0a look fine.
+
+**Detection.** `scripts/tests/swing_radial_probe.py` (flat, 0.15 m/s, 128 envs × 300 steps after a 100-step settle):
+per swing (≥ 5 airborne steps), the toe's horizontal distance from its coxa axis |r_xy| (radial, in/out), its
+tangential sweep, lift and tibia angle, plus the mean profile over 10 normalised swing bins (lift-off → touchdown) of
+Δ|r_xy| and Δtibia relative to lift-off. Output `logs/swing_radial_probe.txt`:
+
+| per swing, middle/back legs | π_S0a | π_S0 | π_S0 + footprint |
+|---|---|---|---|
+| radial excursion (cm) | 6.7–9.7 | 5.9–7.9 | 6.5–8.9 |
+| radial path (cm) | 12.6–19.0 | 19.7–20.0 | 18.0–21.6 |
+| lift (cm) | 3.6–3.9 | 3.8–4.0 | 3.7–4.0 |
+| sweep (cm) | 10.6–14.8 | 4.2–5.6 | 4.1–5.0 |
+| Δ\|r\| profile (mm) | 0 → **+69 out** → +6 | 0 → **−53 in** → −19 → **−54 in** | 0 → −57 → −37 → −64 → −53 |
+| Δtibia profile (°) | 0 → −6 → +3 | 0 → **+16** → −2 | 0 → **+20** → +2 |
+
+**Findings.**
+1. The perceived motion is real and located: π_S0's middle/back legs lift by *folding the tibia* (+16°, toe pulled
+   5 cm toward the hip in the first 30 % of the swing), unfold it again by 60–100 % (the "slants less before
+   landing"), with a second inward dip, and land 5 cm closer to the hip than they lifted off — the stance then has
+   to carry the foot back out. π_S0a lifts with the femur: the toe arcs 7 cm *outward* and lands where it lifted off,
+   the tibia moving only ±6°. The footprint term made it slightly worse (+20°).
+2. **But the amount of radial motion does not separate the policies**: π_S0a's radial path (12.6–19 cm per swing)
+   is close to π_S0's (≈ 20 cm). What differs is the *direction and mechanism* (inward, via the tibia, with a
+   reversal; vs outward, via the femur, once) and the stride: π_S0's middle/back sweep is 4–6 cm vs 11–15 cm.
+   A plain |Δ|r_xy|| swing penalty (the planned term) would charge π_S0a's liked gait about as much as π_S0's, so
+   per the agreed gate it is **not** implemented; re-discussed with the user.
+
+### 2.1.37 Coordinated swing lift: swing radial motion + touchdown reach
+
+**Root cause (geometry, not the policies).** A joint rotation moves the toe at right angles to the joint→toe line:
+lift per radian = horizontal joint–toe distance, in/out per radian = vertical distance. At the S0a rest pose
+(femur +30°, tibia +30°, reach 6.7 cm; coxa 5.3, femur 6.0, shin→toe 13.1 cm) the toe sits almost under the femur
+joint and slightly inside the knee (a planar estimate): femur-up ≈ 0.25 mm lift and 1.7 mm **out** per degree;
+tibia-fold ≈ 0.65 mm lift and 2.2 mm **in** per degree. A single-joint lift therefore throws the toe radially
+(π_S0a out, π_S0 in); a vertical lift needs femur up and tibia fold together (≈ 0.75 : 1). This pose was chosen for
+the torque gate (§2.0.3), so the trade-off is stance torque vs swing kinematics. Swing energy is negligible
+(≈ 0.2 kg leg × 4 cm ≈ 0.08 J per swing, < 1 W total) against stance holding, so the case for the change is
+reliability: a controllable landing point (needed by the foothold arms), support width and a narrow toe path.
+User decision: the baseline uses a coordinated lift. This is a reward change inherited by every arm, so the final
+π_S0 for the paper is retrained from scratch after a pilot.
+
+**Fix.** `mdp.rewards.swing_radial_motion` (Σ airborne |Δ|r_xy||/dt, m/s; free: coxa sweep and vertical lift) and
+`mdp.rewards.touchdown_reach` (Σ over legs landing this step of | |r_xy| − rest reach |, m). Both use contact > 1 N,
+reward-only, × cpg_active. They replace `stance_footprint` (§2.1.35), which π_S0 met by bending the tibia.
+
+**Economics** (`logs/s0b_economy_coordlift.txt`, π_S0, L0, dt-scaled per step at weight −1): walking 0.15 →
+radial 0.0200, touchdown 0.00008; turning on the spot 0.3 → 0.0139 / 0.0001; standing ≈ 0.0002 / 0.
+Weights: **radial −1** (≈ 2 % of the 0.97 walking reward), **touchdown −300** (≈ 0.024/step, ≈ 2.5 %; ≈ −0.22 per
+landing at π_S0's 3.7 cm landing error). Lowering the lift to dodge the radial cost is unprofitable: at 1.5 cm the
+radial saving (≤ 0.010) is below the `swing_clearance` (0.005) plus `cpg_z_target` (0.067 total, largely lift)
+losses, while a coordinated lift saves the full 0.020 at no cost. Once the clock terms leave in S2, only
+swing_clearance defends the lift; by then the radial cost of a coordinated lift is ≈ 0. Walk (0.97) > stand
+(0.27 at 0.15 command) > fall (−0.1) unchanged.
+
+**Pilot** (from π_S0, 2,000 iterations):
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 2000 \
+  --resume --load_run 2026-09-22_22-50-43_s0_fromscratch_seed42 --checkpoint model_20700.pt \
+  --run_name s0_pilot_coordlift agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0
+```
+
+**Pilot result** (stopped by the user at a plateau, `…/2026-09-23_19-07-33_s0_pilot_coordlift/model_22050.pt`,
+1,350 iterations). Gates at 1,024 episodes (`logs/eval_pilot_coordlift.txt`) all pass, 0 falls: stride at 0.10 m/s
++1.4 / +2.1 / +2.5 % (L0 / L5 / L9), at 0.15 m/s 0.0 / +0.2 / −0.1 %; v_x cycle RMSE ≤ 0.005; turn on the spot
++0.268 / −0.266 rad/s (RMSE 0.032 / 0.033); walk-and-turn yaw RMSE 0.008 / 0.010; standing contact 0.95, drift 1.0 cm.
+**The gait did not change** (`logs/swing_radial_probe_pilot.txt`, `logs/gait_geometry_coordlift.txt`): middle/back
+radial path per swing 17.7–20.8 cm (π_S0 19.7–20.3), landing still 4.7 cm inside lift-off, tibia fold +19° mid-swing,
+middle/back reach 0.018–0.031 m, half-width 0.110–0.117 m. Both new terms stayed flat over the whole run
+(Episode_Reward/swing_radial −0.83 → −0.83, touchdown_reach −1.34 → −1.30; ≈ 3–5 % of track_lin_vel), i.e. the
+converged policy (std at the 0.05 floor) did not find a cheaper lift, the same as the footprint run of §2.1.35.
+The front legs dominate the radial cost (23 cm per swing, toe thrown 15 cm outward via tibia unfold), which the user
+considers fine.
+
+**5× check** (user request; radial −5, touchdown −1,500 via Hydra overrides, from π_S0, 1,700 iterations,
+`…/2026-09-23_20-32-32_s0_pilot_coordlift_x5/model_22399.pt`):
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 1700 \
+  --resume --load_run 2026-09-22_22-50-43_s0_fromscratch_seed42 --checkpoint model_20700.pt \
+  --run_name s0_pilot_coordlift_x5 agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0 \
+  env.rewards.swing_radial.weight=-5.0 env.rewards.touchdown_reach.weight=-1500.0
+```
+The terms now move (touchdown −6.0 → −4.2, radial −4.2 → −3.8 per episode-second), but the wrong way: middle-leg
+radial path 19.9 → 15.3 cm by *shrinking the middle-leg sweep* (5.3 → 3.9 cm) and *holding the tibia folded
+through the swing* (+21° peak, still +9° at touchdown, vs π_S0 +17° → −1°); back legs unchanged (20.3 cm); landing
+still 4.5 cm inside lift-off; reach 0.022–0.035 m, half-width 0.112–0.117 m (`logs/swing_radial_probe_pilot2.txt`,
+`logs/gait_geometry_pilot2.txt`). Gates (`logs/eval_pilot2.txt`, 1,024 episodes) still pass (spec: RMSE ≤ 0.03,
+stride ±10 %), 0 falls, but tracking is a little worse: v_x at 0.10 overshoots +3.0…+3.6 %, stride +5.0 %
+(walk-and-turn +8.6 %), v_x cycle RMSE 0.005–0.006; turning improved (+0.272 / −0.278, RMSE 0.026 / 0.018).
+Conclusion: fine-tuning a converged π_S0 does not reach a coordinated lift even at 5×; the tucked-tibia basin is
+deep and the cheapest local response is to freeze the fold, not to re-coordinate the leg.
+
+**From-scratch run with the coordinated-lift terms** (user decision: 18,000 iterations, where π_S0's return
+plateaued). Weights fixed in the cfg at 2× the pilot: radial −2, touchdown −600 (on π_S0's behaviour ≈ 0.04 + 0.05 per
+step, ≈ 9 % of the walking reward; ≈ 0 for a coordinated lift; walk 0.88 ≫ stand 0.27 ≫ fall at a 0.15 command). Both
+terms apply to all six legs (one rule, no leg-specific tuning). Lift stays defended early by `cpg_z_target` and
+`swing_clearance`. Same task, seed, envs, mirror augmentation and everything else as π_S0 (§2.1.31):
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 18000 \
+  --run_name s0_coordlift_fromscratch_seed42 agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0
+```
+
+**Preliminary check at 1,750 iterations** (user question: mean return ≈ 300 vs ≈ 238 for the π_S0 run at the same
+iteration — reward change or better policy?). Curves at iteration ≈ 1,784, old vs new run (per episode-second ×10 s
+per episode): track_lin_vel 16.8 → 19.9 and track_yaw 1.6 → 3.2 (+47 of return, real), cpg_coxa_contact 0.21 → 3.06 and
+cpg_z_target 2.1 → 3.0 (+37, largely accounting: the rest-reach fix of §2.1.35 makes the coxa term ≈ 3× larger for the
+same motion), new penalties −1.8 (−18). Terrain level 9.4 vs 10.0 (similar). So about two thirds of the gap is real
+tracking and one third is bookkeeping. Radial probe (`logs/swing_radial_probe_cl1750.txt`, vs the π_S0 run's
+model_1750): middle/back radial path per swing 6.0–6.3 cm (old 12–19; π_S0 final ≈ 20), excursion 2.4–2.7 cm,
+sweep 8–13 cm (old 4–11; π_S0 final 4–5), lift 3.8–4.6 cm; the tibia folds ≈ 44° mid-swing while |r_xy| changes
+only ≈ 1.5 cm, so the femur compensates: a coordinated lift. Gates at 128 episodes (`logs/eval_cl1750.txt`): 0 falls;
+v_x cycle RMSE 0.009–0.011; stride +6.1 / +5.0 / +1.8 % / +0.4 %, walk-and-turn +9.4 %; turn +0.280 / −0.272 rad/s;
+standing not learned yet (contact 0.68–0.74, joint speed 12.4, drift 4 cm; π_S0 final 0.95 / 0.9 / 0.9 cm).
+
+### 2.1.38 Leg-to-leg clearance
+
+**Observed Behavior.** The coordinated-lift run (§2.1.37, stopped at ≈ 2,700 iterations,
+`…/2026-09-23_22-28-40_s0_coordlift_fromscratch_seed42/model_2650.pt`) looks right, but by eye (user) the
+front/middle and middle/back toes almost touch while walking — a hardware risk.
+
+**Root cause.** Self-collision is off (`enabled_self_collisions=False`, `assets/robot.py`), so legs can pass through
+each other in sim and nothing charges the policy for it. Measurement (`scripts/tests/leg_gap_probe.py`,
+`logs/leg_gap_probe_capsule.txt`): links modelled as capsules fitted to the right-front USD meshes — tibia from the
+knee-servo top (−0.01, 0, 0.035) to the toe, r 3.0 cm (99 % of mesh points; bounding 3.6 cm; the true half-width across
+the shin is 2.3 cm, so the capsule is conservative sideways); femur (−0.01…0.075 m on x), r 4.0 cm. Surface gap =
+closest segment distance − radii (Ericson segment–segment, checked against brute force on 20,000 random pairs). The
+new run overlaps down to −3.8 cm at 0.15 m/s (17–19 % of steps under 2 cm), −2.7 at 0.20, −3.0 walking-and-turning;
+turning on the spot ≥ +2.8 cm, standing +7 cm. π_S0 was worse (−6.3 cm, ≈ 22 % of steps). At closest approach the
+middle coxa sits at ±55°, the action clip limit, while its neighbour is swung the opposite way (tripod anti-phase).
+
+**Fix.** Coxa limits alone were rejected: collisions depend on a *pair* of angles, so a per-joint limit must assume
+both legs at their extremes, which shortens the stride everywhere. Instead `mdp.rewards.leg_proximity_penalty` =
+Σ over same-side neighbour pairs max(0, 2 cm − capsule gap) (L1, m, zero with room to spare; all four capsule
+combinations, tibia/femur). Hard per-leg coxa CW/CCW limits on the real servos remain the deployment backstop, set just
+outside the trained envelope. Self-collision stays off in training (the foot contact sensor would count leg–leg
+contact as ground contact) and is a candidate eval-only check.
+
+**Economics** (`logs/s0b_economy_proximity.txt`, model_2650, L0, dt-scaled at weight −1): walking 0.15 → 0.00036,
+walk-and-turn 0.10 + 0.2 → 0.0001, turning on the spot and standing 0. **Weight −400**: 0.15 m/s overlaps cost
+≈ 0.14/step (≈ 17 % of the 0.84 walking reward) — a safety term, heavier than the ≈ 9 % style terms and far below
+tracking; walk 0.70 ≫ stand 0.27 ≫ fall. Clearance can be bought without losing stride by moving the middle legs'
+sweep centre (standing clearance is +7 cm).
+
+**Run** (from scratch, replaces the stopped §2.1.37 run; user: review every 2,000 iterations with video + probes, stop
+early on a plateau, cap 18,000):
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 18000 \
+  --run_name s0_coordlift_prox_fromscratch_seed42 agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0
+scripts/rsl_rl/milestone_review.sh <run_dir> <iter>   # every 2,000 iterations → logs/milestones/<run>/
+```
+
+**Milestone 2,000** (`logs/milestones/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/it2000_*`): return
+291.6 (last 500 iterations; still rising steeply), terrain level 9.4. Clearance: worst capsule surface gap **+0.5 cm**
+(no overlap under any command; was −3.8 cm without the term), under 2 cm on ≤ 3.9 % of steps (0.15 m/s ≤ 3.2 %).
+Coordinated lift kept: middle/back radial path 7.3–7.9 cm per swing, lift 3.4–4.1 cm, sweep 7–12 cm. Middle/back
+stance reach 0.067–0.071 m (rest 0.067), half-width 0.12 m; the front legs sit forward (coxa ±22…26°) and narrower
+(reach 0.04 m).
+
+**Milestone 4,000:** return 337.3 (+15.7 % over 2,000 iterations), track_lin_vel 20.3 → 22.0, leg_proximity
+−0.14 → −0.17 per episode-second (small), worst surface gap +0.6 cm; middle/back radial path 7.8–8.1 cm, lift
+3.6–4.0 cm, sweep 7–11 cm; half-width 0.12–0.13 m. Still improving.
+
+**Milestone 6,000:** return 365.3 (+8.3 %), track_lin_vel 23.0 (+4.5 %), leg_proximity −0.17 (flat), worst surface gap
++0.2 cm; middle/back radial path 7.8–8.0 cm, lift 3.9–4.0 cm, sweep 8–11 cm; half-width 0.13 m. Still improving.
+
+**Milestone 8,000:** return 382.9 (+4.8 %), track_lin_vel 23.6 (+2.8 %), leg_proximity −0.165, worst surface gap
++0.7 cm; middle/back radial path 6.8–8.4 cm, lift 4.1–4.4 cm, sweep 8–10 cm; half-width 0.14 m. Slowing; plateau
+criterion used: return gain < ≈ 1.5 % per 2,000 iterations.
+
+**Milestone 10,000:** return 389.5 (+1.7 %, just above the plateau criterion), track_lin_vel 23.9 (+1.0 %),
+leg_proximity −0.165 → −0.107 (still being reduced), worst surface gap +0.9 cm; middle/back radial path 5.9–8.2 cm,
+lift 4.1–4.6 cm, sweep 7–10 cm; half-width 0.14 m. Continued to 12,000.
+
+**Milestone 12,000 and stop.** Return 395.3 (+1.5 %: plateau criterion met), track_lin_vel +0.3 %; leg_proximity
+still falling (−0.107 → −0.083), worst surface gap +1.3 cm; middle/back radial path 5.7–7.9 cm, lift 4.3–4.4 cm,
+half-width 0.14 m. Training stopped at 12,2xx; final checkpoint
+`logs/rsl_rl/hexapod_s0b/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/model_12200.pt`.
+
+**Gates, 1,024 episodes per condition** (`logs/eval_coordlift_prox_final.txt`,
+`scripts/rsl_rl/eval_s0b_gates.sh <ckpt> coordlift_prox_final 1024`): all pass, 0 falls in 17,408 episodes.
+Stride error at 0.10 m/s +1.0 / +0.3 / −0.7 % (L0 / L5 / L9; π_S0 +3.9 / +4.2 / +4.6 %), at 0.15 m/s −0.2 / −0.6 /
+−1.4 %; v_x cycle RMSE ≤ 0.0046; drops vs no drops equal; turn on the spot +0.321 / −0.311 rad/s of ±0.3 (RMSE
+0.039–0.048; π_S0 ±0.26); walk-and-turn v_x 0.100, yaw 0.216 of 0.2, stride +4.6 %; standing contact 0.97, drift
+0.8 cm, joint speed 0.92. Candidate π_S0 (pending the user's visual check; no terrain sweep yet).
+
+**Terrain sweep** (user accepted the gait; nearest legs 3–4 cm by eye): `scripts/rsl_rl/eval_terrain_sweep.sh
+<model_12200> pis0cl 0 3 6 9 10 … 20` (128 episodes per cell, `logs/eval/sweep_pis0cl_*.json`, `logs/sweep_pis0cl.txt`;
+180/180 cells). **All 108 training-range cells (L0–14) pass; 0 falls in all 180 cells.** Held-out L15–20: 50/72 pass
+(π_S0 52/72); failures are stride shortfalls, never falls: rough from L16 at both speeds (−11 … −18 %, the new
+policy's weak spot), slope-up at 0.15 from L18, stairs-up from L18/19, stairs-down at L19–20.
+
+### 2.1.39 π_S0 superseded: the gait-corrected policy (comparison)
+
+Same task, seed, envs, mirror augmentation, DR and curriculum; differences are only the §2.1.35–38 reward changes
+(rest-reach fix, footprint term removed, swing radial, touchdown reach, leg proximity).
+
+| | old π_S0 (`…22-50-43…/model_20700`) | new π_S0 (`…00-35-51…/model_12200`) |
+| --- | --- | --- |
+| Training to the stop | 20,749 iterations, 12.9 h | **12,214 iterations, 7.3 h** (0.59×) |
+| track_lin_vel reaches 95 % of its final value | iteration 7,283 | **iteration 3,943** |
+| Gates, stride error at 0.10 m/s (L0/5/9) | +3.9 / +4.2 / +4.6 % | **+1.0 / +0.3 / −0.7 %** |
+| Gates, stride error at 0.15 m/s | ≈ 0 | −0.2 / −0.6 / −1.4 % |
+| v_x cycle RMSE | ≤ 0.005 | ≤ 0.0046 |
+| Turn on the spot (±0.3 cmd) | ±0.26 (RMSE 0.032–0.038) | **+0.321 / −0.311** (RMSE 0.039–0.048) |
+| Standing contact / drift | 0.95 / 0.9 cm | 0.97 / 0.8 cm |
+| Sweep L0–14 (108 cells) | 108 pass, 0 falls; mean \|stride err\| 2.4 %, RMSE 0.0054 | 108 pass, 0 falls; 2.1 %, 0.0052 |
+| Sweep held-out L15–20 (72 cells) | 52 pass, 0 falls; 6.9 %, RMSE 0.0200 | 50 pass, 0 falls; 7.7 %, **RMSE 0.0158** |
+| Middle/back radial toe path per swing | ≈ 20 cm (tibia-fold lift) | **5.7–7.9 cm** (coordinated) |
+| Landing vs lift-off (radial) | 5.5 cm inside | ≈ 1 cm outside |
+| Middle/back stance reach (rest 6.7 cm) / half-width | 1.8–2.1 cm / 0.11 m | ≈ 6.7–7.1 cm / 0.14 m |
+| Worst leg-to-leg capsule gap | −6.3 cm (legs overlap in sim) | **+1.3 cm** (3–4 cm by eye) |
+
+**Verdict.** The visually motivated corrections produced a policy that is better or equal on every training-range
+task metric, has a physically safe, coordinated gait (no leg overlap, feet placed at the rest reach, lift by femur +
+tibia together), and got there in 0.59× the iterations and wall time. On the held-out suite it is mixed: lower
+tracking RMSE and much better on the hardest stairs (L20 stairs-up 0.15: −26 % vs −38 % stride), weaker on high-level
+rough terrain (fails from L16). Lesson for later phases: the rest-reach bug and the missing collision/landing terms
+were silently shaping π_S0; gate metrics alone did not reveal them — the swing and gap probes did.

@@ -892,9 +892,23 @@ class S0bRewardsCfg(RewardsCfg):
         func=hex_mdp.standing_contact_reward, weight=5.0, params={"sensor_cfg": SceneEntityCfg("contact_forces")}
     )
     standing_joint_speed = RewTerm(func=hex_mdp.standing_joint_speed_penalty, weight=-0.2)
+    # Coordinated swing lift (§2.1.37): in/out toe motion while airborne (m/s summed over airborne legs) and the
+    # landing distance from the hip (m, touchdown steps only). On π_S0 (walk 0.15, dt-scaled): radial ×2 → 0.040/step,
+    # touchdown ×600 → ≈ 0.05/step, together ≈ 9 % of the walking reward (0 for a coordinated lift); standing ≈ 0.
+    # ×1 and ×5 fine-tunes of π_S0 did not re-coordinate the lift (§2.1.37); these weights are for from-scratch runs.
+    swing_radial = RewTerm(
+        func=hex_mdp.swing_radial_motion, weight=-2.0, params={"sensor_cfg": SceneEntityCfg("contact_forces")}
+    )
+    touchdown_reach = RewTerm(
+        func=hex_mdp.touchdown_reach, weight=-600.0, params={"sensor_cfg": SceneEntityCfg("contact_forces")}
+    )
     # Standing mode: distance of every joint from the rest pose (§2.1.14).
     standing_pose = RewTerm(func=hex_mdp.standing_pose_penalty, weight=-3.0)
     # Joint targets requested past the servo limits (§2.1.12): no gradient returns them otherwise.
+    # Leg-to-leg clearance (§2.1.38): capsule surface gap between same-side neighbours ≥ 2 cm. ×400: the coordinated-
+    # lift policy's overlaps at 0.15 m/s (≈ 1.8 cm summed per step) cost ≈ 0.14/step dt-scaled, ≈ 17 % of walking —
+    # a safety term, above the style terms, below tracking; walk (0.70) ≫ stand (0.27) at 0.15. Standing costs 0.
+    leg_proximity = RewTerm(func=hex_mdp.leg_proximity_penalty, weight=-400.0, params={"margin": 0.02})
     action_beyond_clip = RewTerm(
         func=hex_mdp.action_beyond_clip_penalty, weight=-10.0, params={"action_name": "joint_pos"}
     )
