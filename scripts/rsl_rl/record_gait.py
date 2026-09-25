@@ -15,7 +15,7 @@ averaged over the run and per leg (RF RM RB LF LM LB):
   tibia lateral          lateral component of the tibia direction (tibia joint → toe), + = pointing outboard
   stance width           mean |toe y| of the left and right legs
 
-The task follows the checkpoint's actor width: 75 → Hexapod-Flat-v0, 114 → Hexapod-S0a-v0, 117 → Hexapod-S0b-v0.
+The task follows the checkpoint's actor width (``hexasim.rl.load_policy.TASK_BY_DIM``).
 
 Usage:
   python scripts/rsl_rl/record_gait.py --headless --ckpt <pt> --tag s0_final [--cmd 0.15] [--seconds 10]
@@ -40,6 +40,7 @@ app = AppLauncher(args).app
 import gymnasium as gym  # noqa: E402
 import hexasim.tasks  # noqa: E402, F401
 import torch  # noqa: E402
+from hexasim.rl.load_policy import configure, eval_physx_buffers, load_env_state, task_for  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp import pin_command, pin_terrain_level  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp.rewards import LEG_NAMES, coxa_leg_geometry, toe_pos_w  # noqa: E402
 from rsl_rl.models import MLPModel  # noqa: E402
@@ -52,11 +53,12 @@ from isaaclab.terrains import MeshPlaneTerrainCfg  # noqa: E402
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 state = torch.load(args.ckpt, map_location="cpu", weights_only=False)["actor_state_dict"]
-dim = state["mlp.0.weight"].shape[1]
-task = {75: "Hexapod-Flat-v0", 114: "Hexapod-S0a-v0", 117: "Hexapod-S0b-v0"}[dim]
+task = task_for({"actor_state_dict": state})
 cfg = parse_env_cfg(task, num_envs=1)
+configure(cfg, torch.load(args.ckpt, map_location="cpu", weights_only=False))
+eval_physx_buffers(cfg)
 cfg.curriculum = None
-s0b = task == "Hexapod-S0b-v0"
+s0b = task in ("Hexapod-S0b-v0", "Hexapod-S1-v0")
 if s0b:
     pin_command(cfg, args.cmd)
     cfg.scene.terrain.terrain_generator = cfg.scene.terrain.terrain_generator.replace(
@@ -79,11 +81,9 @@ base = env.unwrapped
 if s0b:
     pin_terrain_level(base, 0)
 ck = torch.load(args.ckpt, map_location=base.device, weights_only=False)
+load_env_state(base, ck)
 with torch.inference_mode():
     obs, _ = env.reset()
-if "v0_state_dict" in ck:
-    base.v0.load_state_dict(ck["v0_state_dict"])
-    base.v0_train = False
 policy = MLPModel(
     TensorDict({"policy": obs["policy"]}, batch_size=[1]),
     {"actor": ["policy"]},

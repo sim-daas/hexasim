@@ -50,6 +50,8 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils.configclass import configclass
 
+from hexasim.rl.s1.aux import AuxCfg
+
 # Local custom MDP functions (rewards.py in this package)
 from . import mdp as hex_mdp  # isort:skip
 
@@ -979,6 +981,63 @@ class HexapodS0bEnvCfg(HexapodS0aEnvCfg):
 
 @configclass
 class HexapodS0bEnvCfg_PLAY(HexapodS0bEnvCfg):
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.scene.num_envs = 1
+
+
+##
+# S1 — blind trunk (paradigm spec §6; phase2-progress §2.2)
+##
+
+
+@configclass
+class S1ObservationsCfg:
+    """Actor: the 1,125-D union layout (``mdp.layout``). Critic: sg[actor obs] ⊕ contract P (683-D) — the agent maps
+    critic = [policy, contract]. ``mirror``: z_p and ê recomputed on the mirrored history (augmentation only)."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        actor = ObsTerm(func=hex_mdp.s1_policy_obs)
+
+    @configclass
+    class ContractCfg(ObsGroup):
+        p = ObsTerm(func=hex_mdp.contract_p)
+
+    @configclass
+    class MirrorCfg(ObsGroup):
+        latents = ObsTerm(func=hex_mdp.s1_mirror_latents)
+
+    policy: PolicyCfg = PolicyCfg()
+    contract: ContractCfg = ContractCfg()
+    mirror: MirrorCfg = MirrorCfg()
+
+
+@configclass
+class HexapodS1EnvCfg(HexapodS0bEnvCfg):
+    """S1: S0b + spatial terrain materials, per-env drop slope, the aux learner and the S1 layouts; rewards = S0b."""
+
+    observations: S1ObservationsCfg = S1ObservationsCfg()
+    aux: AuxCfg = AuxCfg()
+
+    # Drop slope factor per env and episode (D24), provisional until the bench.
+    drop_k_scale_range: tuple[float, float] = (0.5, 2.0)
+    # Material field seed: fixed so every arm and seed sees one terrain material layout.
+    material_field_seed: int = 0
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        ev = self.events
+        # Foot friction/stiffness are written per step from the terrain field; the USD foot buckets now only carry the
+        # per-env damping (D25: a compliant ground overrides the foot's k, spike T6), so every bucket is compliant.
+        ev.foot_material.params["rigid_fraction"] = 0.0
+        ev.terrain_materials = EventTerm(
+            func=hex_mdp.terrain_materials, mode="prestartup", params={"seed": self.material_field_seed}
+        )
+
+
+@configclass
+class HexapodS1EnvCfg_PLAY(HexapodS1EnvCfg):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.scene.num_envs = 1

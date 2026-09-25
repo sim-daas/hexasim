@@ -73,3 +73,23 @@ def s0b_dr_obs(env: HexapodS0bEnv) -> torch.Tensor:
         ],
         dim=-1,
     )
+
+
+def s1_policy_obs(env) -> torch.Tensor:
+    """S1 actor input, 1,125-D union layout (``mdp.layout.ACTOR_BLOCKS``): o_p | V_0 × per-episode keep | twist_cmd |
+    z_p | ê × gate | zero-held arm slots (M*, z_s/z_F, tokens, v_ℓ⊙m_ℓ, m_ℓ, σ̂_ℓ, rem_k)."""
+    env.refresh_proprio()
+    return env.s1_actor_obs
+
+
+def s1_mirror_latents(env) -> torch.Tensor:
+    """z_p and ê (gated) recomputed on the mirrored history — the exact mirror of the learned blocks (``symmetry``)."""
+    env.refresh_proprio()
+    return env.s1_mirror_latents
+
+
+def contract_p(env) -> torch.Tensor:
+    """Critic contract P, 683-D (paradigm spec §3.5; ``mdp.layout.CONTRACT_P_BLOCKS``), computed at step t and
+    independent of the action."""
+    env.refresh_proprio()
+    return env.s1_contract_p

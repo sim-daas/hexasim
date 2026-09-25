@@ -96,6 +96,91 @@ def mirror_augmentation(env, obs: TensorDict | None = None, actions: torch.Tenso
     return obs_aug, actions_aug
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# S1+: generic mirror driven by ``mdp.layout`` (each block names its rule).
+# ---------------------------------------------------------------------------------------------------------------------
+
+_STRIP_PTS = (8, 3)  # forward × lateral points per leg
+_SCAN = (11, 7)  # forward × lateral
+
+
+def _mirror_block(kind: str, x: torch.Tensor) -> torch.Tensor:
+    if kind == "joint":
+        return _joint(x)
+    if kind == "mask":
+        return x[..., _JOINT_SRC]
+    if kind == "polar":
+        return _polar(x)
+    if kind == "axial":
+        return x * x.new_tensor([-1.0, 1.0, -1.0])
+    if kind == "cmd":
+        return x * x.new_tensor([1.0, -1.0, -1.0])
+    if kind == "same":
+        return x
+    if kind.startswith("legs:"):
+        return _legs(x, int(kind.split(":")[1]))
+    if kind.startswith("front:"):
+        k = int(kind.split(":")[1])
+        return torch.cat([x[..., k:], x[..., :k]], dim=-1)
+    if kind == "strip":
+        y = x.view(*x.shape[:-1], 6, *_STRIP_PTS, 4)[..., LEG_SWAP, :, :, :].flip(-2)
+        return y.reshape(x.shape)
+    if kind == "scan":
+        return x.view(*x.shape[:-1], *_SCAN).flip(-1).reshape(x.shape)
+    if kind == "dr":  # stall, slope, payload, CoM x, CoM y, CoM z, latency, drop k
+        return x * x.new_tensor([1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0])
+    raise ValueError(kind)
+
+
+def mirror_layout(x: torch.Tensor, blocks, latent: torch.Tensor | None = None) -> torch.Tensor:
+    """Mirror a vector laid out as ``blocks``. Live "latent" blocks take their values from ``latent`` (the learned
+    features recomputed on the mirrored history, concatenated in block order); zero-held ones stay zero."""
+    out, i, j = [], 0, 0
+    for b in blocks:
+        xb = x[..., i : i + b.dim]
+        if b.mirror == "latent":
+            if b.live_s1:
+                out.append(latent[..., j : j + b.dim])
+                j += b.dim
+            else:
+                out.append(xb)
+        else:
+            out.append(_mirror_block(b.mirror, xb))
+        i += b.dim
+    assert i == x.shape[-1], (i, x.shape)
+    return torch.cat(out, dim=-1)
+
+
+def mirror_frame(o_p: torch.Tensor) -> torch.Tensor:
+    """Mirror the 111-D o_p frame (the first nine actor blocks)."""
+    from .layout import ACTOR_BLOCKS
+
+    return mirror_layout(o_p, ACTOR_BLOCKS[:9])
+
+
+@torch.no_grad()
+def mirror_augmentation_s1(env, obs: TensorDict | None = None, actions: torch.Tensor | None = None):
+    """rsl_rl ``data_augmentation_func`` for S1: groups policy (1,125), contract (683), mirror (latents)."""
+    from .layout import ACTOR_BLOCKS, CONTRACT_P_BLOCKS
+
+    obs_aug = None
+    if obs is not None:
+        obs_aug = obs.repeat(2)
+        n = obs.batch_size[0]
+        own = obs["policy"][:, [i for b in ACTOR_BLOCKS if b.mirror == "latent" and b.live_s1 for i in _cols(b)]]
+        obs_aug["policy"][n:] = mirror_layout(obs["policy"], ACTOR_BLOCKS, obs["mirror"])
+        obs_aug["contract"][n:] = mirror_layout(obs["contract"], CONTRACT_P_BLOCKS)
+        obs_aug["mirror"][n:] = own  # mirror of the mirrored sample = the original latents
+    actions_aug = None if actions is None else torch.cat([actions, mirror_actions(actions)], dim=0)
+    return obs_aug, actions_aug
+
+
+def _cols(block):
+    from .layout import ACTOR
+
+    return range(ACTOR[block.name].start, ACTOR[block.name].stop)
+
+
 if __name__ == "__main__":
     # Self-check: the mirror is an involution on every layout.
     p, c, a = torch.randn(64, POLICY_DIM), torch.randn(64, CRITIC_DIM), torch.randn(64, 18)
@@ -107,4 +192,19 @@ if __name__ == "__main__":
     x[0], x[6] = 1.0, 2.0
     y = mirror_actions(x)
     assert y[3] == -1.0 and y[9] == 2.0 and y.abs().sum() == 3.0
+    # S1 layouts: involution with consistent latents, and agreement with the S0b mirror on the old 117 dims.
+    from .layout import ACTOR_BLOCKS, ACTOR_DIM, CONTRACT_P_BLOCKS, CONTRACT_P_DIM, LATENT_DIM
+
+    x, lat = torch.randn(64, ACTOR_DIM), torch.randn(64, LATENT_DIM)
+    for b in ACTOR_BLOCKS:  # zero-held blocks are zero
+        if not b.live_s1:
+            from .layout import ACTOR
+
+            x[:, ACTOR[b.name]] = 0.0
+    own = torch.cat([x[:, list(_cols(b))] for b in ACTOR_BLOCKS if b.mirror == "latent" and b.live_s1], dim=-1)
+    m = mirror_layout(x, ACTOR_BLOCKS, lat)
+    assert torch.equal(mirror_layout(m, ACTOR_BLOCKS, own), x)
+    assert torch.equal(m[:, :117], mirror_policy_obs(x[:, :117]))
+    pc = torch.randn(64, CONTRACT_P_DIM)
+    assert torch.equal(mirror_layout(mirror_layout(pc, CONTRACT_P_BLOCKS), CONTRACT_P_BLOCKS), pc)
     print("symmetry self-check OK")

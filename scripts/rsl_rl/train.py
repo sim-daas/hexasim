@@ -5,6 +5,13 @@
 
 """Script to train RL agent with RSL-RL."""
 
+import os
+
+# Kit forks a helper process at start-up; OpenBLAS's at-fork handler then joins its worker threads and intermittently
+# crashes (exit 139) or hangs Kit (phase2-progress §2.2.5). No BLAS worker threads → nothing to join. Must be set before
+# numpy loads.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import warnings
 
 warnings.warn(

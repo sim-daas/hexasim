@@ -29,6 +29,13 @@ Usage:
       --terrain_level 0 [--no_drops]
 """
 
+import os
+
+# Kit forks a helper process at start-up; OpenBLAS's at-fork handler then joins its worker threads and intermittently
+# crashes (exit 139) or hangs Kit (phase2-progress §2.2.5). No BLAS worker threads → nothing to join. Must be set before
+# numpy loads.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import argparse
 import json
 import math
@@ -83,6 +90,9 @@ def toe_pos_w(robot, tibia_ids):
 
 
 cfg = parse_env_cfg(args.task, num_envs=args.num_envs)
+from hexasim.rl.load_policy import eval_physx_buffers  # noqa: E402
+
+eval_physx_buffers(cfg)
 cfg.seed = args.seed
 cfg.curriculum = None
 s0b = hasattr(cfg, "commands") and cfg.commands is not None
@@ -143,14 +153,23 @@ s0a = hasattr(cfg, "v0_ramp_steps")
 if s0a:
     # evaluate on the deployable estimate only (or, for diagnosis, on ground truth)
     cfg.v0_ramp_steps = (10**9, 10**9 + 1) if args.gt_velocity else (0, 1)
+if hasattr(cfg, "aux"):
+    from hexasim.rl.load_policy import configure
+
+    configure(cfg, torch.load(args.ckpt, map_location="cpu", weights_only=False))
 env = gym.make(args.task, cfg=cfg).unwrapped
 if args.terrain_level is not None:
     pin_terrain_level(env, args.terrain_level)
 ckpt = torch.load(args.ckpt, map_location=env.device, weights_only=False)
-obs, _ = env.reset()
 if s0a:
     env.v0.load_state_dict(ckpt["v0_state_dict"])
     env.v0_train = False
+s1 = hasattr(env, "aux")
+if s1:  # S1 checkpoint: trained aux, ê gate and V_0 dropout as at save time (π_S0 on S1: untrained, gate shut)
+    from hexasim.rl.load_policy import load_env_state
+
+    load_env_state(env, ckpt)
+obs, _ = env.reset()  # after loading: the first observation and the V_0 keep draws use the loaded state
 
 td = TensorDict({"policy": obs["policy"]}, batch_size=[env.num_envs])
 dist = {"class_name": "GaussianDistribution", "init_std": 1.0}
@@ -253,6 +272,11 @@ if s0a:
     m["v0_rmse"] = (v0_se.sum() / steps.sum()).sqrt().item()
     m["v0_bias_x"] = (v0_bias_x.sum() / steps.sum()).item()  # mean V_0 − true v_x
     m["gt_velocity"] = args.gt_velocity
+if s1 and env.aux.stats_frozen:  # V tests (v7 §4.3) and aux losses on this evaluation's own rollout
+    m.update({f"vtest_{k}": v for k, v in env.aux.v_tests().items()})
+    with torch.no_grad():
+        m.update({f"aux_{k}": v.item() for k, v in env.aux.losses(env.aux.buffer.sample(8192, env.step_dt)).items()})
+    m["e_gate"], m["v0_drop_p"] = env.e_gate, env.v0_drop_p
 if s0b:
     vx_c, vy_c, wz_c = args.cmd
     m.update(cmd=args.cmd, terrain_level=args.terrain_level, terrain_type=args.terrain_type, no_drops=args.no_drops)

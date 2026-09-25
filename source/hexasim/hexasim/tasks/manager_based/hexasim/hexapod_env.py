@@ -10,6 +10,7 @@ import torch
 from rsl_rl.modules.normalization import EmpiricalNormalization
 
 from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.managers import SceneEntityCfg
 
 from .mdp.proprio import ProprioReader
 from .mdp.rewards import COXA_BACKWARD_SIGN, LEG_NAMES, coxa_leg_geometry, coxa_stroke_weight, toe_pos_w
@@ -263,3 +264,179 @@ class HexapodS0bEnv(HexapodS0aEnv):
         self.imu_bias[env_ids] = torch.randn(n, 6, device=self.device) * torch.tensor(
             [c.imu_acc_bias_std] * 3 + [c.imu_gyro_bias_std] * 3, device=self.device
         )
+
+
+class HexapodS1Env(HexapodS0bEnv):
+    """S1 blind trunk env (paradigm spec §6, phase2-progress §2.2).
+
+    On top of S0b:
+    * spatial terrain materials (``mdp.materials``): static field + per-entry submeshes (prestartup event); per-foot
+      μ_s, μ_d, k written through the PhysX tensor API from each env's per-episode palette; damping per env (D25);
+    * per-env, per-episode drop-slope factor (D24);
+    * the auxiliary learner ``aux`` (E_p, V, probes; ``hexasim.rl.s1.aux``), fed a W-step o_p history, and the
+      sequence-buffer rows it trains from (labels, touchdown events);
+    * the 1,125-D actor layout (``mdp.layout``): V_0 frozen (no online training) and retired by per-episode dropout
+      (``v0_drop_p``, D23); ê enters through a binary gate (``e_gate``) opened by the algorithm once V passes v7 §4.3;
+      all other new slots held at zero;
+    * contract P (683-D) for the critic; z_p and ê recomputed on the mirrored history for the mirror augmentation.
+    """
+
+    def load_managers(self):
+        from hexasim.rl.s1.aux import S1Aux
+        from hexasim.rl.s1.kinematics import toe_positions
+
+        from .mdp import layout
+        from .mdp.materials import FootWriter, Palette
+
+        # Everything the observation terms read must exist before the managers are built (they probe the terms).
+        robot = self.scene["robot"]
+        self.palette = Palette(self.num_envs, self.device)
+        self.drop_k_scale = torch.ones(self.num_envs, 1, device=self.device)
+        self.e_gate = 0.0
+        self.v0_drop_p = 0.0
+        self.v0_keep = torch.ones(self.num_envs, 1, device=self.device)
+        q0 = robot.data.default_joint_pos.torch[0]
+        self.aux = S1Aux(self.cfg.aux, self.num_envs, q0, self.step_dt, self.device)
+        self._whist = torch.zeros(self.num_envs, self.cfg.aux.window, 111, device=self.device)
+        # Nominal footholds: rest-pose toes in the body frame (fixed, clock-independent; spec §2.2/§3.5).
+        self.nominal_toe_b = toe_positions(q0).to(self.device)
+        f = torch.tensor(layout.STRIP_FWD, device=self.device)
+        la = torch.tensor(layout.STRIP_LAT, device=self.device)
+        self._strip_off = torch.stack(torch.meshgrid(f, la, indexing="ij"), dim=-1).view(-1, 2)  # (24, 2)
+        f = torch.tensor(layout.SCAN_FWD, device=self.device)
+        la = torch.tensor(layout.SCAN_LAT, device=self.device)
+        self._scan_off = torch.stack(torch.meshgrid(f, la, indexing="ij"), dim=-1).view(-1, 2)  # (77, 2)
+        self._grid_off = torch.tensor(layout.LOCAL_GRID, device=self.device)  # (9, 2)
+        self._prev_contact = torch.zeros(self.num_envs, 6, dtype=torch.bool, device=self.device)
+        self._prev_toe = torch.zeros(self.num_envs, 6, 3, device=self.device)
+        self._actor_zero = torch.zeros(
+            self.num_envs, layout.ACTOR_DIM - layout.ACTOR["m_star"].start, device=self.device
+        )
+        self._base_idx = robot.find_bodies(".*base_link.*")[0][0]
+        super().load_managers()
+        self.v0_train = False  # frozen at π_S0's weights (D23)
+        self.proprio.k = self.cfg.drop_k * self.drop_k_scale  # (N, 1), broadcasts over the 18 servos
+        self.foot_writer = FootWriter(self)
+
+    # ------------------------------------------------------------------ helpers
+    def _yaw_offsets_w(self, off_b: torch.Tensor) -> torch.Tensor:
+        """Body-frame horizontal offsets (..., K, 2) rotated by base yaw → world xy offsets (N, ..., K, 2)."""
+        q = self.scene["robot"].data.root_quat_w.torch
+        yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        c, s = torch.cos(yaw), torch.sin(yaw)
+        shape = (-1,) + (1,) * (off_b.dim() - 1)
+        c, s = c.view(shape), s.view(shape)
+        return torch.stack((c * off_b[..., 0] - s * off_b[..., 1], s * off_b[..., 0] + c * off_b[..., 1]), dim=-1)
+
+    def material4(self, xy: torch.Tensor) -> torch.Tensor:
+        """(μ_s, μ_d, log10 k, log10(1 + c)) at world xy (N, ..., 2); damping c is per env (D25)."""
+        m = self.palette.at(self.material_field, xy)
+        c = self.foot_material[:, 4].view(-1, *([1] * (xy.dim() - 2)), 1).expand(*m.shape[:-1], 1)
+        return torch.cat((m, c), dim=-1)
+
+    def _local_heights(self, toe: torch.Tensor) -> torch.Tensor:
+        """3 × 3 terrain heights at 4 cm around each toe (body-yaw axes), relative to the toe: (N, 6, 9)."""
+        xy = toe[..., None, :2] + self._yaw_offsets_w(self._grid_off)[:, None]
+        return self.terrain_z(xy) - toe[..., None, 2]
+
+    # ------------------------------------------------------------------ per-step
+    def refresh_proprio(self):
+        if self._stamp == self._sim_step_counter:
+            return
+        fresh = self._fresh.clone()
+        super().refresh_proprio()
+        from .mdp.layout import CONTRACT_P_DIM
+        from .mdp.observations import s0a_privileged_obs
+        from .mdp.rewards import foot_forces_nt
+        from .mdp.symmetry import mirror_frame
+
+        robot = self.scene["robot"]
+        # W-step history; a new episode starts with its first frame repeated.
+        self._whist = torch.roll(self._whist, -1, dims=1)
+        self._whist[:, -1] = self.o_p
+        self._whist[fresh] = self.o_p[fresh].unsqueeze(1)
+        lat = self.aux.latents(self._whist)
+        lat_m = self.aux.latents(mirror_frame(self._whist))
+        lat[:, 64:] *= self.e_gate
+        lat_m[:, 64:] *= self.e_gate
+        cmd = self.command_manager.get_command("base_velocity")
+        self.s1_actor_obs = torch.cat([self.o_p, self.v_in * self.v0_keep, cmd, lat, self._actor_zero], dim=-1)
+        self.s1_mirror_latents = lat_m
+
+        # Labels (post-physics state of this step).
+        root, quat = robot.data.root_pos_w.torch, robot.data.root_quat_w.torch
+        toe = toe_pos_w(robot, self._tibia_body_ids)
+        forces = torch.norm(self.scene["contact_forces"].data.net_forces_w.torch, dim=-1)
+        contact = forces > 1.0
+        mat_toe = self.material4(toe[..., :2])  # (N, 6, 4)
+        hgt = self._local_heights(toe)  # (N, 6, 9)
+        fn, ft = foot_forces_nt(self, SceneEntityCfg("contact_forces"))
+        toe_v = (toe - self._prev_toe) / self.step_dt
+        slip = (toe_v[..., :2].norm(dim=-1) * contact).sum(1) / contact.sum(1).clamp(min=1)
+        slip = torch.where(fresh, 0.0, slip)
+        cur = torch.cat(
+            [
+                contact.float(),
+                mat_toe.flatten(1),
+                hgt.flatten(1),
+                robot.data.root_lin_vel_b.torch,
+                torch.stack((fn, ft), dim=-1).flatten(1),
+                slip[:, None],
+            ],
+            dim=-1,
+        )
+        self.aux.buffer.add(self.o_p, cur, torch.cat((root, quat), dim=-1))
+        td = contact & ~self._prev_contact & ~fresh[:, None]
+        self.aux.buffer.touchdown(td, toe, torch.cat((mat_toe, hgt), dim=-1))
+        self._prev_contact, self._prev_toe = contact, toe
+
+        # Contract P.
+        anchor_w = root[:, None, :2] + self._yaw_offsets_w(self.nominal_toe_b[:, :2])  # (N, 6, 2)
+        strip_xy = anchor_w[:, :, None] + self._yaw_offsets_w(self._strip_off)[:, None]  # (N, 6, 24, 2)
+        scan_xy = root[:, None, :2] + self._yaw_offsets_w(self._scan_off)  # (N, 77, 2)
+        servo = robot.actuators["ax12a"]
+        dr = torch.cat(
+            [
+                servo.stall / servo.cfg.stall_torque,
+                servo.slope / 32.0,
+                robot.data.body_mass.torch.sum(dim=1, keepdim=True).to(self.device),
+                robot.data.body_com_pos_b.torch[:, self._base_idx, :].to(self.device),
+                servo._delay.time_lags.float().view(-1, 1).to(self.device),
+                self.drop_k_scale,
+            ],
+            dim=-1,
+        )
+        self.s1_contract_p = torch.cat(
+            [
+                s0a_privileged_obs(self),
+                self.material4(strip_xy).flatten(1),
+                self.terrain_z(scan_xy) - root[:, 2:3],
+                dr,
+            ],
+            dim=-1,
+        )
+        assert self.s1_contract_p.shape[1] == CONTRACT_P_DIM
+
+    def step(self, action: torch.Tensor):
+        ret = super().step(action)
+        robot = self.scene["robot"]
+        toe = toe_pos_w(robot, self._tibia_body_ids)
+        low = toe[..., 2] - self.terrain_z(toe[..., :2]) < self.foot_writer.low_z
+        contact = torch.norm(self.scene["contact_forces"].data.net_forces_w.torch, dim=-1) > 1.0
+        self.foot_writer.update(self.palette.at(self.material_field, toe[..., :2]), low | contact)
+        log = self.extras.setdefault("log", {})
+        log["S1/material_writes_per_step"] = self.foot_writer.writes
+        log["S1/e_gate"] = self.e_gate
+        log["S1/v0_keep"] = self.v0_keep.mean().item()
+        self.foot_writer.writes = 0
+        return ret
+
+    def _reset_idx(self, env_ids: Sequence[int]):
+        ids = torch.as_tensor(env_ids, device=self.device)
+        self.palette.redraw(ids)
+        lo, hi = self.cfg.drop_k_scale_range
+        self.drop_k_scale[ids] = lo + torch.rand(len(ids), 1, device=self.device) * (hi - lo)
+        self.proprio.k[ids] = self.cfg.drop_k * self.drop_k_scale[ids]
+        self.v0_keep[ids] = (torch.rand(len(ids), 1, device=self.device) >= self.v0_drop_p).float()
+        self.aux.buffer.episode_end(ids)
+        super()._reset_idx(env_ids)

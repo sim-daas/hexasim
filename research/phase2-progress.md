@@ -1710,3 +1710,324 @@ tibia together), and got there in 0.59× the iterations and wall time. On the he
 tracking RMSE and much better on the hardest stairs (L20 stairs-up 0.15: −26 % vs −38 % stride), weaker on high-level
 rough terrain (fails from L16). Lesson for later phases: the rest-reach bug and the missing collision/landing terms
 were silently shaping π_S0; gate metrics alone did not reveal them — the swing and gap probes did.
+
+---
+
+## Phase 2.2: S1 — blind trunk (started 2026-09-24)
+
+Scope: paradigm spec §6 / §12 step 5 on top of π_S0 (`…/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/
+model_12200.pt`). Plan agreed with the user 2026-09-24: terrain materials before S1, 8 S1 seeds (S1-K later), V_0 → V
+by the user's widen-and-anneal strategy, per-env drop slope. S1b is blocked on the N_v benchmark (spec §6.2).
+
+### 2.2.1 Spatial terrain materials — feasibility spike
+
+Until S1 the terrain was one rigid μ-1 mesh and every env had one foot material for the whole run (§2.1.1). P's
+576-D strips, the touchdown-material probe targets and V's slip test need materials that vary over space.
+`scripts/tests/material_spike.py` (Hexapod-S0b-v0, flat, zero actions; `logs/material_spike*.txt`) tested writing
+per-foot materials every step through the PhysX tensor API (`root_view.set_material_properties`):
+
+| Test | Result |
+| --- | --- |
+| T1 per-shape writes, gravity tilted 30°: feet at μ 0.2 slide, μ 1.0 hold | PASS (≥ 9.7 m vs ≤ 4.6 mm) |
+| T2 mid-contact switch 1.0 → 0.2 → 1.0 | Takes effect both ways (6.4 cm in 10 steps after the switch; odd envs ≤ 0.5 mm). 90 of 128 robots sliding at ≈ 0.6 m/s tumble when grip returns at 30° — physical; still sliding at μ 0.2 would have been ≈ 4.5 m |
+| T3 friction write keeps the USD compliance | PASS (compliant − rigid sink 0.37 → 0.42 mm) |
+| T5 stiffness via the restitution slot (PhysX: restitution < 0 ⇒ compliant, k = −restitution) | Works, also on feet that were rigid in USD: k 2e3 sinks 0.97 mm, k 5e4 −0.20 mm (rigid −0.26); stable |
+| T4 cost | ≈ 55 µs per env written: all 4,096 envs 226 ms per call vs env.step 110 ms; 400 envs 18–22 ms; quantising values barely helps |
+| T6 damping on the ground (compliant ground k_g 1e6, c_g ∈ {10, 100, 1000}) against feet with k written per step | FAIL: a compliant ground overrides the foot's written k (every foot sinks −0.26 mm = rigid), and c_g has no visible effect (landing v_z RMS 0.0017 for all three) |
+
+### 2.2.2 Design — hybrid of per-entry submeshes and per-foot writes (user decision)
+
+* **Field** (`mdp/materials.py`): per 4 m cell, Voronoi sites carrying library entries — 1 site (uniform, 25 %),
+  2 (one straight boundary, 35 %), 3 collinear (stripes, 15 %), 4–8 (mosaic, 25 %); transition width per cell
+  U[0, 0.8] m (the user asked for gradual transitions of 60–80 cm, a little larger than the robot; the sharp end is
+  kept because spec §5.3 requires sharp and gradual conditions with continuously randomised sharpness). Second-site
+  weight ½·(1 − clamp(2b/w, 0, 1)), b = distance to the bisector. Stored on a 2 cm grid, static, seed fixed
+  (`material_field_seed = 0`) so every arm and seed sees one layout; independent of the height field (v7 §5.4).
+* **Library** (approved by the user, provisional until the bench): concrete, rubber mat, PTFE (μ_s 0.2–0.3), talc/
+  graphite, dry dust, foam, wet tile, wet rubber, glossy grit, polished coating; matte/shiny tag per entry; μ_d =
+  μ_s·U[0.8, 1]; rigid = k 1e6. Each env redraws its values inside every entry's range at reset (per-episode palette),
+  so a patch always looks like its entry while its exact values vary.
+* **USD** (static, renderable — for S2 depth dropout, S3 appearance, O's M*): one visual submesh per entry (triangle →
+  dominant entry at its centroid, every face assigned exactly once, semantic label per entry). The source mesh stays
+  the single collider (hidden; also the HeightMap raycast target): rigid, μ 1, multiply. (First version: per-entry
+  colliders — dropped for cost, §2.2.4.)
+* **Per-foot physics**: μ_s, μ_d and k written to the tibia shapes from the field blend and the palette, only for envs
+  where a foot that is low (≤ 2 cm) or in contact has a target that moved by > 0.01 (μ) or 0.05 (log k).
+* **Damping — D25**: spike T6 failed, so per the user's fallback the damping stays on the foot, per env, from the USD
+  buckets (now all compliant, c log-U[10, 200] N·s/m; fixed per run). P's and the probes' log c channel is the env's.
+* Known ceiling: gradual physical transitions render as a sharp visual edge (dominant entry per triangle) until S3
+  adds blended band materials from the stored weights.
+
+Check, `scripts/tests/material_field_test.py --headless` (512 envs, flat tiles, `logs/material_field_test.txt`):
+PASS — read-back = value in effect (1.2e-7), in effect within one quantum of the field target; θ = 0 stable
+(max 5 mm/s, rigid entries k 1e6); tilted 20° (tan 0.364): 82/82 envs standing only on μ_s < 0.30 slide, 225/225 on
+μ_d > 0.55 hold. (The first version classified footing at the end of the run and flagged envs that slid onto a grippy
+patch; fixed to start-and-end footing.)
+
+### 2.2.3 S1 implementation
+
+| Piece | Where |
+| --- | --- |
+| Layouts, single source: actor 1,125 = π_S0's 117 (o_p, V_0, twist_cmd) ⊕ z_p 64 ⊕ ê 15 ⊕ zero-held M* 576, z_s/z_F 20, tokens 192, v_ℓ⊙m_ℓ 128, m_ℓ 2, σ̂_ℓ 8, rem 3; contract P 683; mirror rule per block | `mdp/layout.py` |
+| E_p: causal dilated TCN, 2 convs per residual block, k 3, d {1,2,4,8} (RF 61; W 75 → +16, RF 125), hidden 128 → 64 + LayerNorm; RF ≥ W asserted | `rl/s1/tcn.py` |
+| FK from `models/hexapod.urdf` (vs sim toe point 0.008 mm) and v_kin (§2.1 stance weights, no switches) | `rl/s1/kinematics.py` |
+| V = v_kin + Δv̂(z_p), f̂ (6 × F_n/F_t); probes (current 84 on z_p, touchdown 102 on z_p — the O/B0 heads), β-NLL β 0.5, log σ² ∈ [−6, 4], touchdown material ×2, constant weight; VICReg var + cov; slip-weighted Δv Huber; encoder LR 0.3 × heads | `rl/s1/aux.py`, `losses.py` |
+| Sequence buffer L 128: W-step history within one episode; touchdown targets = first touchdown strictly after t, back-filled, Δt^TD and body-frame p^TD formed per row at sample time | `rl/s1/seq_buffer.py` |
+| Env `Hexapod-S1-v0`: materials, drop slope × U[0.5, 2] per env and episode (D24), aux owned by the env (the V_0 pattern), labels, touchdown events, contract P (nominal foothold = rest-pose toe from FK), z_p/ê on the mirrored history for the augmentation | `hexapod_env.py:HexapodS1Env`, `mdp/observations.py` |
+| S1PPO: S0PPO + aux update per iteration, frozen normaliser dims (V_0 at π_S0's stats, zero-held slots at identity, ê while gated), V tests every 100 iterations → ê gate, V_0 retirement schedule, aux state in the checkpoint | `rl/s1_ppo.py`, `agents/rsl_rl_ppo_cfg.py:PPORunnerCfg_S1` |
+| Loader shared by eval/probe scripts (task from actor width, aux window, env state before reset) | `rl/load_policy.py`; `eval_s0.py`, `record_gait.py`, `swing_radial_probe.py`, `leg_gap_probe.py`; gate/sweep scripts take `TASK=` |
+
+**V_0 → V switch (user's strategy, corrected; D23).** V_0 stays in the old columns, frozen at π_S0's weights (no
+online training) with its normaliser statistics frozen, so its dropout does not rescale it. ê is appended with
+zero-init columns behind a binary gate: while the gate is shut the block input is exactly 0, so its columns get no
+gradient (tested). When V passes v7 §4.3 on three consecutive checks (slip-stratified error < 3 × rigid; zeroing the
+9 IMU dims raises the error ≥ 1.5 ×, the spec's "materially", provisional), ê's normaliser statistics are set from
+aux samples while its columns are still zero (function-preserving) and the gate opens; the zero-init columns give the
+gradual onset. 1,000 iterations later V_0 is dropped per episode (never per step), probability 0 → 1 over 1,000
+iterations; zeros are not an unambiguous flag for a velocity (v = 0 is a real reading), which is why the end state is
+permanently zero and twist_cmd separates standing. V_0's three columns remain in the layout, always zero after S1.
+
+**Merge-gating tests** — `python scripts/tests/test_s1.py` → `S1 checks OK: widening max|Δ| = 0.00e+00 (float64);
+routing, TCN RF, β-NLL, buffer, mirror`: widened actor = π_S0 over 10,000 random observations with random values in
+every new block; value-loss backward leaves the actor's grads None; PPO backward leaves every aux grad None; aux
+backward leaves actor and critic None; gated ê and zero-held columns get exactly zero gradient; TCN RF; β-NLL gradient
+= −(y − μ)/σ; buffer history and touchdown semantics on a synthetic episode with a reset; mirror involution on all S1
+groups and equality with the S0b mirror on the old 117 dims. Wiring in sim, `scripts/tests/s1_env_check.py`
+(`logs/s1_env_check.txt`): PASS (shapes, zero-held and gated slots exactly 0, FK 0.008 mm, P strip/scan exact,
+buffer and aux run). Training smoke test (128 envs, 24 iterations, thresholds lowered so the gate and the V_0
+schedule fire, `logs/s1_smoke.txt`): runs end to end, checkpoint carries aux and schedule state.
+
+**v_kin constants — D26** (`scripts/tests/vkin_calibrate.py`, π_S0 on Hexapod-S1-v0, 512 envs × 400 steps,
+`logs/vkin_calibrate.txt`): τ_e 0.005 rad, s 0.003, δ −0.005 m → v_kin RMSE 0.063 m/s on walking steps (v_true RMS
+0.138; the first guess 0.02/0.01/0.005 gave 0.087); the weights agree with the contact sensor on 90 % of foot-steps
+(mean w 0.74 in stance, 0.07 in swing). The grid optimum (0, 0.001, −0.02; RMSE 0.058) weights only the lowest feet
+(58 % agreement, stance w 0.25) and was rejected: Σw → 0 on uneven ground would pull v_kin toward zero. Provisional
+until the bench.
+
+**Deviations added in Phase 2.2**
+
+| # | Deviation | Where |
+| --- | --- | --- |
+| D23 | V_0 kept as a frozen old block in S1 and retired by per-episode dropout (not in the §2.9 table; always zero after S1) | 2.2.3 |
+| D24 | Drop slope randomised per env and episode, × U[0.5, 2] (P's drop entry) | 2.2.3 |
+| D25 | Damping per env on the foot, fixed per run (spike T6: a compliant ground breaks the per-foot stiffness) | 2.2.1–2 |
+| D26 | v_kin stance constants calibrated in sim | 2.2.3 |
+| D27 | Material realisation: static per-entry submeshes + per-foot tensor writes; per-episode palette inside each entry's range | 2.2.2 |
+
+### 2.2.4 Collection cost (first pilot launch stopped at ≈ 40 iterations, user decision)
+
+The first pilot launch (`…/2026-09-25_00-27-59_s1_pilot_seed42`, superseded) ran 5.9 s per iteration (collection
+4.6 s) against π_S0's 2.15 s; the user asked whether fewer envs would help. They would not: the batch (envs × steps)
+is an S1 invariant shared by every seed (D1: 4,096 × 16), and fewer envs only shrink the data per iteration. The
+overhead was ours. `scripts/tests/s1_profile.py --headless` (4,096 envs, `logs/s1_profile.txt`), ms per env step:
+
+| | S1 as launched | S1 fixed | S0b |
+| --- | --- | --- | --- |
+| env.step | 293 | 198 | 115 |
+| physics + managers (excl. S1 obs) | ≈ 175 | ≈ 102 | 115 |
+| E_p + V inference, own + mirrored history | 70 (fp32) | 46 (fp16) | — |
+| foot material writes (≈ 260 envs per step) | 25 | 24 | — |
+| P, labels, mirror frame, buffer | ≈ 8 | ≈ 8 | — |
+
+* **Per-entry colliders were the physics cost.** Each of the 10 entry submeshes spans the whole terrain, so every
+  foot was tested against 10 terrain-wide triangle meshes (+60 ms per step; unchanged with the writer off or half the
+  feet rigid). Since T6 failed the ground's physics material is uniform anyway, so the submeshes are now visual +
+  semantic only and the original mesh stays the single collider (invisible). Physics back at the S0b level.
+* **fp16 inference** for the rollout latents (1.6×; max |Δz| 3.5e-3 on unit-scale latents; bf16 3.3e-2 rejected).
+  A receptive-cone TCN evaluation (only the positions feeding the last output) was tried and reverted: 1.5× in fp32,
+  no gain over fp16, slower to train.
+* **Aux training in fp16 mixed precision** (autocast + loss scaling): ≈ 485 ms per PPO iteration for 8 × 4,096
+  windows (≈ 840 ms in fp32).
+
+Result: 4.0 s per iteration at 4,096 × 16 (ETA 10,000 iterations ≈ 11 h), batch unchanged. `test_s1.py` and a
+128-env training smoke test pass after the changes; the material field test was re-run on the single-collider
+terrain (below).
+
+### 2.2.5 S1 pilot (seed 42, W 50, 10,000 iterations; user request: document every 2,000 iterations)
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S1-v0 --headless --num_envs 4096 --seed 42 --max_iterations 10000 \
+  --warmstart logs/rsl_rl/hexapod_s0b/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/model_12200.pt \
+  --run_name s1_pilot_seed42        # run dir logs/rsl_rl/hexapod_s1/2026-09-25_01-19-13_s1_pilot_seed42
+scripts/rsl_rl/s1_milestones.sh <run_dir> <π_S0.pt>   # π_S0 baseline gates on the S1 env, then every 2,000 iterations:
+                                                     # videos, probes, reward slopes, gates (256 episodes) with V tests
+```
+
+**Launch 2 crashed at iteration ≈ 400** (`…/2026-09-25_01-19-13_s1_pilot_seed42`, superseded; last checkpoint
+model_350). *Observed:* `RuntimeError: Inplace update to inference tensor outside InferenceMode` in `S1PPO._open_gate`.
+*Root cause:* the gate opened (V passed v7 §4.3 at iterations 100/200/300 and the actor unfroze at 300; see below), and
+the ê normaliser statistics were written outside inference mode. rsl_rl's normaliser recreates `_std` inside the
+rollout's inference mode, so it is an inference tensor. The 128-env smoke test opened the gate before any rollout had
+refreshed the normaliser and missed it. *Fix:* `s1_ppo.set_block_stats` (and `_restore`) write inside
+`torch.inference_mode()`. A regression check was added to `test_s1.py`, confirmed to reproduce the error without the
+fix. Kit exits 0 after a Python error, so the retry loop did not relaunch.
+
+V at the crash (buffer data, current policy):
+
+| Iteration | V RMSE | rigid | slip | slip / rigid | IMU zeroed | IMU ratio | v_kin |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 100 | 0.038 | 0.030 | 0.058 | 1.9 × | 0.077 | 2.1 × | 0.060 |
+| 300 | 0.040 | 0.031 | 0.063 | 2.0 × | 0.103 | 2.6 × | 0.064 |
+
+Slip share 10–13 % of steps. The residual form is doing its job: V beats v_kin, the error under slip stays within 2 ×
+rigid, and removing the IMU more than doubles the error.
+
+**Probe statistics fixed before relaunch.** Launch 2 froze the target standardisation from the first buffer fill,
+when the curriculum had every env on levels 0–2. As the curriculum climbed (level 1 → 11 by iteration 400) the
+touchdown targets left that range, and `probe_td` rose 0.35 → 2.9 while every other aux term improved. The spec asks
+for fixed statistics from a π_S0 rollout, which must cover the training distribution:
+`scripts/tests/s1_probe_stats.py --headless --ckpt <π_S0>` (2,048 envs pinned to uniform levels 0–14, 300 steps,
+262,144 samples, `logs/s1_probe_stats.txt`) writes `hexasim/rl/s1/probe_stats_pi_s0.pt`, the default
+`AuxCfg.stats_path`. It is one file for every S1 seed and arm, and `aux.update()` refuses to run without it.
+Target std is floored at 5e-3: touchdown local heights relative to the toe vary by only 1–4 mm.
+
+The same run's reward fell 406 → 358 over iterations 300–400. This is mostly the curriculum (level 9 → 11.5);
+tracking held at 23–24 per episode-second with no falls. Yaw tracking dipped right after the actor unfroze
+(5.0 → 1.3, recovering to 2.8 by iteration 400). Watched in the pilot.
+
+Material field test re-run on the single-collider terrain (`logs/material_field_test2.txt`): PASS (74/74 slide,
+231/231 hold, read-back 6e-8, stable).
+
+**Launch 3** (the pilot of record) uses the same command as above, with the fixes.
+
+**Kit start-up crash — root cause found (it was not telemetry).** After launch 2, every `train.py` start crashed about
+1 s into Kit start-up (exit 139) or hung in the crash reporter. That was 8 of 8 attempts, while other Kit scripts
+started fine. The frames logged in the terminal pointed at `libomni.kit.telemetry` (`__throw_regex_error`), and
+disabling anonymous telemetry through `--kit_args` did not help (2 crashes, 1 hang in 3). The full native report
+(`…/isaacsim/kit/data/Kit/IsaacLab/3.0/crash_*.txt`) shows the real frames:
+
+- a Kit plugin (`omni.platforminfo`) calls `fork()` at start-up;
+- the fork runs the at-fork handler of numpy's bundled OpenBLAS (`blas_thread_shutdown_`);
+- that handler crashes joining its worker threads.
+
+This is a race. It explains the long-standing "telemetry flake" of §2.1.25 / CLAUDE.md. It became systematic here
+because `train.py` loads the task config before Kit, and the S1 config pulls more modules in first.
+
+*Fix:* `OPENBLAS_NUM_THREADS=1` (no BLAS worker threads, nothing to join). It is set at the top of `train.py` and
+`eval_s0.py`, and exported by `s1_milestones.sh`. Result: 4 of 4 clean starts (`logs/kit_train*.txt`), and launch 3
+started first time. numpy's BLAS is single-threaded as a result, which does not matter here: torch uses its own
+thread pools.
+
+**Launch 3 — the pilot of record:** `logs/rsl_rl/hexapod_s1/2026-09-25_03-28-11_s1_pilot_seed42` (same command).
+
+**Evaluation next to a running S1 training.** The iteration-2,000 gate set first failed silently: every condition
+died with `Failed to get DOF velocities` after a CUDA OOM. PhysX pre-allocates its 4,096-env GPU buffers (≈ 1 GB, e.g.
+671 MB of contact pairs) regardless of env count, and S1 training holds 10.7–13 GB. *Fix:*
+`hexasim.rl.load_policy.eval_physx_buffers` sizes the buffers for ≤ 1,024 envs in `eval_s0.py` and the probe scripts.
+No overflow warnings in the eval logs. The π_S0 baseline set was re-run with it: the earlier baseline had also stopped
+after 3 of 17 conditions.
+
+#### Milestone 2,000 (`model_2000.pt`; `logs/milestones/2026-09-25_03-28-11_s1_pilot_seed42/`, `logs/eval/s1p_it2000_*.json`)
+
+Schedule state: actor unfrozen at 300; ê gate opened at 399 (three consecutive V-test passes); V_0 per-episode dropout
+0.60 at 2,000, on schedule for 1.0 at ≈ 2,400. Terrain level ≈ 9.4 (peaked 11.6 at 400).
+
+Gates, 256 episodes per condition, on Hexapod-S1-v0 (spatial materials), against π_S0 on the same env (`s1base`):
+
+| Condition | π_S0 on S1 env | S1 it 2,000 |
+| --- | --- | --- |
+| Falls, all 17 conditions | 0 % | 0 % |
+| 0.10 m/s L0 / L5 / L9: v_x, cycle RMSE, stride err | 0.100 / 0.100 / 0.099; ≤ 0.0044; +0.2 / −1.0 / −1.4 % | 0.103 / 0.103 / 0.103; ≤ 0.0062; +2.7 / +2.5 / +2.9 % |
+| 0.15 m/s L0 / L5 / L9 | 0.149 / 0.148 / 0.147; ≤ 0.0050; −0.9 / −1.9 / −2.1 % | 0.151 / 0.150 / 0.149; ≤ 0.0060; +0.3 / −0.6 / −0.4 % |
+| Drops vs no drops (0.10 / 0.15, cycle RMSE) | 0.0030 vs 0.0034 / 0.0028 vs 0.0031 | 0.0049 vs 0.0053 / 0.0041 vs 0.0046 |
+| Turn on the spot ±0.3 (L0): ω̄_z, RMSE | +0.320 / −0.309; 0.045 / 0.037 | +0.317 / −0.319; 0.031 / 0.032 |
+| Walk 0.10 + yaw 0.2 (L0): ω̄_z, yaw RMSE, stride err | 0.215, 0.021, +3.8 % | 0.203, 0.008, +6.2 % |
+| Standing contact duty L0 / L5 / L9; drift | 0.97 / 0.84 / 0.82; 0.8–1.2 cm | 0.96 / 0.90 / 0.87; 0.9–1.3 cm |
+
+All spec §4.2 gates pass (RMSE ≤ 0.03, stride ±10 %, falls ≤ 5 %, drops within +5 %). Compared with π_S0, turning is more
+symmetric and walk-and-turn yaw tracking is better (0.021 → 0.008). At 0.10 m/s the policy walks ≈ 3 % fast (stride
++2.5–2.9 %), and cycle RMSE is ≈ 1.5 mm/s higher.
+
+V (v7 §4.3) on the evaluation rollouts:
+
+| | v̂ RMSE | rigid | slip | slip / rigid | IMU zeroed | slip share |
+| --- | --- | --- | --- | --- | --- | --- |
+| walking, L0–L9 | 0.019–0.025 | 0.016–0.021 | 0.033–0.046 | 1.6–2.5 × | 0.133–0.143 (≈ 6 ×) | 3–9 % |
+| standing | 0.013 | 0.013 | — | — | 0.125 | 0 |
+
+V's error halved since the gate opened (0.041 in training at 400). It passes both tests with margin, and its error
+grows with terrain level and slip share as expected. `v0_rmse` (frozen V_0) is 0.050–0.057: V is ≈ 2.5 × more accurate
+than the input it replaces. Probe losses on eval rollouts (β-NLL, standardised): current 0.00–0.05 while walking,
+touchdown 0.0–0.32, both rising with terrain level; standing is higher (0.3 / 0.45–0.53: few touchdowns, long Δt).
+
+Gait probes: coordinated lift kept (middle/back radial path 5.5–7.8 cm per swing, lift 4.0–4.5 cm), stance half-width
+0.128 m. **Watch item — leg clearance regressed:** worst capsule surface gap −0.5 cm (π_S0 +1.3 cm) at 0.15–0.20 m/s,
+with RM–RB < 2 cm on 6 % of steps at 0.15 and RF–RM on 9 % at 0.20. `leg_proximity` fell from −0.08 to −0.25 per
+episode-second. Standing and turning gaps +1.1 … +7.6 cm. Videos `it2000_{side,front}-step-0.mp4`.
+
+#### Milestone 4,000 (`model_4000.pt`, `logs/eval/s1p_it4000_*.json`)
+
+V_0 retired (per-episode dropout 1.0 since ≈ 2,400): from here on the policy's velocity input is ê alone, which is the
+deployment layout. Reward 389 (+1.9 % over 2,000 iterations, near the ≈ 1.5 % plateau criterion), terrain level
+9.4 (flat), track_lin_vel +1.3 %.
+
+| Condition | π_S0 on S1 env | it 2,000 | it 4,000 |
+| --- | --- | --- | --- |
+| Falls, 17 conditions | 0 % | 0 % | 0 % |
+| 0.10 m/s L0 / L5 / L9 stride err; cycle RMSE | +0.2 / −1.0 / −1.4 %; ≤ 0.0044 | +2.7 / +2.5 / +2.9 %; ≤ 0.0062 | −0.2 / −0.2 / +0.2 %; ≤ 0.0049 |
+| 0.15 m/s L0 / L5 / L9 stride err; cycle RMSE | −0.9 / −1.9 / −2.1 %; ≤ 0.0050 | +0.3 / −0.6 / −0.4 %; ≤ 0.0060 | −1.9 / −2.2 / −2.1 %; ≤ 0.0057 |
+| Drops vs no drops, cycle RMSE 0.10 / 0.15 | 0.0030 / 0.0034, 0.0028 / 0.0031 | 0.0049 / 0.0053, 0.0041 / 0.0046 | 0.0032 / 0.0031, 0.0030 / 0.0029 |
+| Turn ±0.3 (L0): ω̄_z, RMSE | +0.320 / −0.309; 0.045 / 0.037 | +0.317 / −0.319; 0.031 / 0.032 | +0.306 / −0.302; 0.021 / 0.019 |
+| Walk-and-turn (L0): stride err | +3.8 % | +6.2 % | +3.9 % |
+| Standing contact L0 / L5 / L9 | 0.97 / 0.84 / 0.82 | 0.96 / 0.90 / 0.87 | 0.97 / 0.92 / 0.89 |
+
+All gates pass. Without V_0, tracking is at or better than π_S0: speed accuracy is back at the command (the +3 % bias
+at 2,000 is gone), turning RMSE is halved, and standing on rough terrain holds better.
+
+V on the evaluation rollouts: v̂ RMSE 0.018–0.027 walking, 0.013 standing; slip / rigid 1.5–2.0 ×; IMU zeroed
+0.10–0.12 (≈ 5 ×, a little lower than at 2,000's ≈ 6 ×, still far above the 1.5 × test). Probe losses as at 2,000,
+rising with terrain level.
+
+Gait: coordinated lift kept (middle/back radial path 5.6–7.8 cm, lift 4.0–4.5 cm), half-width 0.131 m. **Leg clearance
+recovered**: worst capsule gap +0.0 cm (it 2,000 −0.5; π_S0 +1.3). Under 2 cm on ≤ 2.4 % of steps at 0.15–0.20 m/s.
+`leg_proximity` −0.246 → −0.106 per episode-second. Watch item stays open until it is back at π_S0's level.
+
+#### Milestone 6,000 (`model_6000.pt`, `logs/eval/s1p_it6000_*.json`)
+
+Reward 394 (+1.2 % over 2,000 iterations: below the ≈ 1.5 % plateau criterion; continued to 10,000 by the user's
+request), track_lin_vel +0.8 %, terrain level 9.4 (flat since ≈ 2,000).
+
+| Condition | π_S0 on S1 env | it 2,000 | it 4,000 | it 6,000 |
+| --- | --- | --- | --- | --- |
+| Falls, 17 conditions | 0 % | 0 % | 0 % | 0 % |
+| 0.10 m/s L0 / L5 / L9 stride err; cycle RMSE | +0.2 / −1.0 / −1.4 %; ≤ 0.0044 | +2.7 / +2.5 / +2.9 %; ≤ 0.0062 | −0.2 / −0.2 / +0.2 %; ≤ 0.0049 | −0.8 / −0.6 / −0.1 %; ≤ 0.0047 |
+| 0.15 m/s L0 / L5 / L9 stride err; cycle RMSE | −0.9 / −1.9 / −2.1 %; ≤ 0.0050 | +0.3 / −0.6 / −0.4 %; ≤ 0.0060 | −1.9 / −2.2 / −2.1 %; ≤ 0.0057 | −2.8 / −2.6 / −2.3 %; ≤ 0.0053 |
+| Drops vs no drops, cycle RMSE 0.10 / 0.15 | 0.0030 / 0.0034, 0.0028 / 0.0031 | 0.0049 / 0.0053, 0.0041 / 0.0046 | 0.0032 / 0.0031, 0.0030 / 0.0029 | 0.0025 / 0.0024, 0.0029 / 0.0028 |
+| Turn ±0.3 (L0): ω̄_z; RMSE | +0.320 / −0.309; 0.045 / 0.037 | +0.317 / −0.319; 0.031 / 0.032 | +0.306 / −0.302; 0.021 / 0.019 | +0.307 / −0.307; 0.021 / 0.020 |
+| Walk-and-turn (L0): yaw RMSE; stride err | 0.021; +3.8 % | 0.008; +6.2 % | 0.015; +3.9 % | 0.012; +2.9 % |
+| Standing contact L0 / L5 / L9 | 0.97 / 0.84 / 0.82 | 0.96 / 0.90 / 0.87 | 0.97 / 0.92 / 0.89 | 0.98 / 0.94 / 0.90 |
+
+All gates pass. 0.10 m/s tracking is the best so far (cycle RMSE 0.0025 at L0). At 0.15 m/s the policy walks ≈ 2 %
+slow (v_x 0.147–0.148), still inside every gate. Turning is symmetric, and standing keeps improving on rough terrain.
+
+V: in training (all levels) v̂ RMSE has been flat at ≈ 0.035 since ≈ 2,000 (v_kin alone ≈ 0.061), i.e. converged. On
+the flat and L5/L9 evaluations v̂ RMSE is 0.023–0.029, slip / rigid ≈ 1.5–1.8 ×, IMU zeroed 0.11–0.14 (≈ 5 ×). The
+small rise in rigid-ground error since 2,000 (0.016 → 0.022 at L0) tracks v_kin, i.e. the gait still shifting slightly,
+not V degrading. Probe-current NLL still creeping down (−0.092 → −0.100), VICReg covariance falling (0.65 → 0.37).
+
+Gait: lift 3.8–4.2 cm, middle/back radial path 5.7–7.7 cm, half-width 0.129 m. **Leg clearance is not settled:**
+worst gap −0.6 cm again, and at 0.15 m/s the front–middle pairs are under 2 cm on 5.7–6.1 % of steps (it 4,000: ≤ 2.4 %).
+`leg_proximity` −0.106 → −0.136 per episode-second. It oscillates rather than converges; π_S0 had +1.3 cm.
+
+#### Milestone 8,000 (`model_8000.pt`, `logs/eval/s1p_it8000_*.json`)
+
+Reward 400 (+1.4 % over 2,000 iterations), track_lin_vel +0.9 %, terrain level 9.4.
+
+| Condition | π_S0 on S1 env | it 6,000 | it 8,000 |
+| --- | --- | --- | --- |
+| Falls, 17 conditions | 0 % | 0 % | 0 % |
+| 0.10 m/s L0 / L5 / L9 stride err; cycle RMSE | +0.2 / −1.0 / −1.4 %; ≤ 0.0044 | −0.8 / −0.6 / −0.1 %; ≤ 0.0047 | +0.3 / +0.4 / +0.9 %; ≤ 0.0046 |
+| 0.15 m/s L0 / L5 / L9 stride err; cycle RMSE | −0.9 / −1.9 / −2.1 %; ≤ 0.0050 | −2.8 / −2.6 / −2.3 %; ≤ 0.0053 | −2.1 / −2.2 / −2.0 %; ≤ 0.0050 |
+| Drops vs no drops, cycle RMSE 0.10 / 0.15 | 0.0030 / 0.0034, 0.0028 / 0.0031 | 0.0025 / 0.0024, 0.0029 / 0.0028 | 0.0033 / 0.0032, 0.0039 / 0.0039 |
+| Turn ±0.3 (L0): ω̄_z; RMSE | +0.320 / −0.309; 0.045 / 0.037 | +0.307 / −0.307; 0.021 / 0.020 | +0.291 / −0.300; 0.015 / 0.014 |
+| Walk-and-turn (L0): yaw RMSE; stride err | 0.021; +3.8 % | 0.012; +2.9 % | 0.011; +3.4 % |
+| Standing contact L0 / L5 / L9 | 0.97 / 0.84 / 0.82 | 0.98 / 0.94 / 0.90 | 0.98 / 0.95 / 0.91 |
+
+All gates pass. V (eval rollouts): v̂ RMSE 0.019–0.025, rigid 0.017–0.019, slip 0.029–0.041 (1.7–2.2 ×), IMU zeroed
+0.11–0.12 (≈ 5 ×).
+
+Gait: **swing lift is drifting down**, from 4.0–4.5 cm (it 2,000–4,000) to 3.8–4.2 (6,000) and 3.5–4.0 cm now (front
+legs 3.5 cm). It is still above the 3 cm `swing_clearance` target, and the gates' apex clearance is 4.0–4.6 cm. The
+spec (§5) names this as the early sign of shuffling once the clock terms are gone, so it matters before S2. Leg
+clearance: worst gap +0.3 cm (it 6,000 −0.6); at 0.15 m/s under 2 cm on 1.9–7.5 % of steps (RM–RB worst); 0 % at
+0.20 m/s. `leg_proximity` −0.127 per episode-second.

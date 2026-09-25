@@ -82,3 +82,11 @@ def foot_materials(
             )
     table = torch.stack([mu_s, mu_d, rest, torch.log10(1 + k / 1000.0), torch.log10(1 + c)], dim=1)
     env.foot_material = table[bucket].to(env.device)
+
+
+def terrain_materials(env: ManagerBasedEnv, env_ids: torch.Tensor | None, seed: int):
+    """S1+: spatial terrain materials (``mdp.materials``): sets ``env.material_field`` and splits the terrain mesh into
+    per-entry submeshes. Prestartup; the field seed is fixed across runs so every arm and seed sees one terrain."""
+    from .materials import build_terrain_materials  # noqa: PLC0415
+
+    env.material_field = build_terrain_materials(env.scene.terrain.cfg.prim_path + "/terrain/mesh", env.device, seed)

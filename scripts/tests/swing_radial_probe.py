@@ -32,6 +32,7 @@ app = AppLauncher(args).app
 import gymnasium as gym  # noqa: E402
 import hexasim.tasks  # noqa: E402, F401
 import torch  # noqa: E402
+from hexasim.rl.load_policy import configure, eval_physx_buffers, load_env_state, task_for  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp import pin_command, pin_terrain_level  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp.rewards import coxa_leg_geometry, toe_pos_w  # noqa: E402
 from rsl_rl.models import MLPModel  # noqa: E402
@@ -47,12 +48,14 @@ LEGS = ("RF", "RM", "RB", "LF", "LM", "LB")
 for spec in args.policies:
     tag, path = spec.split("=")
     ck = torch.load(path, map_location="cpu", weights_only=False)
-    dim = ck["actor_state_dict"]["mlp.0.weight"].shape[1]
-    task = {114: "Hexapod-S0a-v0", 117: "Hexapod-S0b-v0"}[dim]
+    task = task_for(ck)
+    cmd_task = task != "Hexapod-S0a-v0"
     cfg = parse_env_cfg(task, num_envs=N)
+    configure(cfg, ck)
+    eval_physx_buffers(cfg)
     cfg.curriculum = None
     cfg.v0_ramp_steps = (0, 1)
-    if dim == 117:
+    if cmd_task:
         pin_command(cfg, 0.15)
         cfg.scene.terrain.terrain_generator = cfg.scene.terrain.terrain_generator.replace(
             num_rows=1,
@@ -61,12 +64,11 @@ for spec in args.policies:
             sub_terrains={"flat": MeshPlaneTerrainCfg(proportion=1.0)},
         )
     env = gym.make(task, cfg=cfg).unwrapped
-    if dim == 117:
+    if cmd_task:
         pin_terrain_level(env, 0)
+    load_env_state(env, ck)
     with torch.inference_mode():
         obs, _ = env.reset()
-    env.v0.load_state_dict(ck["v0_state_dict"])
-    env.v0_train = False
     pol = MLPModel(
         TensorDict({"policy": obs["policy"]}, [N]),
         {"actor": ["policy"]},

@@ -12,8 +12,16 @@ lazy_export()
 # Explicit re-exports so that `from . import mdp as hex_mdp` and
 # `hex_mdp.<func>` work without relying on lazy_export auto-discovery.
 from .commands import HexapodVelocityCommandCfg, pin_command  # noqa: E402, F401
-from .events import foot_materials  # noqa: E402, F401
-from .observations import s0a_policy_obs, s0a_privileged_obs, s0b_dr_obs, s0b_policy_obs  # noqa: E402, F401
+from .events import foot_materials, terrain_materials  # noqa: E402, F401
+from .observations import (  # noqa: E402, F401
+    contract_p,
+    s0a_policy_obs,
+    s0a_privileged_obs,
+    s0b_dr_obs,
+    s0b_policy_obs,
+    s1_mirror_latents,
+    s1_policy_obs,
+)
 from .rewards import (  # noqa: E402, F401
     LinearAnnealRewardWeight,
     action_beyond_clip_penalty,

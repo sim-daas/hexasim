@@ -171,8 +171,9 @@ Run every sim/training/eval/probe command through tmux session `0`, not the Bash
   Monitor) — never grep scrollback for "done" (stale matches).
 - One training at a time on `0:2`; evals on `0:3` run alongside it (GPU shared, slower). Stop training with
   `tmux send-keys -t 0:2 C-c`, then wait for its `.done_` marker; the last `model_*.pt` (saved every 50 iterations) is usable.
-- Gotchas: zsh does not word-split `$VAR` — use `${=CMD}`; Kit sometimes dies at start-up with `__throw_regex_error`
-  (telemetry flake) — just relaunch; a stuck pane ("not in a mode") needs `q` / `C-u`; Kit can exit 0 after a Python
+- Gotchas: zsh does not word-split `$VAR` — use `${=CMD}`; Kit dying at start-up (exit 139, `__throw_regex_error` in the
+  log) is numpy's OpenBLAS at-fork handler racing Kit's start-up fork — run with `OPENBLAS_NUM_THREADS=1` (set in
+  `train.py` / `eval_s0.py`; export it for other Kit scripts); a stuck pane ("not in a mode") needs `q` / `C-u`; Kit can exit 0 after a Python
   error, so judge eval cells by their output JSON, not the exit code; sort checkpoints with
   `ls $D | grep '^model_' | sort -t_ -k2 -n | tail -1` (paths contain underscores).
 - Long runs: `scripts/rsl_rl/milestone_review.sh <run_dir> <iter>` (videos + probes + reward slope every 2,000 iterations);

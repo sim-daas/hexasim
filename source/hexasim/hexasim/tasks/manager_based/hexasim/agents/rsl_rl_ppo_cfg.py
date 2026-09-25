@@ -7,7 +7,7 @@ from isaaclab.utils.configclass import configclass
 
 from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
 
-from ..mdp.symmetry import mirror_augmentation
+from ..mdp.symmetry import mirror_augmentation, mirror_augmentation_s1
 
 
 @configclass
@@ -107,4 +107,46 @@ class PPORunnerCfg_S0b(PPORunnerCfg_S0a):
     def __post_init__(self):
         self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
             use_data_augmentation=True, use_mirror_loss=False, data_augmentation_func=mirror_augmentation
+        )
+
+
+@configclass
+class S1PpoAlgorithmCfg(S0PpoAlgorithmCfg):
+    """Extra knobs of :class:`hexasim.rl.s1_ppo.S1PPO` (phase2-progress §2.2)."""
+
+    class_name: str = "hexasim.rl.s1_ppo:S1PPO"
+    v_test_every: int = 100
+    v_test_passes: int = 3
+    slip_ratio_max: float = 3.0  # v7 §4.3 test 1
+    imu_zero_min: float = 1.5  # v7 §4.3 test 2 ("materially": provisional)
+    v0_retire_delay: int = 1000
+    v0_retire_iters: int = 1000
+
+
+@configclass
+class PPORunnerCfg_S1(PPORunnerCfg_S0b):
+    """S1 from π_S0 (actor widened 117 → 1,125, zero columns; std carried at its 0.05 floor), fresh critic on
+    sg[actor obs] ⊕ contract P, actor frozen until EV ≥ 0.8 and ≥ 300 iterations; mirror augmentation with the
+    latents recomputed on the mirrored history."""
+
+    experiment_name = "hexapod_s1"
+    obs_groups = {"actor": ["policy"], "critic": ["policy", "contract"]}
+    algorithm = S1PpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.0005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1e-4,  # unused: per-network learning rates
+        schedule="fixed",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+    def __post_init__(self):
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True, use_mirror_loss=False, data_augmentation_func=mirror_augmentation_s1
         )

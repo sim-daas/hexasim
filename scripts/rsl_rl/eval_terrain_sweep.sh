@@ -11,7 +11,7 @@ mkdir -p logs/eval
 for T in rough slope_up slope_down bumps stairs_up stairs_down; do
   for L in $LEVELS; do
     for V in 0.10 0.15; do
-      python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-S0b-v0 --ckpt "$CK" --num_envs 128 \
+      python scripts/rsl_rl/eval_s0.py --headless --task "${TASK:-Hexapod-S0b-v0}" --ckpt "$CK" --num_envs 128 \
         --terrain_type "$T" --terrain_level "$L" --cmd "$V" 0 0 \
         --out "logs/eval/sweep_${TAG}_${T}_L${L}_v${V}.json" > /dev/null 2>&1 || true
       # Kit can exit 0 after a Python error: judge a cell by its JSON, not the exit code.

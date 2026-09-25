@@ -11,7 +11,7 @@ CK=$1
 TAG=$2
 N=${3:-256}
 mkdir -p logs/eval
-ev() { python scripts/rsl_rl/eval_s0.py --headless --task Hexapod-S0b-v0 --ckpt "$CK" --num_envs "$N" \
+ev() { python scripts/rsl_rl/eval_s0.py --headless --task "${TASK:-Hexapod-S0b-v0}" --ckpt "$CK" --num_envs "$N" \
   --out "logs/eval/${TAG}_$1.json" "${@:2}" > /dev/null 2>&1; }
 for L in 0 5 9; do
   for V in 0.10 0.15; do
