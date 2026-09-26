@@ -29,6 +29,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--ckpt", required=True)
 parser.add_argument("--tag", required=True, help="name for the video file and the printed row")
 parser.add_argument("--cmd", type=float, default=0.15, help="forward speed command, S0b tasks only")
+parser.add_argument(
+    "--terrain_type",
+    default=None,
+    help="S0b/S1: one generated terrain type (mdp.terrain.EVAL_TERRAIN_TYPES), e.g. rough; default flat",
+)
+parser.add_argument("--terrain_level", type=int, default=0, help="terrain level 0-20 for --terrain_type")
 parser.add_argument("--seconds", type=float, default=10.0)
 parser.add_argument("--video_dir", default="logs/videos/gait")
 parser.add_argument("--view", default="side", choices=["side", "front", "diag"])
@@ -50,6 +56,8 @@ from isaacsim.core.rendering_manager import ViewportManager  # noqa: E402
 
 from isaaclab.terrains import MeshPlaneTerrainCfg  # noqa: E402
 
+from hexasim.tasks.manager_based.hexasim.mdp.terrain import single_type_generator  # noqa: E402
+
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 state = torch.load(args.ckpt, map_location="cpu", weights_only=False)["actor_state_dict"]
@@ -61,9 +69,12 @@ cfg.curriculum = None
 s0b = task in ("Hexapod-S0b-v0", "Hexapod-S1-v0")
 if s0b:
     pin_command(cfg, args.cmd)
-    cfg.scene.terrain.terrain_generator = cfg.scene.terrain.terrain_generator.replace(
-        num_rows=1, num_cols=2, difficulty_range=(0.0, 0.0), sub_terrains={"flat": MeshPlaneTerrainCfg(proportion=1.0)}
-    )
+    if args.terrain_type is None:
+        cfg.scene.terrain.terrain_generator = cfg.scene.terrain.terrain_generator.replace(
+            num_rows=1, num_cols=2, difficulty_range=(0.0, 0.0), sub_terrains={"flat": MeshPlaneTerrainCfg(proportion=1.0)}
+        )
+    else:
+        cfg.scene.terrain.terrain_generator = single_type_generator(args.terrain_type)
 if hasattr(cfg, "v0_ramp_steps"):
     cfg.v0_ramp_steps = (0, 1)
 # Chase camera, aimed at the robot every step below: headless runs create no viewport camera controller, so
@@ -79,7 +90,7 @@ env = gym.wrappers.RecordVideo(
 )
 base = env.unwrapped
 if s0b:
-    pin_terrain_level(base, 0)
+    pin_terrain_level(base, args.terrain_level)
 ck = torch.load(args.ckpt, map_location=base.device, weights_only=False)
 load_env_state(base, ck)
 with torch.inference_mode():

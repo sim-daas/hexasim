@@ -2031,3 +2031,244 @@ legs 3.5 cm). It is still above the 3 cm `swing_clearance` target, and the gates
 spec (§5) names this as the early sign of shuffling once the clock terms are gone, so it matters before S2. Leg
 clearance: worst gap +0.3 cm (it 6,000 −0.6); at 0.15 m/s under 2 cm on 1.9–7.5 % of steps (RM–RB worst); 0 % at
 0.20 m/s. `leg_proximity` −0.127 per episode-second.
+
+**Pilot stopped at iteration 8,650 (user decision)** to diagnose the two gait regressions first. The 10,000 milestone
+was not reached; the gates, V and schedule results above (2,000–8,000) are what the current reward / terrain / encoder
+setup yields.
+
+### 2.2.6 Diagnosis: swing lift and leg-to-leg clearance
+
+**Observed Behavior.** Over the pilot, the worst same-side leg capsule gap went +1.3 (π_S0) → −0.5 / 0.0 / −0.6 /
++0.3 cm (it 2k / 4k / 6k / 8k), with 2–7.5 % of steps under 2 cm at 0.15 m/s. Swing lift went 4.0–4.5 → 3.5–4.2 cm, and
+`action_beyond_clip` grew ×10.
+
+**Hypothesis 1, rejected: friction.** Probe `scripts/tests/gait_by_material.py --cmd 0.15` (512 envs, flat; even envs
+all-slippery μ 0.25 / 0.22, odd all-grippy μ 0.9 / 0.85, all rigid; `logs/gait_by_material_015.txt`). Slippery and
+grippy groups have the same gait for every policy (slip speed 0.02 vs 0.01 m/s; lift, coxa range and gaps within
+noise). The change is in the policy, over training:
+
+| Policy | lift f / m / b (cm) | coxa range f / m / b (°) | worst gap / < 2 cm | clip |
+| --- | --- | --- | --- | --- |
+| π_S0 | 4.0 / 4.4 / 4.5 | 48 / 59 / 55 | +1.4 cm / 0.1 % | 0.015 |
+| S1 2,000 | 4.2 / 4.7 / 4.5 | 50 / 75 / 51 | −0.1 / 3.5 % | 0.015 |
+| S1 4,000 | 4.3 / 4.6 / 4.6 | 60 / 66 / 61 | +0.7 / 1.7 % | 0.016 |
+| S1 8,650 | 3.7 / 4.0 / 4.1 | 76 / 64 / 64 | −0.1 / 6.2 % | 0.019 |
+
+**Mechanism.** Stance geometry at 0.15 m/s (milestone `record_gait` output): reach front / middle / back 0.079 / 0.082 /
+0.088 m (π_S0) → 0.053 / 0.066 / 0.085 m (S1 8,000). Middle-leg mean coxa angle ±10° → ±28° (swept back toward the
+back legs), half-width 0.139 → 0.124 m. The stride is fixed by v / f_ref, and stride ≈ coxa arc × reach, so toes pulled
+toward the hips need larger coxa arcs. Neighbouring legs then close in (RM–RB worst), and the coxa targets run into
+the servo clip.
+
+**Root cause: the reward's own optimum.** Per-term reward on the same probe (weighted, per second, 0.15 m/s,
+`logs/gait_by_material_015b.txt`):
+
+| Term | π_S0 | S1 8,650 | Δ |
+| --- | --- | --- | --- |
+| touchdown_reach | −1.29 | −0.59 | +0.70 |
+| cpg_z_target | 4.14 | 4.70 | +0.55 |
+| cpg_stance_rigidity | −2.14 | −1.83 | +0.32 |
+| swing_radial | −0.75 | −0.68 | +0.06 |
+| leg_proximity | −0.001 | −0.61 | −0.61 |
+| action_beyond_clip | 0 | −0.016 | −0.02 |
+| landing radius f / m / b (cm; target 6.7) | 12.0 / 7.7 / 6.2 | 9.1 / 6.8 / 6.2 | |
+
+`touchdown_reach` (§2.1.37) is two-sided: it pays for landing at the single rest reach (6.7 cm), so it also pulls the
+front legs in from their natural 12 cm. That reach gain (+0.70 / s) is bigger than the proximity cost (−0.61 / s), so
+overlapping legs are profitable. S1 did not create this: π_S0 was stopped on a return plateau while `touchdown_reach`
+was still improving (−1.19 per episode-second at its end), and S1 continued optimising the same S0b reward. The lift
+trend is `cpg_z_target` converging onto its own 3.8 cm half-sine: π_S0 overshot at 4.0–4.5 cm, and the term pays
++0.55 / s more for the lower swing. It becomes a real problem in S2: once the clock terms leave, only
+`swing_clearance` defends lift, and it saturates at 3 cm (§2.1.1).
+
+**Fix (user decisions, 2026-09-25).** Three changes to the S0b reward, shared by every arm:
+
+1. `touchdown_reach` made **one-sided**: Σ at landing of max(0, rest reach − |r_xy|). It still penalises tucked
+   landings (§2.1.37), but no longer pulls outward landings inward.
+2. `swing_clearance` saturation height **3 → 4 cm**, so the phase-free floor holds the lift once the clock terms leave
+   in S2. `cpg_z_target` still peaks at 3.8 cm; the two disagree by ≤ 4 % of the kernel at the apex, which is
+   negligible.
+3. `leg_proximity` **×400 → ×800**.
+
+Economics on the same probe after changes 1 and 2 (`logs/gait_by_material_newreward.txt`): `touchdown_reach` is equal
+for both postures (π_S0 −0.093, S1 8,650 −0.099 per s), so the +0.70 / s pull is gone. The S1 posture was still
++0.31 / s ahead overall (cpg_z_target +0.55, cpg_stance_rigidity +0.32, tracking and radial +0.23; leg_proximity
+−0.61, other −0.18). Those gains may be separable from the posture, but to be safe the proximity weight was doubled:
+overlap then nets −0.30 / s, while gaits with 2 cm of room pay 0. The 4 cm floor barely changes `swing_clearance` on
+these policies (0.479 vs 0.468 per s: both lift ≈ 4 cm).
+
+`reward_economy.py --task Hexapod-S0b-v0 --ckpt <π_S0> --cmd 0.15 0 0 --terrain_level 0`
+(`logs/s0b_economy_onesided.txt`): walk +1.013 ≫ stand +0.267 ≫ fall −0.10 per step. Deviation D28: S0b reward changed
+after π_S0 (these three terms); π_S0 is retrained from scratch under it.
+
+**S0 retrained from scratch** (user decision), same task, seed, envs, mirror augmentation, DR and curriculum as
+§2.1.38:
+```
+python scripts/rsl_rl/train.py --task Hexapod-S0b-v0 --headless --num_envs 4096 --seed 42 --max_iterations 18000 \
+  --run_name s0_onesided_reach_fromscratch_seed42 agent.algorithm.actor_freeze_iters=0 agent.algorithm.actor_freeze_ev=0.0
+# run dir logs/rsl_rl/hexapod_s0b/2026-09-25_22-23-35_s0_onesided_reach_fromscratch_seed42
+scripts/rsl_rl/milestone_review.sh <run_dir> <iter>   # every 2,000 iterations
+```
+
+**The one-sided retrain sprawled; abandoned at 6,250 (user decision).** With the outward half of `touchdown_reach`
+gone, the uncapped reach weighting in `cpg_coxa_contact` (`coxa_stroke_weight` = sign × |r_xy| / rest reach,
+§2.1.26) paid extension. At iteration 2,000 its ledger against the old run showed cpg_coxa_contact +1.33 and
+touchdown_reach +1.27 per episode-second (cpg_z_target −1.13, track_yaw −1.09, standing_pose −0.90). The legs
+straightened out and the back legs stopped lifting:
+
+| | reach f / m / b (m) | half-width | back-leg lift | worst gap |
+| --- | --- | --- | --- | --- |
+| it 2,000 | 0.16 / 0.18 / 0.18 | 0.228 m | 0.7 cm | −0.6 cm |
+| it 4,000 | 0.14 / 0.18 / 0.16 | 0.225 m | 0.0–0.1 cm | +0.8 cm |
+| it 6,000 | 0.13 / 0.18 / 0.16 | 0.218 m | 0.5–0.6 cm | +1.0 cm |
+
+Run kept as a record: `logs/rsl_rl/hexapod_s0b/2026-09-25_22-23-35_s0_onesided_reach_fromscratch_seed42`. The two-sided
+`touchdown_reach` had been holding the coxa term's extension incentive in check. It also produced the coordinated lift,
+so it stays.
+
+### 2.2.7 S1 pilot v2 — clearance via leg_proximity, lift floor 4 cm, plateau-based budget
+
+Decisions with the user (2026-09-26):
+
+- π_S0 (`…/2026-09-24_00-35-51…/model_12200.pt`) stays.
+- The S0b reward is reverted to exactly π_S0's form: `rewards.py` restored from HEAD; `swing_clearance` 3 cm and
+  `leg_proximity` −400 in `S0bRewardsCfg`.
+- Two S1-only overrides (`HexapodS1EnvCfg.__post_init__`, deviation **D28**: S1 rewards = S0b except these, shared by
+  every arm):
+  - `leg_proximity` **−1,600**;
+  - `swing_clearance` height **4 cm**.
+- Budget: stop at the first 2,000-iteration milestone ≥ 4,000 whose `Train/mean_reward` gain is < 1.5 % over the last
+  2,000 iterations; cap 12,000. The stop iteration becomes the S1 budget for every seed.
+
+With the two-sided reach kept, the overlap posture's advantage was ≈ +1.0 / s, so ×800 would still have left it
+≈ +0.4 / s ahead. ×1,600 was chosen for margin.
+
+**Economics under the S1 v2 reward** (`gait_by_material.py --cmd 0.15`, π_S0 vs pilot-1 model_8650,
+`logs/gait_by_material_s1v2.txt`, weighted per s):
+
+| | cpg_z_target | cpg_stance_rigidity | track_lin_vel | touchdown_reach | leg_proximity | others | net vs π_S0 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| overlap posture (8,650) | +0.55 | +0.33 | +0.22 | +0.69 | −2.42 | −0.06 | **−0.69** |
+
+The clear posture now wins. `reward_economy.py --task Hexapod-S1-v0 --ckpt <π_S0> --cmd 0.15 0 0 --terrain_level 0`
+(`logs/s1_economy_v2.txt`): walk +0.982 (v_x 0.149) ≫ stand +0.266 ≫ fall −0.10 per step. The script previously
+treated Hexapod-S1-v0 as S0a (command unpinned, ground-truth velocity ramp); it now recognises S1 as a command task.
+
+Milestones (`scripts/rsl_rl/s1_milestones.sh <run> <π_S0> 12000 4000 1.5`) add `gait_by_material.py` (coxa range, lift
+per leg type, gaps, per-term reward) to the review, gates and V tests, and perform the plateau stop (`BUDGET` file).
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S1-v0 --headless --num_envs 4096 --seed 42 --max_iterations 12000 \
+  --warmstart logs/rsl_rl/hexapod_s0b/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/model_12200.pt \
+  --run_name s1_pilot2_seed42        # run dir logs/rsl_rl/hexapod_s1/2026-09-26_02-33-23_s1_pilot2_seed42
+```
+Run config verified: leg_proximity weight −1600.0, swing_clearance height 0.04.
+
+#### Pilot v2 — milestone 2,000 (`model_2000.pt`; `logs/milestones/2026-09-26_02-33-23_s1_pilot2_seed42/`)
+
+Schedule identical to pilot 1 (ê gate open, V_0 dropout 0.60 at 2,000). Reward 380 (curriculum ramp; no plateau test
+before 4,000), terrain level 9.4.
+
+| | π_S0 | pilot 1 it 2,000 | **pilot 2 it 2,000** |
+| --- | --- | --- | --- |
+| Falls, 17 gate conditions | 0 % | 0 % | 0 % |
+| Stride err 0.10 / 0.15 m/s (L0 / L5 / L9) | +0.2 / −1.0 / −1.4 %, −0.9 / −1.9 / −2.1 % | +2.7 / +2.5 / +2.9 %, +0.3 / −0.6 / −0.4 % | +1.0 / +0.9 / +0.9 %, +0.2 / −0.4 / −0.5 % |
+| Cycle RMSE (max over walking cells) | 0.0050 | 0.0062 | 0.0063 |
+| Turn ±0.3: ω̄_z; RMSE | +0.320 / −0.309; 0.045 / 0.037 | +0.317 / −0.319; 0.031 / 0.032 | +0.311 / −0.315; 0.027 / 0.030 |
+| Standing contact L0 / L5 / L9 | 0.97 / 0.84 / 0.82 | 0.96 / 0.90 / 0.87 | 0.97 / 0.90 / 0.88 |
+| V: v̂ RMSE, slip / rigid, IMU zeroed (walking) | — | 0.019–0.025, ≤ 2.5 ×, ≈ 6 × | 0.021–0.027, ≤ 1.8 ×, ≈ 7 × |
+| **Worst leg capsule gap; < 2 cm at 0.15 / 0.20** | +1.3 cm; ≈ 0 % | −0.5 cm; ≤ 6 % / ≤ 9 % | **+1.0 cm; ≤ 1.4 % / ≤ 1.0 %** |
+| **Lift f / m / b (swing probe)** | 4.0–4.5 | 4.0–4.5 | **4.0 / 4.7 / 4.6 cm** |
+| Stance reach f / m / b; half-width | 0.079 / 0.082 / 0.088 m; 0.139 | 0.077 / 0.065 / 0.081; 0.128 | 0.071–0.076 / 0.069 / 0.075; 0.125 |
+| Coxa range f / m / b (0.15 m/s) | 48 / 59 / 55° | 50 / 75 / 51° | 50 / 70 / 49° |
+
+All gates pass. Clearance is at π_S0's level (worst gap +1.0 cm, `leg_proximity` −0.12 per s at 0.15 m/s against
+−0.61 in pilot 1's overlap posture), and lift is above the new 4 cm floor on every leg type. The front legs still land
+at 12 cm and `touchdown_reach` is unchanged (−1.35 per s): the reach pull is still there and is now outweighed.
+
+#### Pilot v2 — milestone 4,000
+
+Plateau test: `Train/mean_reward` 380.0 → 385.9, **+1.5 %** over 2,000 iterations. This is not below the 1.5 % rule,
+so training continues. track_lin_vel +1.1 %, terrain level 9.46.
+
+| | pilot 2 it 2,000 | **pilot 2 it 4,000** | (pilot 1 it 4,000) |
+| --- | --- | --- | --- |
+| Falls, 17 conditions | 0 % | 0 % | 0 % |
+| Stride err 0.10 m/s L0 / L5 / L9; cycle RMSE | +1.0 / +0.9 / +0.9 %; ≤ 0.0056 | −0.7 / −0.3 / +0.1 %; ≤ 0.0052 | −0.2 / −0.2 / +0.2 %; ≤ 0.0049 |
+| Stride err 0.15 m/s L0 / L5 / L9; cycle RMSE | +0.2 / −0.4 / −0.5 %; ≤ 0.0063 | −2.3 / −2.5 / −2.4 %; ≤ 0.0055 | −1.9 / −2.2 / −2.1 %; ≤ 0.0057 |
+| Drops vs no drops (0.10 / 0.15 L0) | 0.0038 / 0.0040, 0.0043 / 0.0045 | 0.0027 / 0.0027, 0.0029 / 0.0028 | 0.0032 / 0.0031, 0.0030 / 0.0029 |
+| Turn ±0.3: ω̄_z; RMSE; walk-and-turn yaw RMSE | +0.311 / −0.315; 0.027 / 0.030; 0.010 | +0.306 / −0.307; 0.019 / 0.021; 0.008 | +0.306 / −0.302; 0.021 / 0.019; 0.015 |
+| Standing contact L0 / L5 / L9 | 0.97 / 0.90 / 0.88 | 0.97 / 0.92 / 0.89 | 0.97 / 0.92 / 0.89 |
+| V: v̂ RMSE; slip / rigid; IMU zeroed | 0.021–0.027; ≤ 1.8 ×; ≈ 7 × | 0.019–0.027; ≤ 2.0 ×; ≈ 7 × | 0.018–0.027; ≤ 2.0 ×; ≈ 5 × |
+| **Worst leg gap; < 2 cm at 0.15 / 0.20** | +1.0 cm; ≤ 1.4 / ≤ 1.0 % | **+0.8 cm; ≤ 1.2 / 0 %** | 0.0 cm; ≤ 2.4 % / — |
+| **Lift f / m / b** (swing probe / material probe) | 4.0 / 4.7 / 4.6; 4.3 / 4.9 / 4.7 | **3.8 / 4.1 / 4.7; 4.1 / 4.4 / 4.8 cm** | 4.0 / 4.4 / 4.5 |
+| Stance reach f / m / b; half-width | 0.07 / 0.07 / 0.075 m; 0.125 | 0.07 / 0.07 / 0.093 m; 0.136 | 0.058 / 0.068 / 0.080; 0.123 |
+| Coxa range f / m / b (0.15) | 50 / 70 / 49° | 59 / 66 / 58° | 60 / 66 / 61° |
+
+All gates pass. Clearance holds: the leg_proximity reward term is at −0.126 per episode-second, and the back legs
+moved outward (reach 0.093 m, half-width 0.136 m). Front-leg lift is drifting down slightly (4.0 → 3.8–4.1 cm) and is
+watched against the 3.5 cm stop threshold. The swing_clearance floor at 4 cm pays ≈ 0.48 / s, so a 2 mm shortfall
+costs almost nothing.
+
+#### Pilot v2 — milestone 6,000
+
+Plateau test: 385.9 → 394.3, **+2.2 %**, so training continues. track_lin_vel +1.3 %, `leg_proximity` −0.126 → −0.098
+per episode-second.
+
+| | it 4,000 | **it 6,000** |
+| --- | --- | --- |
+| Falls, 17 conditions | 0 % | 0 % |
+| Stride err 0.10 L0 / L5 / L9; 0.15 L0 / L5 / L9 | −0.7 / −0.3 / +0.1; −2.3 / −2.5 / −2.4 % | −0.1 / 0.0 / +0.6; −2.8 / −2.7 / −2.4 % |
+| Cycle RMSE (max walking); drops vs no drops | ≤ 0.0055; equal | ≤ 0.0052; 0.0030 / 0.0034, 0.0033 / 0.0034 |
+| Turn ±0.3 ω̄_z, RMSE; walk-and-turn yaw RMSE | +0.306 / −0.307, 0.019–0.021; 0.008 | +0.297 / −0.296, 0.014; 0.008 |
+| Standing contact L0 / L5 / L9 | 0.97 / 0.92 / 0.89 | 0.98 / 0.95 / 0.91 |
+| V: v̂ RMSE; slip / rigid; IMU zeroed | 0.019–0.027; ≤ 2.0 ×; ≈ 7 × | 0.020–0.026; ≤ 2.0 ×; ≈ 8 × |
+| Worst leg gap; < 2 cm at 0.15 / 0.20 | +0.8 cm; ≤ 1.2 / 0 % | +1.0 cm; ≤ 1.3 / ≤ 0.1 % |
+| Lift f / m / b, swing probe (material probe) | 3.8 / 4.1 / 4.7 (4.1 / 4.4 / 4.8) cm | **3.65 / 3.7 / 4.4 (3.9–4.0 / 3.8–3.9 / 4.5–4.6) cm** |
+| Stance reach f / m / b; half-width; coxa range f / m / b | 0.07 / 0.07 / 0.093 m; 0.136; 59 / 66 / 58° | 0.061–0.064 / 0.068–0.070 / 0.092–0.095 m; 0.123; 68 / 66 / 60° |
+
+All gates pass, and clearance is held by the ×1,600 proximity weight. Lift keeps converging onto `cpg_z_target`'s
+3.8 cm half-sine peak (front and middle legs from 4.0 / 4.7 to 3.7 cm). The 4 cm floor, ×5 (≈ 0.48 / s at
+saturation), is too small to hold the swing above the clock term's target. In S2, where the clock term goes and the
+floor stays, the pull reverses toward 4 cm. Still above the 3.5 cm stop threshold. The front legs are creeping inward
+again (reach 0.07 → 0.062 m, coxa range 59 → 68°), which the proximity weight contains.
+
+#### Pilot v2 — milestone 8,000 and the S1 budget
+
+Plateau test: 394.217 → 400.024 = **+1.47 %** < 1.5 %, so the plateau was reached. **S1 budget = 8,000 iterations**
+(≈ 524 M env steps at 4,096 × 16), fixed for the W sweep and every S1 seed. The pilot's S1 checkpoint is
+`logs/rsl_rl/hexapod_s1/2026-09-26_02-33-23_s1_pilot2_seed42/model_8000.pt`. The wrapper compared the *rounded*
+printed gain ("+1.5") and did not fire. Training was stopped by hand at 8,500 and `BUDGET` written. The parser now
+computes the gain from the raw values. Re-checked on this run: 4,000 1.543 % (continue), 6,000 2.169 % (continue),
+8,000 1.473 % (stop).
+
+| | π_S0 (S1 env) | pilot 1 it 8,000 | **pilot 2 it 8,000** |
+| --- | --- | --- | --- |
+| Falls, 17 conditions | 0 % | 0 % | 0 % |
+| Stride err 0.10 L0 / L5 / L9; 0.15 L0 / L5 / L9 | +0.2 / −1.0 / −1.4; −0.9 / −1.9 / −2.1 % | +0.3 / +0.4 / +0.9; −2.1 / −2.2 / −2.0 % | +1.3 / +1.5 / +2.0; −2.3 / −2.4 / −2.2 % |
+| Cycle RMSE (max walking); drops vs no drops | ≤ 0.0050; ≈ equal | ≤ 0.0050; equal | ≤ 0.0048; 0.0035 / 0.0039, 0.0027 / 0.0024 |
+| Turn ±0.3 ω̄_z, RMSE; walk-and-turn yaw RMSE | +0.320 / −0.309, 0.037–0.045; 0.021 | +0.291 / −0.300, 0.014–0.015; 0.011 | +0.310 / −0.313, 0.019–0.020; 0.007 |
+| Standing contact L0 / L5 / L9 | 0.97 / 0.84 / 0.82 | 0.98 / 0.95 / 0.91 | 0.98 / 0.95 / 0.91 |
+| V: v̂ RMSE; slip / rigid; IMU zeroed | — | 0.019–0.025; ≤ 2.2 ×; ≈ 5 × | 0.019–0.025; ≤ 2.2 ×; ≈ 8–9 × |
+| **Worst leg gap; < 2 cm at 0.15 / 0.20** | +1.3 cm; ≈ 0 % | +0.3 cm; ≤ 7.5 % / 0 % | **+1.3 cm; ≤ 2.7 / ≤ 0.1 %** |
+| **Lift f / m / b** swing probe (material probe); gate apex | 4.0–4.5 cm | 3.5–4.0 cm | **3.5–3.7 / 3.8–3.9 / 4.1–4.2 (3.9 / 4.0 / 4.2) cm; 3.8–4.2 cm** |
+| Stance reach f / m / b; half-width; coxa range f / m / b | 0.079 / 0.082 / 0.088; 0.139; 48 / 59 / 55° | 0.053 / 0.066 / 0.085; 0.124; 76 / 64 / 64° | 0.052 / 0.070 / 0.086; 0.128; 72 / 62 / 59° |
+
+**S1 pilot verdict.** Against the spec §6.1 S1 gate:
+
+- performance ≥ S0 on the S1 env: every S0b gate passes with 0 falls, and turning and rough-terrain standing are better
+  than π_S0;
+- V passes v7 §4.3 (gate open at ≈ 400; slip / rigid ≤ 2.2 ×; IMU dropout ≈ 8–9 ×);
+- probe NLL is flat (current −0.10, touchdown rising only with terrain level);
+- V_0 retired at ≈ 2,400;
+- return plateaued at 8,000.
+
+The ×1,600 proximity weight holds leg clearance at π_S0's level (+1.3 cm) for the whole run. Pilot 1 reached −0.6 cm.
+
+**Residual watch items, carried into S2 design:**
+
+1. The reach pull on the front legs persists: reach 0.052 m, coxa range 72°, landing 9.5 cm against 12 at π_S0.
+   Clearance holds only because of the proximity weight.
+2. Front and middle lift converge onto `cpg_z_target`'s 3.8 cm peak (front 3.5–3.7 cm on the swing probe, 3.9 on
+   the material probe). Once the clock term leaves in S2, only the 4 cm floor (×5, ≈ 0.48 / s) holds lift. Its weight
+   should be re-checked with `reward_economy.py` against the S2 reward before S2.

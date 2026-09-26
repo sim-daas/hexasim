@@ -143,6 +143,15 @@ code before relying on any line here.
   the warm start and the KL anchor (spec §4.4) are dropped for every arm**; the π_base → S0a → S0b lineage
   (research/phase2-progress §2.0–2.1) is history, kept for the record and for the paper's honesty section.
   Check gait changes with `scripts/tests/swing_radial_probe.py` and `scripts/tests/leg_gap_probe.py`, not only gates.
+- **S1 (research/phase2-progress §2.2):** `Hexapod-S1-v0` = S0b + spatial terrain materials (static field, per-entry
+  visual submeshes, per-foot μ/k tensor writes; damping per env, D25), per-env drop slope (D24), the env-owned aux
+  learner (`hexasim/rl/s1/`: E_p TCN W 50, V = v_kin + Δv̂, probes, β-NLL with fixed π_S0 statistics in
+  `probe_stats_pi_s0.pt`), 1,125-D actor layout (`mdp/layout.py`), contract P (683), `S1PPO` (ê gate after the v7 §4.3
+  tests, V_0 retired by per-episode dropout, D23). **S1 reward = S0b except `leg_proximity` −1,600 and
+  `swing_clearance` 4 cm (D28)**: longer training of the S0b reward pulls the feet inward and closes the leg gaps
+  (§2.2.6). **S1 budget = 8,000 iterations** (pilot-v2 plateau stop, §2.2.7; pilot checkpoint `logs/rsl_rl/hexapod_s1/2026-09-26_02-33-23_s1_pilot2_seed42/model_8000.pt`, all S1 gates pass, leg gap +1.3 cm). Gotchas: `OPENBLAS_NUM_THREADS=1` for Kit scripts; evals
+  next to S1 training need `load_policy.eval_physx_buffers`; load S1 checkpoints with `load_policy.load_env_state`
+  before `env.reset()`.
 - **S0b (research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
   clock, standing mode at zero command (`env.cpg_active`), terrain curriculum (`mdp/terrain.py`, height map gives
   `env.terrain_z` / `terrain_normal`; never use absolute z), full DR incl. per-env foot material (bound on the tibia

@@ -60,7 +60,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 GAMMA = 0.99
 cfg = parse_env_cfg(args.task, num_envs=args.num_envs)
 cfg.seed = 0
-s0b = args.task.startswith("Hexapod-S0b")
+s0b = args.task.startswith(("Hexapod-S0b", "Hexapod-S1"))  # command tasks (S1 = S0b + materials, aux)
 if s0b:
     cfg.curriculum = None
     if args.cmd is not None:

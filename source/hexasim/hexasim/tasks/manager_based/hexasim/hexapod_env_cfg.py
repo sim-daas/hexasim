@@ -1034,6 +1034,15 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
         ev.terrain_materials = EventTerm(
             func=hex_mdp.terrain_materials, mode="prestartup", params={"seed": self.material_field_seed}
         )
+        # S1 reward = S0b except two terms (phase2-progress §2.2.6–2.2.7, deviation D28; shared by every arm from S1 on).
+        # Leg clearance: the two-sided touchdown_reach (kept: it produced the coordinated lift) pays ≈ +0.70/s for
+        # pulling the front legs to the rest reach, and at a fixed stride the larger coxa arcs close the neighbour gaps;
+        # an overlapping posture out-earned π_S0's clear one by ≈ +1.0/s at ×400. At ×1,600 overlap nets ≈ −0.8/s;
+        # gaits with 2 cm of room pay 0.
+        self.rewards.leg_proximity.weight = -1600.0
+        # Lift floor 3 → 4 cm: once the clock terms leave (S2) it is the only term holding the swing height
+        # (cpg_z_target's half-sine peaks at 3.8 cm).
+        self.rewards.swing_clearance.params["height"] = 0.04
 
 
 @configclass
