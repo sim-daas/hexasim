@@ -99,6 +99,8 @@ def run(tag, path):
     cmin = torch.full((N, 6), 9.0, device=env.device)
     cmax = torch.full((N, 6), -9.0, device=env.device)
     gaps, clip, slip, vx = [], [], [], []
+    clip_j = torch.zeros(N, 18, device=env.device)  # per-joint |requested − clipped| (rad), summed over the window
+    act_term = env.action_manager.get_term("joint_pos")
     rm = env.reward_manager
     terms = torch.zeros(len(rm.active_terms), device=env.device)
     land_r_sum = torch.zeros(N, 6, device=env.device)
@@ -119,6 +121,7 @@ def run(tag, path):
                 cmin, cmax = torch.minimum(cmin, q), torch.maximum(cmax, q)
                 gaps.append(adjacent_leg_gaps(env))
                 clip.append(action_beyond_clip_penalty(env, "joint_pos"))
+                clip_j += (act_term.raw_actions * act_term._scale + act_term._offset - act_term.processed_actions).abs()
                 if prev_toe is not None:
                     v = ((toe - prev_toe)[..., :2].norm(dim=-1) / env.step_dt) * contact
                     slip.append(v.sum(1) / contact.sum(1).clamp(min=1))
@@ -140,6 +143,12 @@ def run(tag, path):
             f" {(g < 0.02).float().mean() * 100:.1f}% | clip {clip[:, m].mean():.4f} | slip {slip[:, m].mean():.3f}"
             f" | v_x {vx[:, m].mean():.3f}"
         )
+    cj = clip_j.mean(0) / T  # (18,) joint order [coxa × 6, femur × 6, tibia × 6], legs RF RM RB LF LM LB
+    parts = []
+    for jn, jt in enumerate(("coxa", "femur", "tibia")):
+        for ln, li in LEG_TYPES.items():
+            parts.append(f"{jt}-{ln} {cj[[jn * 6 + i for i in li]].mean():.4f}")
+    print(f"MATGAIT {tag:8s} clip by joint (rad/step): " + " | ".join(parts))
     land_r = land_r_sum / lift_n.clamp(min=1)
     lr = " ".join(f"{land_r[:, i].mean() * 100:4.1f}" for i in LEG_TYPES.values())
     print(f"MATGAIT {tag:8s} landing |r| f/m/b {lr} cm (rest reach {env.coxa_rest_reach[0] * 100:.1f} cm)")

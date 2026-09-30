@@ -89,6 +89,9 @@ def toe_pos_w(robot, tibia_ids):
     return pos + quat_apply(quat, torch.tensor([0.095, 0.0, -0.09], device=pos.device).expand_as(pos))
 
 
+# Play configs are demo-only (the S1 Play config carries pilot-2 reward values, phase2-progress §2.2.9): never report
+# evaluation numbers from them.
+assert "Play" not in args.task, f"{args.task} is a demo config; evaluate on the training task (e.g. Hexapod-S1-v0)"
 cfg = parse_env_cfg(args.task, num_envs=args.num_envs)
 from hexasim.rl.load_policy import eval_physx_buffers  # noqa: E402
 

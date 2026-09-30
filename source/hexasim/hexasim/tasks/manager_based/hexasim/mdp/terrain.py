@@ -58,6 +58,7 @@ S0B_TERRAIN_CFG = terrain_gen.TerrainGeneratorCfg(
     difficulty_range=(0.0, 1.0),
     seed=0,
     use_cache=False,
+    color_scheme="random",
     sub_terrains={
         "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.15),
         "rough": HfScaledRoughTerrainCfg(proportion=0.2, noise_step=0.002, downsampled_scale=0.1, border_width=_BORDER),

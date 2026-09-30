@@ -20,7 +20,7 @@ Paper wording: “KiVi re-implemented on our platform under our training paradig
 | RMA (Kumar 2021) | Not run | Two phases with a privileged encoder in the actor path; nothing here needs one |
 | ROA (Fu, Cheng, Pathak 2022) | Not applicable | No deployable actor consumes a privileged encoder (§3.6) |
 | Concurrent estimation + asymmetric critic (Ji 2022, DreamWaQ, KiVi) | **Adopted — the template** | Single stage, preserves the warm start, and is KiVi's own paradigm |
-| Kickstarting KL anchor (Schmitt 2018) | Adopted, S1 → first 10 % of S2 | Gait insurance; must reach zero before clock dropout exceeds 33 % (settled) |
+| Kickstarting KL anchor (Schmitt 2018) | ~~Adopted, S1 → first 10 % of S2~~ **Void since 2026-09-23** (warm start dropped, §4.2 outcome; §4.4 kept for the record) | Was gait insurance for a warm-started actor; with π\_S0 trained from scratch there is no lineage to anchor to |
 | Residual policy | Fallback only | Caps the ceiling and reads as a bolt-on. If used for one arm, used for all |
 | World-model perception (WMP, Lai 2025) | Prior art to position against; optional arm B3 | Nearest mechanism competitor, below |
 | Symmetry augmentation / mirror loss | Not adopted | Pulls an asymmetric warm start toward symmetry; mirrored RGB is physically exact only if the colour optical centre sits on the sagittal plane |
@@ -107,7 +107,7 @@ Your message repeats v1's E1–E8 almost verbatim, including the pasted paradigm
 | Auxiliary-loss data | 128-step ring buffer | FIFO + episode masking | Both (§8.3) |
 | Image geometry | Crop to 640 × 480 | — | No crop; colour FOV; anisotropic resize (§7.5) |
 | Renderer | Real-time, no path tracing | Same | Mode pinned; temporal-artifact tests (§7.4) |
-| KL anchor | β₀ undefined | Not specified | Adaptive β, same end point (§4.4) |
+| KL anchor | β₀ undefined | Not specified | Adaptive β, same end point (§4.4) — **void since 2026-09-23** |
 | CPG floors | Inherited | Clock-phase floors | Phase-free, contact-conditioned (§5) |
 
 ## 1. Invariants — identical for every arm
@@ -146,7 +146,7 @@ Your message repeats v1's E1–E8 almost verbatim, including the pasted paradigm
 | --- | --- | --- | --- | --- | --- | --- |
 | **O** Oracle | Headroom upper bound, sim only | None; ground-truth material strips in the actor | — | — | 5 | No |
 | **B0** Blind | Proprioceptive floor | None | No | No | 5 | Yes |
-| **B1-K** KiVi-faithful | Named competitor, re-implemented | Depth | No | Next-step observation (VAE) | 3 (§10.2) | Optional |
+| **B1-K** KiVi-faithful | Named competitor, re-implemented | Depth | No | Next-step observation (VAE) | 5 (first cut to 3 if compute is short, §10.2) | Optional |
 | **B1-M** KiVi-matched | Supervision-matched competitor | RGB-D | No | Next-step observation (VAE) | 5, floor 3 | Recommended |
 | **B2** Foothold-attended | Falsification of the claim | RGB-D | Yes | None | 8 target, 5 hard floor | Yes |
 | **F** VP-JEPA | Full model | RGB-D | Yes | Multi-horizon latent (JEPA) | 8 target, 5 hard floor | Yes |
@@ -343,7 +343,7 @@ The transferable idea — do not force a representation to encode what the obser
 
 ## 4. Warm start from the CPG base policy
 
-**S0 reconditions your CPG policy in two segments — S0a (actuator and observations) and S0b (commands, clock, terrain); its output π\_S0 seeds every arm and is the frozen KL anchor, unless the from-scratch control arm (§4.2) removes the warm start.**
+**S0 reconditions your CPG policy in two segments — S0a (actuator and observations) and S0b (commands, clock, terrain); its output π\_S0 seeds every arm (widened at S1, §4.3). Update 2026-09-23: the from-scratch control arm (§4.2) removed the warm start, so π\_S0 is itself trained from scratch and is no longer a KL anchor (§4.4 void).**
 
 ### 4.1 Stage-0 audit — results for π\_base (model\_14998.pt)
 
@@ -459,19 +459,19 @@ Only if S1 fails its gate for ≥ 2 of 5 seeds. If used for one arm, it is used 
 
 ### 6.0 S1b — blind batch transition
 
-After S1, a blind segment at N\_v × T\_v until returns plateau, before any branching. It separates the batch change from the vision slots going live, the clock dropout, the KL decay and the new losses.
+After S1, a blind segment at N\_v × T\_v until returns plateau, before any branching. It separates the batch change from the vision slots going live, the clock dropout and the new losses (the KL decay is void since 2026-09-23, §4.4).
 
 ### Stage table
 
 |  | S0a / S0b Recondition | S1 / S1b Blind trunk | S2 Depth | S3 RGB-D |
 | --- | --- | --- | --- | --- |
-| Runs | S0a + S0b, shared; + 1 from-scratch control | 8 seeds + 3 S1-K | Per arm × seed | Per arm × seed |
+| Runs | S0a + S0b, shared; + 1 from-scratch control | 5 seeds (§10.1; 2026-09-28: 5 run — 8 would be needed for 8 paired B2/F seeds, §10.2) + 5 S1-K (3 if B1-K is cut, §10.2) | Per arm × seed | Per arm × seed |
 | Envs × rollout | 8,192 × 16 | 8,192 × 16; S1b at N\_v × T\_v | N\_v × T\_v | N\_v × T\_v |
 | Renderer | None | None | TiledCamera depth (vision arms); none for O, B0 | Real-time RTX RGB + depth; none for O, B0 |
 | Actor inputs | o\_p + substitution ramp (S0a); + twist\_cmd (S0b) | Final union layout, zero-init; clock observable; vision and M\* slots zeroed | Arm's own slots live; clock dropout 0 → 100 % over the first 30 % | Deployment layout; clock zeros |
 | Auxiliary losses | V\_0 if needed | L\_est, L\_probe (z\_p heads), L\_vic | + arm-specific: FAH, L\_jepa, … | Same |
 | Rewards | Fixes (S0a); + tracking and phase-free floors (S0b) | = S0b | Clock terms → 0 over the first 30 % | Floors only |
-| KL anchor | — | Adaptive β after burn-in | β → 0 over the first 10 % | 0 |
+| KL anchor | — | ~~Adaptive β after burn-in~~ void (§4.4) | ~~β → 0 over the first 10 %~~ void | 0 |
 | Critic | Rebuilt if its input changed | Rebuilt for P; actor frozen until explained variance ≥ 0.8 or 300 iterations, whichever is later | 50-iteration re-burn-in as vision slots go live | — |
 | Modality dropout | — | — | Depth 10 %; z\_p in fusion input 10 % | RGB channels 100 % → 10 % over the first 30 %; depth 10 %; z\_p 10 % |
 | Can learn | Gait under deployable observations and commands | Estimation; proprioceptive physics | FAH, sampling geometry, geometric anticipation, trailing-leg anticipation | Leading-leg friction and compliance anticipation |
@@ -615,7 +615,7 @@ At the end of S2, evaluate F and B2 on step-up and step-down transitions, sharp 
 
 | Module | Receives gradients from | Blocked from |
 | --- | --- | --- |
-| Actor π | PPO, L\_KL | All auxiliary losses |
+| Actor π | PPO (L\_KL void since 2026-09-23, §4.4) | All auxiliary losses |
 | Critic, separate | Value loss | Its inputs are detached |
 | E\_p | L\_est via V, L\_probe, L\_vic; B1-M: VAE; B2/F/B3: through Φ or P; F: L\_jepa, L\_inv; B3: reconstruction, L\_inv | PPO, value loss |
 | V | L\_est | — |

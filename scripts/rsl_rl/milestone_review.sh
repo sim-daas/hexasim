@@ -17,9 +17,15 @@ python scripts/tests/leg_gap_probe.py --headless "it$IT=$CK" 2>&1 | grep -E '^GA
 python - "$RUN" > "$OUT/it${IT}_slope.txt" <<'PY'
 import glob, sys
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-ea = EventAccumulator(glob.glob(sys.argv[1] + "/events*")[0], size_guidance={"scalars": 0}); ea.Reload()
+# All event files of the run dir, oldest first: a resumed run's dir holds a copy of its predecessor's (later wins).
+files = []
+for f in sorted(glob.glob(sys.argv[1] + "/events*")):
+    ea = EventAccumulator(f, size_guidance={"scalars": 0}); ea.Reload(); files.append(ea)
 for k in ("Train/mean_reward", "Episode_Reward/track_lin_vel", "Episode_Reward/leg_proximity", "Curriculum/terrain_levels"):
-    v = [s.value for s in ea.Scalars(k)]
+    by_step = {}
+    for ea in files:
+        by_step.update({s.step: s.value for s in ea.Scalars(k)})
+    v = [by_step[t] for t in sorted(by_step)]
     now, before = sum(v[-500:]) / 500, sum(v[-2500:-2000]) / 500
     print(f"SLOPE {k:32s} last500 {now:9.3f}  2000 its earlier {before:9.3f}  change {100 * (now - before) / abs(before):+6.1f} %")
 PY

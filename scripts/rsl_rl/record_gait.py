@@ -29,6 +29,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--ckpt", required=True)
 parser.add_argument("--tag", required=True, help="name for the video file and the printed row")
 parser.add_argument("--cmd", type=float, default=0.15, help="forward speed command, S0b tasks only")
+parser.add_argument("--yaw_cmd", type=float, default=0.0, help="yaw speed command, S0b tasks only")
 parser.add_argument(
     "--terrain_type",
     default=None,
@@ -61,14 +62,15 @@ from hexasim.tasks.manager_based.hexasim.mdp.terrain import single_type_generato
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 state = torch.load(args.ckpt, map_location="cpu", weights_only=False)["actor_state_dict"]
-task = task_for({"actor_state_dict": state})
+base_task = task_for({"actor_state_dict": state})
+task = base_task.replace("-v0", "-Play-v0")
 cfg = parse_env_cfg(task, num_envs=1)
 configure(cfg, torch.load(args.ckpt, map_location="cpu", weights_only=False))
 eval_physx_buffers(cfg)
 cfg.curriculum = None
-s0b = task in ("Hexapod-S0b-v0", "Hexapod-S1-v0")
+s0b = task in ("Hexapod-S0b-v0", "Hexapod-S1-v0", "Hexapod-S0b-Play-v0", "Hexapod-S1-Play-v0")
 if s0b:
-    pin_command(cfg, args.cmd)
+    pin_command(cfg, args.cmd, 0.0, args.yaw_cmd)
     if args.terrain_type is None:
         cfg.scene.terrain.terrain_generator = cfg.scene.terrain.terrain_generator.replace(
             num_rows=1, num_cols=2, difficulty_range=(0.0, 0.0), sub_terrains={"flat": MeshPlaneTerrainCfg(proportion=1.0)}

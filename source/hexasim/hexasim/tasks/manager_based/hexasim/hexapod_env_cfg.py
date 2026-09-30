@@ -657,6 +657,8 @@ class HexapodEnvCfg_PLAY(HexapodEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 1
         self.scene.env_spacing = 2.5
+        self.episode_length_s = 10000.0
+
 
 
 @configclass
@@ -772,6 +774,8 @@ class HexapodS0aEnvCfg_PLAY(HexapodS0aEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 1
         self.scene.env_spacing = 2.5
+        self.episode_length_s = 10000.0
+
 
 
 ##
@@ -984,6 +988,7 @@ class HexapodS0bEnvCfg_PLAY(HexapodS0bEnvCfg):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.scene.num_envs = 1
+        self.episode_length_s = 10000.0
 
 
 ##
@@ -1034,7 +1039,7 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
         ev.terrain_materials = EventTerm(
             func=hex_mdp.terrain_materials, mode="prestartup", params={"seed": self.material_field_seed}
         )
-        # S1 reward = S0b except two terms (phase2-progress §2.2.6–2.2.7, deviation D28; shared by every arm from S1 on).
+        # S1 reward = S0b except a few terms (phase2-progress §2.2.6–2.2.8, D28/D29; shared by every arm from S1 on).
         # Leg clearance: the two-sided touchdown_reach (kept: it produced the coordinated lift) pays ≈ +0.70/s for
         # pulling the front legs to the rest reach, and at a fixed stride the larger coxa arcs close the neighbour gaps;
         # an overlapping posture out-earned π_S0's clear one by ≈ +1.0/s at ×400. At ×1,600 overlap nets ≈ −0.8/s;
@@ -1043,6 +1048,12 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
         # Lift floor 3 → 4 cm: once the clock terms leave (S2) it is the only term holding the swing height
         # (cpg_z_target's half-sine peaks at 3.8 cm).
         self.rewards.swing_clearance.params["height"] = 0.04
+        # Pilot 3 (§2.2.8, D29): (1) the clock lift target 3.8 → 4 cm, so cpg_z_target and the floor agree — with 3.8
+        # the policy's lift converged onto 3.7 cm in pilot 2 (the term paid 4.6/s against the floor's 0.5/s).
+        # (2) Per-leg touchdown_reach: front legs aim at 10 cm (natural ≈ 12 cm in π_S0, pulled to 9.5 cm by the
+        # 6.7 cm rest target); middle/back keep the rest reach. Two-sided, weight unchanged.
+        self.rewards.cpg_z_target.params["step_height"] = 0.04
+        self.rewards.touchdown_reach.params["front_reach"] = 0.10
 
 
 @configclass
@@ -1050,3 +1061,8 @@ class HexapodS1EnvCfg_PLAY(HexapodS1EnvCfg):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.scene.num_envs = 1
+        self.episode_length_s = 10000.0
+        # Revert pilot v3 rewards back to pilot v2 for demo videos. DEMO ONLY: this is not the accepted S1 reward
+        # (pilot 3, D29) — never use Hexapod-S1-Play-v0 for reportable evaluation (eval_s0.py refuses Play tasks).
+        self.rewards.cpg_z_target.params["step_height"] = 0.038
+        self.rewards.touchdown_reach.params["front_reach"] = None

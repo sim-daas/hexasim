@@ -143,15 +143,24 @@ code before relying on any line here.
   the warm start and the KL anchor (spec §4.4) are dropped for every arm**; the π_base → S0a → S0b lineage
   (research/phase2-progress §2.0–2.1) is history, kept for the record and for the paper's honesty section.
   Check gait changes with `scripts/tests/swing_radial_probe.py` and `scripts/tests/leg_gap_probe.py`, not only gates.
-- **S1 (research/phase2-progress §2.2):** `Hexapod-S1-v0` = S0b + spatial terrain materials (static field, per-entry
-  visual submeshes, per-foot μ/k tensor writes; damping per env, D25), per-env drop slope (D24), the env-owned aux
-  learner (`hexasim/rl/s1/`: E_p TCN W 50, V = v_kin + Δv̂, probes, β-NLL with fixed π_S0 statistics in
-  `probe_stats_pi_s0.pt`), 1,125-D actor layout (`mdp/layout.py`), contract P (683), `S1PPO` (ê gate after the v7 §4.3
-  tests, V_0 retired by per-episode dropout, D23). **S1 reward = S0b except `leg_proximity` −1,600 and
-  `swing_clearance` 4 cm (D28)**: longer training of the S0b reward pulls the feet inward and closes the leg gaps
-  (§2.2.6). **S1 budget = 8,000 iterations** (pilot-v2 plateau stop, §2.2.7; pilot checkpoint `logs/rsl_rl/hexapod_s1/2026-09-26_02-33-23_s1_pilot2_seed42/model_8000.pt`, all S1 gates pass, leg gap +1.3 cm). Gotchas: `OPENBLAS_NUM_THREADS=1` for Kit scripts; evals
-  next to S1 training need `load_policy.eval_physx_buffers`; load S1 checkpoints with `load_policy.load_env_state`
-  before `env.reset()`.
+- **S1 (research/phase2-progress §2.2, final config accepted 2026-09-27):** `Hexapod-S1-v0` = S0b + spatial terrain
+  materials (static field, per-entry visual submeshes, per-foot μ/k tensor writes; damping per env, D25), per-env drop
+  slope (D24), the env-owned aux learner (`hexasim/rl/s1/`: E_p TCN W 50, V = v_kin + Δv̂, probes, β-NLL with fixed π_S0
+  statistics in `probe_stats_pi_s0.pt`), 1,125-D actor layout (`mdp/layout.py`), contract P (683), `S1PPO` (ê gate after
+  the v7 §4.3 tests, V_0 retired by per-episode dropout, D23). **S1 reward = S0b except `leg_proximity` −1,600,
+  `swing_clearance` 4 cm (D28), `cpg_z_target` step 4 cm and a per-leg two-sided `touchdown_reach` (front legs 10 cm,
+  rest reach for the others; D29)**: longer training of the S0b reward pulls the front feet inward and closes the leg
+  gaps (§2.2.6, §2.2.8). **S1 budget = 8,000 iterations.** Pilot 3 (seed 42, W 50, resumed at 4,500) passes every S0b
+  gate with 0 falls, worst leg gap +0.5 cm, lift 3.8–4.5 cm, V within v7 §4.3; known imperfection D30: back-coxa
+  requests past the ±55° clip (0.026–0.029 rad/step vs 0.015 in π_S0), to revisit in S2. Checkpoint
+  `logs/rsl_rl/hexapod_s1/2026-09-26_19-41-49_s1_pilot3_seed42_resume4500/model_7999.pt`. W sweep done: **W = 50** (D32).
+  **5 S1 trunks** (seeds 42–46, D31; run dirs `…/hexapod_s1/*_s1_w50_seed4{3..6}`): **all five** pass every gate with 0
+  falls in 21,760 episodes and a small seed spread (§2.2.11) — the pairing units for the spec §10.1 statistics. Next (spec §12): N_v benchmark → S1b → S2 reward design → blind O vs B0 headroom
+  test before any vision arm; S1-K (B1-K trunk) deferred. Eval seeds must be fixed across arms: terrain geometry
+  depends on the run seed (Isaac Lab rough/bump terrains use numpy's global RNG, §2.2.9).
+  Gotchas: `OPENBLAS_NUM_THREADS=1` for Kit scripts; evals next to S1 training need `load_policy.eval_physx_buffers`;
+  load S1 checkpoints with `load_policy.load_env_state` before `env.reset()`; a resume (`--resume --load_run … --checkpoint
+  …`) writes a new run dir and `max_iterations` counts from the loaded iteration.
 - **S0b (research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
   clock, standing mode at zero command (`env.cpg_active`), terrain curriculum (`mdp/terrain.py`, height map gives
   `env.terrain_z` / `terrain_normal`; never use absolute z), full DR incl. per-env foot material (bound on the tibia
@@ -255,8 +264,8 @@ F (VP-JEPA), B3 (optional generative-target control).
   IMU-dropout tests before FAH trains.
 - Auxiliary losses train from a per-env sequence buffer (L = 128) with
   episode-boundary masking, decoupled from the PPO rollout (spec §8.3).
-- KL anchor to π_S0: adaptive β against a drift budget in S1, decayed to 0 over
-  the first 10 % of S2 (finished while clock dropout ≤ 33 %).
+- KL anchor to π_S0: **void since 2026-09-23** (the from-scratch control arm
+  dropped the warm start; spec §4.4 kept for the record). No L_KL anywhere.
 - Warm-start widening (spec §4.3): `W' = [W | 0]`; LayerNorm per new block only,
   never over the concatenated input; normaliser counts reset for blocks that go
   live at S2 and re-estimated during the actor-frozen critic re-burn-in.

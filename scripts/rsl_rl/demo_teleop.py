@@ -29,7 +29,7 @@ import argparse
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--ckpt", required=True, help="policy checkpoint (117-D S0b actor)")
+parser.add_argument("--ckpt", default="logs/rsl_rl/hexapod_s1/2026-09-26_02-33-23_s1_pilot2_seed42/model_8000.pt", help="policy checkpoint (infer task from env_state_dict)")
 parser.add_argument("--level", type=int, default=9, help="terrain difficulty level, 0–20")
 parser.add_argument("--video_dir", default="logs/videos/demo", help="where R writes the mp4 takes")
 parser.add_argument("--no_video", action="store_true", help="skip the recorder (viewer only)")
@@ -44,6 +44,7 @@ app = AppLauncher(args).app
 import gymnasium as gym  # noqa: E402
 import hexasim.tasks  # noqa: E402, F401
 import torch  # noqa: E402
+from hexasim.rl.load_policy import configure, eval_physx_buffers, load_env_state, task_for  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp import pin_command  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp.terrain import LEVELS_DESIGNED, S0B_TERRAIN_CFG  # noqa: E402
 from rsl_rl.models import MLPModel  # noqa: E402
@@ -54,8 +55,13 @@ from isaaclab.devices.keyboard import Se2Keyboard, Se2KeyboardCfg  # noqa: E402
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 V_X_MAX, V_Y_MAX, YAW_MAX = 0.20, 0.05, 0.4  # the trained command ranges (spec §1 + D19)
+ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+base_task = task_for(ckpt)
+play_task = base_task.replace("-v0", "-Play-v0")
 
-cfg = parse_env_cfg("Hexapod-S0b-v0", num_envs=1)
+cfg = parse_env_cfg(play_task, num_envs=1)
+configure(cfg, ckpt)
+eval_physx_buffers(cfg)
 cfg.curriculum = None
 # One difficulty, one column per terrain type, three rows deep.
 types = list(S0B_TERRAIN_CFG.sub_terrains)
@@ -73,8 +79,7 @@ cfg.viewer.origin_type = "asset_root"
 cfg.viewer.asset_name = "robot"
 cfg.viewer.eye = (1.6, 1.6, 0.8)
 cfg.viewer.lookat = (0.0, 0.0, 0.15)
-
-env = gym.make("Hexapod-S0b-v0", cfg=cfg, render_mode=None if args.no_video else "rgb_array")
+env = gym.make(play_task, cfg=cfg, render_mode=None if args.no_video else "rgb_array")
 recorder = None
 if not args.no_video:
     recorder = gym.wrappers.RecordVideo(
@@ -82,12 +87,11 @@ if not args.no_video:
     )
     env = recorder
 base = env.unwrapped
-
 ckpt = torch.load(args.ckpt, map_location=base.device, weights_only=False)
+load_env_state(base, ckpt)
 with torch.inference_mode():
     obs, _ = env.reset()
-base.v0.load_state_dict(ckpt["v0_state_dict"])
-base.v0_train = False
+
 policy = MLPModel(
     TensorDict({"policy": obs["policy"]}, batch_size=[1]),
     {"actor": ["policy"]},

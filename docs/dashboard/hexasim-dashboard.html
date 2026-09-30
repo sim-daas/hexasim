@@ -1,0 +1,1176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>:root{color-scheme:light}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>Hexapod Project Dashboard</title>
+<meta name="description" content="Plain-language dashboard of the hexasim hexapod project: architecture (built and planned), training plan, comparison arms, rewards and progress.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: engineering-notebook dashboard. A sticky tab rail over one reading column (max 1180px);
+   the architecture tab pairs a schematic canvas with a detail panel. Built = solid, Planned = dashed. */
+:root{
+  --bg:#f3f6f7; --surface:#ffffff; --surface-2:#e8eef0; --ink:#12202a; --ink-2:#44545f; --muted:#687985;
+  --line:#d0d9de; --accent:#0e6874; --accent-soft:#d5ecef;
+  --built:#1c7549; --built-soft:#dcf0e4; --planned:#955800; --planned-soft:#faebd2;
+  --retired:#6b6f76; --retired-soft:#e7e8ea; --warn:#b0271f; --warn-soft:#fbe2df;
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+  --font-display:"Barlow Semi Condensed","Arial Narrow",system-ui,sans-serif;
+  --font-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0e161b; --surface:#152028; --surface-2:#1c2a33; --ink:#e4edf1; --ink-2:#b1c1ca; --muted:#8497a3;
+  --line:#2b3c46; --accent:#5bbcc8; --accent-soft:#15363c;
+  --built:#62c993; --built-soft:#16332a; --planned:#e8a84c; --planned-soft:#3a2a12;
+  --retired:#a3a8af; --retired-soft:#262d33; --warn:#ff8b80; --warn-soft:#3e1d1a;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; color-scheme:dark; } }
+:root[data-theme="dark"]{
+  --bg:#0e161b; --surface:#152028; --surface-2:#1c2a33; --ink:#e4edf1; --ink-2:#b1c1ca; --muted:#8497a3;
+  --line:#2b3c46; --accent:#5bbcc8; --accent-soft:#15363c;
+  --built:#62c993; --built-soft:#16332a; --planned:#e8a84c; --planned-soft:#3a2a12;
+  --retired:#a3a8af; --retired-soft:#262d33; --warn:#ff8b80; --warn-soft:#3e1d1a;
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; color-scheme:dark; }
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--font-body);font-size:15px;line-height:1.55}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+h1,h2,h3,h4{font-family:var(--font-display);text-wrap:balance;line-height:1.15;margin:0}
+h2{font-size:1.75rem;font-weight:700;letter-spacing:.01em}
+h3{font-size:1.3rem;font-weight:600;margin-top:.2rem}
+h4{font-size:1.08rem;font-weight:600}
+p{margin:0;max-width:72ch}
+.sym{font-family:var(--font-mono);font-size:.78em;color:var(--muted);background:var(--surface-2);border-radius:3px;padding:0 .3em;white-space:nowrap}
+code,.mono{font-family:var(--font-mono);font-size:.86em}
+.num{font-variant-numeric:tabular-nums}
+
+/* header */
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--bg);border-bottom:1px solid var(--line)}
+.top-inner{max-width:1180px;margin:0 auto;padding-inline:16px;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem;padding-block:.6rem}
+.brand{display:flex;align-items:baseline;gap:.6rem;min-width:0}
+.brand h1{font-size:1.35rem;font-weight:700;letter-spacing:.02em}
+.brand .stamp{font-size:.78rem;color:var(--muted)}
+.tools{margin-left:auto;display:flex;gap:.5rem;align-items:center}
+.tools input{font:inherit;font-size:.88rem;padding:.35rem .6rem;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink);width:14rem;max-width:48vw}
+.btn{font:inherit;font-size:.85rem;padding:.35rem .7rem;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink);cursor:pointer}
+.btn:hover{border-color:var(--accent)}
+.btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent)}
+nav.tabs{max-width:1180px;margin:0 auto;padding-inline:16px;display:flex;gap:.2rem;overflow-x:auto;scrollbar-width:thin}
+nav.tabs a{font-family:var(--font-display);font-weight:600;font-size:1.02rem;letter-spacing:.02em;text-decoration:none;color:var(--ink-2);padding:.45rem .75rem;border-bottom:3px solid transparent;white-space:nowrap}
+nav.tabs a:hover{color:var(--ink)}
+nav.tabs a[aria-current="page"]{color:var(--accent);border-bottom-color:var(--accent)}
+
+main{max-width:1180px;margin:0 auto;padding-inline:16px;padding-block:1.5rem 4rem}
+section.tab{display:grid;gap:1.6rem}
+.lede{font-size:1.05rem;color:var(--ink-2);max-width:78ch}
+.block{display:grid;gap:.8rem;min-width:0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:1rem 1.1rem;min-width:0}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem}
+.eyebrow{font-size:.72rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.small{font-size:.86rem;color:var(--ink-2)}
+ul.clean{margin:0;padding-left:1.1rem;display:grid;gap:.3rem}
+
+/* pills */
+.pill{display:inline-flex;align-items:center;gap:.3em;font-size:.72rem;font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:.1rem .45rem;border-radius:999px;border:1px solid;white-space:nowrap;vertical-align:middle}
+.pill.built,.pill.done{color:var(--built);background:var(--built-soft);border-color:var(--built)}
+.pill.planned{color:var(--planned);background:var(--planned-soft);border-color:var(--planned);border-style:dashed}
+.pill.progress{color:var(--accent);background:var(--accent-soft);border-color:var(--accent)}
+.pill.blocked,.pill.risk{color:var(--warn);background:var(--warn-soft);border-color:var(--warn)}
+.pill.retired{color:var(--retired);background:var(--retired-soft);border-color:var(--retired)}
+.pill.measure{color:var(--ink-2);background:var(--surface-2);border-color:var(--muted);border-style:dotted}
+.legend{display:flex;flex-wrap:wrap;gap:.5rem 1rem;align-items:center;font-size:.85rem;color:var(--ink-2)}
+
+/* tables */
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{text-align:left;padding:.45rem .65rem;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--ink-2);background:var(--surface-2);font-size:.8rem;letter-spacing:.02em;position:sticky;top:0}
+tr:last-child td{border-bottom:0}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.good{color:var(--built);font-weight:600}
+td.bad{color:var(--warn);font-weight:600}
+
+/* overview */
+.status-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.5rem}
+.st{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:.6rem .7rem;display:grid;gap:.25rem;border-top:4px solid var(--line)}
+.st.done{border-top-color:var(--built)} .st.progress{border-top-color:var(--accent)} .st.blocked{border-top-color:var(--warn)} .st.planned{border-top-color:var(--planned);border-top-style:dashed}
+.st b{font-family:var(--font-display);font-size:1.05rem}
+.st span{font-size:.8rem;color:var(--ink-2)}
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem}
+.fig{border-left:3px solid var(--accent);padding:.2rem .8rem}
+.fig .v{font-family:var(--font-display);font-size:2rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+.fig .l{font-size:.85rem;color:var(--ink-2)}
+ol.path{margin:0;padding-left:0;list-style:none;display:grid;gap:.35rem;counter-reset:p}
+ol.path li{display:grid;grid-template-columns:2rem 1fr auto;gap:.6rem;align-items:start;padding:.45rem .6rem;border-radius:var(--radius);background:var(--surface);border:1px solid var(--line)}
+ol.path li::before{counter-increment:p;content:counter(p);font-family:var(--font-display);font-weight:700;color:var(--muted);text-align:right}
+ol.path li.cur{border-color:var(--accent);background:var(--accent-soft)}
+
+/* architecture */
+.arch{display:grid;grid-template-columns:minmax(0,1fr);gap:1rem}
+.canvas{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius)}
+.canvas svg{display:block;min-width:900px;width:100%;height:auto}
+.node rect{stroke-width:1.6;cursor:pointer}
+.node.built rect{fill:var(--built-soft);stroke:var(--built)}
+.node.planned rect{fill:var(--planned-soft);stroke:var(--planned);stroke-dasharray:6 4}
+.node.retired rect{fill:var(--retired-soft);stroke:var(--retired);stroke-dasharray:2 3}
+.node text{fill:var(--ink);font-family:var(--font-body);font-size:12.5px;pointer-events:none}
+.node text.t2{fill:var(--ink-2);font-size:11px}
+.node:hover rect,.node.sel rect{stroke-width:3}
+.node.sel rect{stroke:var(--accent)}
+.edge{fill:none;stroke:var(--muted);stroke-width:1.4}
+.edge.planned{stroke:var(--planned);stroke-dasharray:5 4}
+.edge.train{stroke:var(--accent);stroke-dasharray:2 3}
+.band{fill:var(--surface-2);opacity:.55}
+.bandlabel{fill:var(--muted);font-family:var(--font-display);font-size:13px;letter-spacing:.08em;font-weight:600}
+.hide-planned .planned-only{display:none}
+.detail{display:grid;gap:.7rem}
+.detail dl{grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:.8rem 1.4rem}
+.detail dl{margin:0;display:grid}
+.detail dl > div{display:grid;gap:.2rem;min-width:0}
+.detail dt{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.detail dd{margin:0;font-size:.9rem}
+.bar{display:flex;height:34px;border-radius:4px;overflow:hidden;border:1px solid var(--line);background:var(--surface)}
+.bar div{border-right:2px solid var(--surface);min-width:3px;cursor:default}
+.bar .live{background:var(--built)} .bar .gated{background:var(--accent)} .bar .zero{background:var(--planned-soft);background-image:repeating-linear-gradient(45deg,transparent 0 5px,var(--line) 5px 6px)} .bar .old{background:var(--retired)}
+
+/* timeline */
+.timeline{display:grid;gap:.8rem}
+.stage{display:grid;grid-template-columns:130px 1fr;gap:1rem;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:1rem}
+@media (max-width:640px){.stage{grid-template-columns:1fr}}
+.stage .id{font-family:var(--font-display);font-size:1.7rem;font-weight:700}
+.stage dl{margin:0;display:grid;grid-template-columns:9.5rem 1fr;gap:.35rem .8rem;font-size:.9rem}
+@media (max-width:640px){.stage dl{grid-template-columns:1fr}}
+.stage dt{color:var(--muted);font-weight:600;font-size:.8rem}
+.stage dd{margin:0;min-width:0}
+
+/* arms */
+.arms{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}
+.arm h4{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap}
+.arm .code{font-family:var(--font-mono);font-size:.85rem;color:var(--accent)}
+.cmp-row{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}
+select{font:inherit;font-size:.9rem;padding:.3rem .5rem;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink)}
+tr.diff td{background:var(--planned-soft)}
+
+/* charts */
+.chart svg{width:100%;height:auto;display:block}
+.chart .grid{stroke:var(--line);stroke-width:1}
+.chart .axis{fill:var(--muted);font-family:var(--font-body);font-size:11px}
+.chart .lab{fill:var(--ink-2);font-family:var(--font-body);font-size:11.5px}
+.chart .ref{stroke:var(--muted);stroke-dasharray:4 4;stroke-width:1.2}
+.chart .band-ok{fill:var(--built-soft)}
+#tip{position:fixed;z-index:50;pointer-events:none;background:var(--ink);color:var(--bg);font-size:.8rem;padding:.35rem .55rem;border-radius:4px;max-width:280px;display:none}
+
+.filters{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
+.story{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.6rem}
+@media (max-width:760px){.story{grid-template-columns:1fr}}
+.story > div{border-radius:var(--radius);padding:.6rem .7rem;font-size:.88rem}
+.story .o{background:var(--warn-soft)} .story .c{background:var(--surface-2)} .story .f{background:var(--built-soft)}
+.story b{display:block;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);margin-bottom:.15rem}
+details.card summary{cursor:pointer;font-family:var(--font-display);font-weight:600;font-size:1.1rem}
+details.card[open] summary{margin-bottom:.7rem}
+.gl{display:grid;grid-template-columns:minmax(0,11rem) 1fr;gap:.35rem 1rem;align-items:baseline}
+.gl dt{font-weight:600}
+.gl dd{margin:0;color:var(--ink-2)}
+@media (max-width:560px){.gl{grid-template-columns:1fr}.gl dd{margin-bottom:.4rem}}
+.src{font-size:.78rem;color:var(--muted)}
+@media (prefers-reduced-motion:no-preference){.node rect{transition:stroke-width .12s}}
+</style>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="brand"><h1>Hexapod Project Dashboard</h1><span class="stamp">hexasim · last updated 2026-09-29</span></div>
+    <div class="tools">
+      <label for="gsearch" class="small" style="position:absolute;left:-9999px">Search the glossary</label>
+      <input id="gsearch" type="search" placeholder="Look up a term (e.g. FAH, z_p)">
+      <button class="btn" id="themeBtn" type="button" title="Switch colour theme">Theme: system</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs" aria-label="Sections">
+    <a href="#overview">Overview</a><a href="#robot">Robot &amp; simulator</a><a href="#architecture">Architecture</a>
+    <a href="#stages">Training plan</a><a href="#arms">Comparison arms</a><a href="#rewards">Rewards</a>
+    <a href="#progress">Progress</a><a href="#open">Open items</a><a href="#glossary">Glossary</a>
+  </nav>
+</header>
+
+<main>
+<!-- ============================ OVERVIEW ============================ -->
+<section class="tab" id="tab-overview" data-tab="overview">
+  <div class="block">
+    <span class="eyebrow">The research question</span>
+    <h2>Can a six-legged robot feel slippery or soft ground before it steps on it?</h2>
+    <p class="lede">The robot is a small hexapod (Interbotix PhantomX Mark IV, 18 hobby servos). The proposed method, called
+      <b>Visual–Proprioceptive Joint-Embedding Predictive Architecture</b> <span class="sym">VP-JEPA</span>, looks at the ground ahead with a
+      depth-and-colour camera and <b>predicts what the legs will feel</b> 60, 200 and 400 milliseconds in the future, then walks using that
+      prediction. The front legs see their footholds in the camera; what the front legs feel is then passed back to the middle and rear legs,
+      which cannot see their own footholds. The claim is only worth making if it beats carefully matched alternatives, so most of the work so far
+      builds those alternatives (the "comparison baselines") under one shared training recipe.</p>
+    <div class="legend"><span class="pill built">Built</span> exists in the code and has been trained
+      <span class="pill planned">Planned</span> designed in the specifications, not yet built
+      <span class="pill retired">Retired</span> built, then removed
+      <span class="pill measure">Measure later</span> simulator value is a placeholder until a bench measurement</div>
+  </div>
+
+  <div class="block">
+    <h3>Where the project stands</h3>
+    <div class="status-strip" id="statusStrip"></div>
+  </div>
+
+  <div class="block">
+    <h3>Headline results so far (simulation, seed 42)</h3>
+    <div class="figs">
+      <div class="fig"><div class="v">0 / 17,408</div><div class="l">falls in the final standing-and-walking policy's pass/fail evaluation (1,024 episodes × 17 test conditions)</div></div>
+      <div class="fig"><div class="v">180 / 180</div><div class="l">terrain test cells without a single fall, up to 4 cm stairs and ≈ 20° slopes (108 of 108 training-difficulty cells pass every criterion)</div></div>
+      <div class="fig"><div class="v">≈ 2.5×</div><div class="l">more accurate body-speed estimate from the new velocity estimator than the old one it replaced (0.019–0.025 vs 0.050–0.057 m/s error)</div></div>
+      <div class="fig"><div class="v">8,000</div><div class="l">training iterations fixed as the blind-trunk (S1) budget for every seed (≈ 524 million simulator steps)</div></div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card block">
+      <h3>What has been built</h3>
+      <ul class="clean small">
+        <li>A realistic simulation of the robot: servo model with dropped sensor readings, sensor noise, camera-mast weight, random payload.</li>
+        <li>A walking policy trained from scratch that follows speed and turning commands, stands still on command and crosses generated terrain (rough ground, slopes, bumps, stairs).</li>
+        <li>Ground made of ten different materials that change from place to place (Teflon, talc, wet tile, foam, rubber, concrete and others).</li>
+        <li>The blind "trunk" every comparison arm will start from: a body-sensing encoder, a velocity and foot-force estimator, and a set of physics quiz questions that force the encoder to learn about the ground.</li>
+      </ul>
+    </div>
+    <div class="card block">
+      <h3>What comes next</h3>
+      <ul class="clean small">
+        <li>Write up the memory-window sweep (25 vs 50 vs 75 steps) and fix the window for every arm.</li>
+        <li>Finish and evaluate the blind-trunk seeds (seeds 43–45 done, 46 running).</li>
+        <li>Measure how many camera-equipped simulations the GPU can run at once; this currently blocks the camera stages.</li>
+        <li>Run the headroom test: does knowing the ground material ahead help at all (Oracle vs Blind)? Nothing with a camera starts before this passes.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="block">
+    <h3>Critical path (paradigm specification §12)</h3>
+    <ol class="path" id="critPath"></ol>
+  </div>
+  <p class="src">Sources: research_progress.md (Phase 2), research/phase2-progress.md, the two design specifications, code under source/hexasim, run directories in logs/.</p>
+</section>
+
+<!-- ============================ ROBOT ============================ -->
+<section class="tab" id="tab-robot" data-tab="robot" hidden>
+  <div class="block">
+    <span class="eyebrow">Robot &amp; simulator</span>
+    <h2>The robot, its servos and the simulated world</h2>
+    <p class="lede">Everything is trained in NVIDIA Isaac Sim / Isaac Lab (a physics simulator using the PhysX engine) and must later run on the
+      real robot, so the simulator deliberately includes the robot's imperfections: cheap servos with limited torque, lost sensor readings,
+      noise and delays.</p>
+  </div>
+  <div class="grid2">
+    <div class="block"><h3>Robot facts</h3><div class="tw"><table id="robotFacts"></table></div></div>
+    <div class="block"><h3>Servo model <span class="sym">AX-12A</span></h3>
+      <div class="card small block">
+        <p>Each joint is a Dynamixel AX-12A hobby servo. The simulator reproduces how it really behaves instead of an ideal motor:</p>
+        <ul class="clean">
+          <li><b>Position-only control with a soft spring:</b> the servo pushes toward its target with a gentle "compliance" slope (32 ticks), a small dead zone (1 tick) and a minimum push ("punch").</li>
+          <li><b>Torque limit 1.5 N·m</b> that falls off as the joint speeds up (no-load speed 59 revolutions per minute ≈ 6.18 rad/s).</li>
+          <li><b>Coarse position sensor:</b> 10-bit, 0.29° per tick.</li>
+          <li><b>Gear play (backlash)</b> 0.5°, <b>bus delay</b> 5–10 ms, rotor inertia 0.003 kg·m².</li>
+          <li><b>Dropped readings:</b> each servo read can fail, more often under load (probability = 0.005 + 0.068 × torque ÷ stall torque, about 5–7 %). A failed read repeats the last good value, and an 18-number "fresh reading" mask tells the policy which values are stale.</li>
+          <li><b>Joint speed</b> is never read from the simulator's perfect velocity: it is computed the way the real robot must, from two position readings 40 ms apart.</li>
+        </ul>
+        <p class="src">Values are datasheet estimates <span class="pill measure">Measure later</span> — a bench measurement of gain, backlash, latency and drop rate is still needed.</p>
+      </div>
+    </div>
+  </div>
+  <div class="block">
+    <h3>Why the resting pose changed</h3>
+    <p class="small">The original (Phase 1) resting pose needed 134 % of the servo's stall torque in the femur joint when three legs carried the robot — physically impossible for the real servos. Measured in the simulator from contact force × lever arm (the simulator's own torque readout under-reads by about 2×):</p>
+    <div class="tw"><table>
+      <thead><tr><th>Upper-leg (femur), lower-leg (tibia) angle</th><th class="n">Femur torque, % of stall</th><th class="n">Tibia torque, % of stall</th><th class="n">Standing height</th></tr></thead>
+      <tbody><tr><td>+30°, −30° (Phase 1)</td><td class="n bad">134 %</td><td class="n">92 %</td><td class="n">0.123 m</td></tr>
+      <tr><td><b>+30°, +30° (adopted)</b></td><td class="n good">12 %</td><td class="n">29 %</td><td class="n">0.168 m</td></tr>
+      <tr><td>+45°, 0°</td><td class="n">33 %</td><td class="n">3 %</td><td class="n">0.183 m</td></tr></tbody></table></div>
+  </div>
+  <div class="grid2">
+    <div class="block"><h3>Generated terrain</h3>
+      <p class="small">A curriculum of 15 difficulty levels (0–14) is used for training; a robot moves up a level when it covers at least 80 % of its commanded path, and down if it falls or covers less than 40 %. Levels 15–20 are never trained on and are kept as a held-out test.</p>
+      <div class="tw"><table id="terrainTable"></table></div></div>
+    <div class="block"><h3>Ground materials (blind trunk onward)</h3>
+      <p class="small">The ground is divided into 4 m cells of irregular patches (one material, two materials split by a line, stripes or a mosaic), with blended edges up to 0.8 m wide. The layout is fixed so every arm and seed walks the same map; each episode redraws the exact values inside each material's range. "Shiny" marks materials that will look glossy to the camera. <span class="pill measure">Measure later</span></p>
+      <div class="tw"><table id="materialTable"></table></div></div>
+  </div>
+  <div class="grid2">
+    <div class="block"><h3>Randomised every episode</h3>
+      <div class="card small"><ul class="clean" id="drList"></ul></div></div>
+    <div class="block"><h3>Commands the robot must follow</h3>
+      <div class="card small"><ul class="clean">
+        <li>Forward speed 0.05–0.20 m/s, sideways ±0.05 m/s, turning ±0.4 rad/s; a new command every 5 seconds.</li>
+        <li>10 % of segments: stand still. Of the rest: 15 % turn on the spot, 30 % walk while drifting or turning, 55 % walk straight.</li>
+        <li>Pass/fail evaluation uses 0.10 and 0.15 m/s straight ahead.</li>
+        <li>Episodes last 10 s (500 control steps). An episode ends early if the body sinks to within 5 cm of the ground below it.</li>
+      </ul></div></div>
+  </div>
+</section>
+
+<!-- ============================ ARCHITECTURE ============================ -->
+<section class="tab" id="tab-architecture" data-tab="architecture" hidden>
+  <div class="block">
+    <span class="eyebrow">Architecture</span>
+    <h2>How information flows from the sensors to the legs</h2>
+    <p class="lede">Click any box for a plain explanation (it appears under the diagram). Solid green boxes exist and are trained today; dashed amber boxes are the planned camera
+      system; the bottom band holds helpers that exist only during training in the simulator and are removed before the robot walks for real.</p>
+    <div class="cmp-row">
+      <button class="btn" id="plannedToggle" type="button" aria-pressed="true">Showing: full planned system</button>
+      <div class="legend"><span class="pill built">Built</span><span class="pill planned">Planned</span><span class="pill retired">Retired</span>
+        <span class="small">solid line = data flow · dashed amber = planned flow · dotted teal = training signal only</span></div>
+    </div>
+  </div>
+  <div class="arch">
+    <div class="canvas" id="archCanvas"></div>
+    <aside class="card detail" id="archDetail" aria-live="polite"></aside>
+  </div>
+
+  <div class="block">
+    <h3>Two loops running at different speeds</h3>
+    <div class="grid2">
+      <div class="card small block"><h4>Control loop — 50 times per second (every 20 ms) <span class="pill built">Built</span></h4>
+        <p>Read the 18 servo positions (about 4–5 ms on the servo bus) → body-sensing encoder → velocity estimator → policy → write 18 joint
+        targets (about 0.6 ms). On the robot this runs on the CPU of the Jetson Orin Nano computer and must finish within 1.5 ms of computing. In the simulator, physics runs 4 times faster (200 per second).</p></div>
+      <div class="card small block"><h4>Anticipation loop — 30 times per second (every 33 ms) <span class="pill planned">Planned</span></h4>
+        <p>Camera frame → vision encoder → foothold prediction → feature lookup → future body-sensing predictor, on the GPU within 15 ms. The
+        control loop always uses the newest prediction available. Because the loops are not synchronised, a prediction can be 0 to about
+        80–100 ms old when used. The policy is told how much of each prediction's look-ahead is left
+        (<span class="sym">rem_60, rem_200, rem_400</span>), and predictions older than about 150 ms are switched off.</p></div>
+    </div>
+  </div>
+
+  <div class="block">
+    <h3>What the policy sees: 1,125 numbers every 20 ms</h3>
+    <p class="small">The policy's input was widened once, at the blind-trunk stage, to hold every arm's blocks. Blocks an arm is not allowed to use are held at exactly zero, so the extra input connections stay at zero and change nothing. Hover a segment for details (widths are to scale).</p>
+    <div class="bar" id="actorBar"></div>
+    <div class="legend"><span><span class="pill built">Live today</span></span><span><span class="pill progress">Live after a test gate</span></span><span><span class="pill retired">Being phased out</span></span><span><span class="pill planned">Held at zero for later arms</span></span></div>
+    <div class="tw"><table id="actorTable"></table></div>
+  </div>
+
+  <div class="block">
+    <h3>What the critic sees: the privileged information contract (683 numbers)</h3>
+    <p class="small">Reinforcement learning uses two networks. The <b>policy</b> (also called the actor) decides the joint targets and must run on the robot, so it may only use what real sensors provide. The <b>critic</b> only judges how good a situation is, to make training efficient; it exists only in the simulator, so it is allowed to "cheat" with true values the robot can never measure. Every arm gets exactly the same cheat sheet so that no arm gains from a better critic. It is computed before the action is chosen and does not depend on it.</p>
+    <div class="bar" id="contractBar"></div>
+    <div class="tw"><table id="contractTable"></table></div>
+  </div>
+
+  <div class="block">
+    <h3>Training signals (what each part learns from)</h3>
+    <div class="tw"><table id="lossTable"></table></div>
+    <div class="card small block"><h4>Rules about which signal may change which part</h4>
+      <ul class="clean">
+        <li>The reinforcement-learning signal never changes the encoders or estimators; they learn only from their own prediction and estimation tasks. <span class="pill built">tested</span></li>
+        <li>The critic's learning never changes the policy, and the helper tasks never change the policy or the critic. <span class="pill built">tested</span></li>
+        <li>The physics quiz and the future-prediction loss may not reach the foothold prediction module through the foothold location (it is detached before the feature lookup). <span class="pill planned">planned test</span></li>
+        <li>After widening, the policy must reproduce the previous policy's output to within 0.000001 on 10,000 random inputs (measured: exactly 0.0). <span class="pill built">tested</span></li>
+      </ul></div>
+  </div>
+
+  <div class="block">
+    <h3>The rhythm clock (central pattern generator) — training scaffolding</h3>
+    <div class="card small block">
+      <p>Walking is bootstrapped with a <b>rhythm clock</b> <span class="sym">CPG</span>: each leg gets a sine/cosine phase (12 numbers). Legs move in two alternating groups of three (a "tripod gait": right-front, right-back and left-middle together, then the other three), each leg on the ground half the time. The clock runs at <b>forward command ÷ 0.20 m</b> per second, never slower than 0.8 steps per second (below that the robot used to freeze) and never faster than 2.5; each episode starts at a random phase. Several rewards pay for following the clock (lift the toe on a half-sine during swing, sweep the hip backwards during stance, carry about one third of the body weight per planted foot).</p>
+      <p>When the robot is told to stand still, the clock stops and its 12 inputs are set to zero (the policy had learned to keep "swinging" legs lifted when it saw a frozen clock).</p>
+      <p><b>Planned removal in the depth stage (S2):</b> the clock inputs and every clock-based reward are removed together over the first 30 % of the stage (the clock is dropped for whole episodes, never step by step). Walking must then be held up by rewards that do not use the clock: the swing-height floor (toe must lift at least 4 cm) and the planted-foot stillness penalty, both already active.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ STAGES ============================ -->
+<section class="tab" id="tab-stages" data-tab="stages" hidden>
+  <div class="block">
+    <span class="eyebrow">Training plan</span>
+    <h2>Six training stages, each with pass/fail criteria</h2>
+    <p class="lede">Training is split into stages that add one difficulty at a time. Every comparison arm goes through the same stages with the
+      same budgets (fixed in simulator steps before the main runs), so differences between arms come from the method, not the recipe.
+      Budgets are fixed by a pilot run and then never used to stop an individual run early.</p>
+  </div>
+  <div class="timeline" id="stageList"></div>
+  <div class="card small block">
+    <h4>Batch size note</h4>
+    <p>The specification asks for 8,192 simulations × 16 steps per update in stages S0–S1. This project uses <b>4,096 × 16</b> (the size the original policy was trained with, and the compute limit; deviation D1). The camera stages will run with <b>N_v</b> simulations × <b>T_v</b> steps per update, at least 24,576 steps, for <i>every</i> arm including the blind ones, so no arm gets a different batch.</p>
+  </div>
+</section>
+
+<!-- ============================ ARMS ============================ -->
+<section class="tab" id="tab-arms" data-tab="arms" hidden>
+  <div class="block">
+    <span class="eyebrow">Comparison arms</span>
+    <h2>Seven versions of the robot's brain, compared under one recipe</h2>
+    <p class="lede">An "arm" is one version of the system trained and tested the same way as the others. Each arm differs from its neighbour by a small,
+      named set of changes, so each comparison answers exactly one question. The decisive pair is <b>F (the proposed method) vs B2</b>: they differ
+      only by the future prediction and its training signals. None of the arms beyond the shared blind trunk is built yet.</p>
+  </div>
+  <div class="arms" id="armCards"></div>
+  <div class="block">
+    <h3>Compare two arms</h3>
+    <div class="cmp-row">
+      <label for="armA" class="small">Arm</label><select id="armA"></select>
+      <label for="armB" class="small">against</label><select id="armB"></select>
+      <span class="small">Rows that differ are highlighted.</span>
+    </div>
+    <div class="tw"><table id="armCmp"></table></div>
+  </div>
+  <div class="block">
+    <h3>What each arm's policy sees (specification §2.9)</h3>
+    <div class="tw"><table id="layoutTable"></table></div>
+  </div>
+  <div class="grid2">
+    <div class="block"><h3>Which comparison answers which question</h3><div class="tw"><table id="questionTable"></table></div></div>
+    <div class="block"><h3>How results will be judged</h3>
+      <div class="card small"><ul class="clean">
+        <li><b>Paired seeds:</b> every arm (except B1-K) branches from the same blind-trunk seeds, so each F seed has a matching B2 seed.</li>
+        <li><b>Seeds:</b> B2 and F aim for 8 seeds each (never fewer than 5).</li>
+        <li><b>Main test:</b> a paired t-test on the per-seed difference F − B2, with a 95 % confidence interval.</li>
+        <li><b>Also reported:</b> a sign test, the interquartile mean with bootstrap confidence intervals, the probability that F beats B2, and every per-seed difference.</li>
+        <li><b>Evaluation size:</b> at least 200 episodes per test condition per seed, with deterministic actions and identical random conditions across arms.</li>
+        <li><b>What is measured:</b> the main behaviour measures are stride shortening and longer foot contact before slippery ground. The headline measures are how early the robot adapts (lead time) and the peak ground force.</li>
+        <li><b>Hardware:</b> the median seed of B0, B2 and F is tested on the real robot; B1-M is recommended too.</li>
+        <li><b>If compute runs short,</b> cut in this order: B3, then B1-K to 3 seeds, then B1-M to 3 seeds. The main camera stage is never shortened.</li>
+      </ul></div></div>
+  </div>
+  <div class="block"><h3>Possible outcomes and what each would mean (specification §11)</h3><div class="tw"><table id="falsTable"></table></div></div>
+</section>
+
+<!-- ============================ REWARDS ============================ -->
+<section class="tab" id="tab-rewards" data-tab="rewards" hidden>
+  <div class="block">
+    <span class="eyebrow">Rewards</span>
+    <h2>The final blind-trunk reward (23 terms + a fall penalty)</h2>
+    <p class="lede">The policy learns by maximising the sum of these terms, added up every 20 ms (each weight is multiplied by 0.02 s). Every change is
+      checked with a "reward economy" calculation before training: walking at the command must earn clearly more than standing still, which must
+      earn more than falling. Policies reliably find the cheapest behaviour the reward allows, so each term below exists because a specific
+      unwanted behaviour appeared without it.</p>
+  </div>
+  <div class="filters" id="rewardFilters"></div>
+  <div class="tw"><table id="rewardTable"></table></div>
+  <div class="card small block">
+    <h4>Changes on the way to the camera stages</h4>
+    <ul class="clean">
+      <li>All terms marked <b>clock</b> leave together with the rhythm clock over the first 30 % of the depth stage (S2). The swing-height floor and the planted-foot stillness penalty stay.</li>
+      <li>Known imperfection D30: the rear hip servos are asked to go past their ±55° limit slightly more often than in the standing-and-walking policy (0.026–0.029 vs 0.015 radians per step). It costs about 0.05 of roughly 40 reward per second and the servo simply clips it; to revisit when designing the S2 reward.</li>
+      <li>The "body part near ground" term (weight −30) is still active in the blind trunk: an older schedule was supposed to fade it out, but that schedule is switched off from S0a onward. Worth confirming it is intended.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================ PROGRESS ============================ -->
+<section class="tab" id="tab-progress" data-tab="progress" hidden>
+  <div class="block">
+    <span class="eyebrow">Progress</span>
+    <h2>From the first walking policy to the blind trunk</h2>
+    <p class="lede">Phase 1 produced a walking policy. Phase 2 rebuilt it into a policy that could run on the real robot (S0) and then into the shared
+      blind trunk (S1). Each step below lists what was tried, what went wrong, why, and what fixed it. Every number is from a recorded evaluation
+      (usually 256 or 1,024 episodes, deterministic actions).</p>
+  </div>
+
+  <details class="card" open><summary>Phase 1 — first walking policy (flat ground, simulated perfect motors)</summary>
+    <div class="block small">
+      <p>A reinforcement-learning environment with a rhythm clock produced a rough tripod gait on flat ground: pure body sensing, no history,
+      no randomisation, ideal motors (stiff 3 N·m joints, twice the real servo's stall torque) and the true body speed as an input. It is the policy
+      the paper calls <b>π_base</b>.</p>
+      <p>A 256-episode re-evaluation in Phase 2 found: forward speed 0.159 m/s (the earlier 0.209 m/s came from one 10-second run), 0 % falls,
+      feet on the ground 65 % of the time, and <b>two "crutch" legs</b>: the right-middle and right-rear legs lifted only 0.10–0.11 times per second
+      against about 0.8 for the others. Its reward was also dominated by a hip term that paid for buzzing back and forth rather than for pushing
+      the body forward.</p>
+    </div></details>
+
+  <details class="card" open><summary>Phase 2.0 — fixes and the first realistic policy (S0a), 2026-09-21</summary>
+    <div class="block">
+      <p class="small">Correctness fixes made before any new training: the toe position is computed from the leg geometry everywhere (it used a
+      fixed height that is only right at rest); the rhythm clock floor went from 0.2 to 0.8 steps per second with a random start phase; the
+      contradictory hip rewards were replaced by one signed term; the gait's "half the time on the ground" setting was given a single
+      source; the per-foot force target was corrected from 4 N to one third of the real weight (the robot weighs 3.22 kg, not 1.2 kg); friction
+      between foot and ground now multiplies (the simulator's default averages them); a 0.15 kg camera mast was added to every arm.</p>
+      <div id="storyS0a" class="block"></div>
+      <div class="tw"><table>
+        <thead><tr><th>Result, 256 episodes</th><th class="n">Original policy (Phase 1)</th><th class="n">π_S0a (realistic servos)</th></tr></thead>
+        <tbody>
+          <tr><td>Falls</td><td class="n">0 %</td><td class="n good">0 %</td></tr>
+          <tr><td>Forward speed</td><td class="n">0.159 m/s</td><td class="n">0.291 m/s</td></tr>
+          <tr><td>Share of time a foot is on the ground (target 0.5)</td><td class="n">0.648</td><td class="n good">0.487</td></tr>
+          <tr><td>Steps per second, per leg (RF RM RB LF LM LB)</td><td class="n">0.81 0.10 0.11 0.82 0.81 0.82</td><td class="n good">1.49 1.50 1.48 1.49 1.49 1.49</td></tr>
+          <tr><td>Toe lift height (quartiles; target 3.8 cm)</td><td class="n">5.4 / 8.4 / 11.2 cm</td><td class="n">3.7 / 3.8 / 3.9 cm</td></tr>
+          <tr><td>Fast hip vibration (power above 5 Hz)</td><td class="n">0.183</td><td class="n good">0.134</td></tr>
+          <tr><td>Speed-estimate error</td><td class="n">—</td><td class="n">0.031 m/s</td></tr>
+        </tbody></table></div>
+      <p class="src">π_S0a: logs/rsl_rl/hexapod_s0a/2026-09-21_16-43-30_s0a_seed42_r4_from_r3/model_4498.pt. This lineage was later superseded (see S0b).</p>
+    </div></details>
+
+  <details class="card" open><summary>Phase 2.1 — commands, standing, terrain, randomisation (S0b), 2026-09-21 → 2026-09-24</summary>
+    <div class="block">
+      <p class="small">S0b added speed and turning commands, a stand-still mode, the terrain curriculum, full randomisation and left–right mirror
+      training (every experience is also learned in its mirror image, so the policy cannot become lopsided). It was first trained by continuing
+      from π_S0a in 14 successive runs; each fixed one problem.</p>
+      <div class="tw"><table id="lineageTable"></table></div>
+
+      <h4>The control arm that changed the plan</h4>
+      <p class="small">The specification requires one run from a random start with the same setup, to check whether continuing from the old policy
+      is worth it. If the random start reaches the pass criteria within 1.2 × the effort of the continued lineage (26,596 iterations), the
+      continuation is dropped for every arm. It reached them at <b>8,000 iterations (0.30 ×)</b>, and it turned symmetrically where the continued
+      lineage never could, which showed the lopsidedness was inherited from the Phase 1 policy.</p>
+      <div class="grid2">
+        <div class="tw"><table>
+          <thead><tr><th class="n">Iteration</th><th class="n">Falls</th><th class="n">Stride error at 0.10 m/s</th><th class="n">Turning, left / right (of 0.3 rad/s)</th><th class="n">Standing: feet down</th></tr></thead>
+          <tbody><tr><td class="n">4,000</td><td class="n">0 %</td><td class="n bad">−36 %</td><td class="n">+0.064 / −0.063</td><td class="n">0.90</td></tr>
+          <tr><td class="n">8,000</td><td class="n">0 %</td><td class="n good">−4.9 %</td><td class="n">+0.187 / −0.191</td><td class="n">0.97</td></tr>
+          <tr><td class="n">18,750</td><td class="n">0 %</td><td class="n good">−1.8 %</td><td class="n">+0.257 / −0.254</td><td class="n">0.95</td></tr></tbody></table></div>
+        <div class="card chart"><div class="eyebrow">Random-start run: stride error at 0.10 m/s vs the ±10 % pass band</div><div id="chartControl"></div></div>
+      </div>
+      <p class="small"><b>Consequence (2026-09-23):</b> no arm starts from the Phase 1 policy, and the planned "stay close to the old policy" penalty (a Kullback–Leibler anchor) is dropped. The old lineage is kept for the record.</p>
+
+      <h4>Gait corrections that the pass/fail tests did not catch</h4>
+      <p class="small">The first from-scratch policy passed every test, yet videos showed the middle and rear feet tucked almost under the hips,
+      toes swinging in and out in the air, and legs passing through each other (the simulator does not collide a leg with its neighbour).
+      New probes measured each problem, and the standing-and-walking policy was retrained from scratch with three new reward terms.</p>
+      <div id="storyGait" class="block"></div>
+
+      <h4>Final standing-and-walking policy <span class="sym">π_S0</span></h4>
+      <div class="grid2">
+        <div class="tw"><table>
+          <thead><tr><th>Pass/fail test (1,024 episodes × 17 conditions)</th><th>Result</th><th>Required</th></tr></thead>
+          <tbody>
+            <tr><td>Falls</td><td class="good">0 in 17,408 episodes</td><td>≤ 5 %</td></tr>
+            <tr><td>Speed-tracking error (averaged over a stride)</td><td class="good">≤ 0.0046 m/s</td><td>≤ 0.03 m/s</td></tr>
+            <tr><td>Stride length error at 0.10 m/s (terrain levels 0/5/9)</td><td class="good">+1.0 / +0.3 / −0.7 %</td><td>± 10 %</td></tr>
+            <tr><td>Stride length error at 0.15 m/s</td><td class="good">−0.2 / −0.6 / −1.4 %</td><td>± 10 %</td></tr>
+            <tr><td>With vs without dropped sensor readings</td><td class="good">equal</td><td>no worse than +5 %</td></tr>
+            <tr><td>Turning on the spot at ±0.3 rad/s (own test)</td><td class="good">+0.321 / −0.311</td><td>error ≤ 0.05</td></tr>
+            <tr><td>Standing still: feet down / drift in 10 s</td><td>0.97 / 0.8 cm</td><td>—</td></tr>
+          </tbody></table></div>
+        <div class="card chart"><div class="eyebrow">Training reward at each 2,000-iteration review (stopped when the gain fell below 1.5 %)</div><div id="chartReturn"></div></div>
+      </div>
+      <div class="tw"><table id="oldNewTable"></table></div>
+      <p class="small">Terrain test (180 cells × 128 episodes): all 108 training-difficulty cells pass with 0 falls; on the held-out harder levels
+      15–20, 50 of 72 cells pass and the failures are shortened strides, never falls (rough ground from level 16; uphill slopes and stairs from 18–19).</p>
+      <p class="src">π_S0: logs/rsl_rl/hexapod_s0b/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/model_12200.pt · 12,214 iterations, 7.3 hours.</p>
+    </div></details>
+
+  <details class="card" open><summary>Phase 2.2 — the blind trunk (S1), 2026-09-24 → today</summary>
+    <div class="block">
+      <p class="small">Built: ground materials that vary by location; the body-sensing encoder; the velocity and foot-force estimator; the physics quiz;
+      the 1,125-number policy input and the 683-number critic contract; a training loop that also trains the helpers; and the tests that guard
+      which signal may change which part. Collecting experience first took 5.9 s per iteration; after making the material patches visual-only
+      (the physics uses one ground mesh) and running the encoder at half precision it takes 4.0 s.</p>
+      <div id="storyS1" class="block"></div>
+      <div class="grid2">
+        <div class="card chart"><div class="eyebrow">Closest gap between neighbouring legs (cm) at each review — below 0 means legs overlap</div><div id="chartGap"></div></div>
+        <div class="card small block">
+          <h4>Three pilot runs (seed 42, 50-step memory window)</h4>
+          <ul class="clean">
+            <li><b>Pilot 1:</b> passed every test, but legs crept together (gap down to −0.6 cm) and the toe lift sank to 3.5–4.0 cm. Stopped at 8,650 to diagnose.</li>
+            <li><b>Pilot 2:</b> leg-proximity penalty ×4 (−1,600) and swing-height floor raised to 4 cm. Clearance held (+0.8 to +1.3 cm). The reward gain dropped below 1.5 % at 8,000, which <b>fixed the blind-trunk budget at 8,000 iterations</b>. Front legs still drifted inward.</li>
+            <li><b>Pilot 3 (accepted):</b> toe-lift target 4 cm and a separate 10 cm landing target for the front legs. A pre-declared watch rule stopped it at 4,500 (rear hips hitting their limit, lift overshooting); resumed after review and finished at 8,000.</li>
+          </ul></div>
+      </div>
+      <div class="tw"><table id="pilotTable"></table></div>
+      <p class="src">Accepted configuration: logs/rsl_rl/hexapod_s1/2026-09-26_19-41-49_s1_pilot3_seed42_resume4500/model_7999.pt (counts as seed 42, window 50).</p>
+      <h4>Since acceptance (status only; no results written up yet)</h4>
+      <div class="tw"><table id="sinceTable"></table></div>
+    </div></details>
+
+  <details class="card"><summary>Deviations from the specifications (D1–D30)</summary>
+    <div class="block">
+      <label for="devSearch" class="small">Filter</label>
+      <input id="devSearch" type="search" class="btn" style="cursor:text;max-width:22rem" placeholder="e.g. friction, standing, S1">
+      <div class="tw"><table id="devTable"></table></div></div></details>
+
+  <details class="card"><summary>Lessons learned (checklist for the camera stages)</summary>
+    <ol class="clean small" id="lessons" style="padding-left:1.3rem"></ol></details>
+</section>
+
+<!-- ============================ OPEN ============================ -->
+<section class="tab" id="tab-open" data-tab="open" hidden>
+  <div class="block">
+    <span class="eyebrow">Open items &amp; risks</span>
+    <h2>What is blocked, unmeasured or inconsistent</h2>
+  </div>
+  <div class="grid2">
+    <div class="block"><h3>Blocked or gating</h3><div class="card small"><ul class="clean" id="blockedList"></ul></div></div>
+    <div class="block"><h3>Bench measurements still needed <span class="pill measure">Measure later</span></h3><div class="card small"><ul class="clean" id="benchList"></ul></div></div>
+  </div>
+  <div class="block"><h3>Inconsistencies found while preparing this dashboard</h3><div class="tw"><table id="inconsTable"></table></div></div>
+  <div class="block"><h3>Known risks</h3><div class="card small"><ul class="clean" id="riskList"></ul></div></div>
+</section>
+
+<!-- ============================ GLOSSARY ============================ -->
+<section class="tab" id="tab-glossary" data-tab="glossary" hidden>
+  <div class="block">
+    <span class="eyebrow">Glossary</span>
+    <h2>Every short form used in the project</h2>
+    <label for="glSearch" class="small">Search</label>
+    <input id="glSearch" type="search" class="btn" style="cursor:text;max-width:24rem" placeholder="Type a symbol or a word">
+    <p class="small" id="glCount"></p>
+  </div>
+  <dl class="gl card" id="glossaryList"></dl>
+</section>
+</main>
+<div id="tip" role="tooltip"></div>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pill = (k, t) => `<span class="pill ${k}">${t}</span>`;
+const table = (el, head, rows, numCols = []) => {
+  el.innerHTML = `<thead><tr>${head.map((h, i) => `<th${numCols.includes(i) ? ' class="n"' : ""}>${h}</th>`).join("")}</tr></thead>` +
+    `<tbody>${rows.map(r => `<tr${r._cls ? ` class="${r._cls}"` : ""}>${(r.cells || r).map((c, i) => `<td${numCols.includes(i) ? ' class="n"' : ""}>${c}</td>`).join("")}</tr>`).join("")}</tbody>`;
+};
+
+/* ---------------- theme ---------------- */
+const themeBtn = $("#themeBtn"); const modes = ["system", "light", "dark"];
+let theme = "system"; try { theme = localStorage.getItem("hx-theme") || "system"; } catch (e) {}
+const applyTheme = () => { if (theme === "system") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", theme); themeBtn.textContent = "Theme: " + theme; };
+themeBtn.addEventListener("click", () => { theme = modes[(modes.indexOf(theme) + 1) % 3]; try { localStorage.setItem("hx-theme", theme); } catch (e) {} applyTheme(); });
+applyTheme();
+
+/* ---------------- tabs ---------------- */
+const tabs = ["overview","robot","architecture","stages","arms","rewards","progress","open","glossary"];
+function showTab(name) {
+  if (!tabs.includes(name)) name = "overview";
+  document.querySelectorAll("section.tab").forEach(s => s.hidden = s.dataset.tab !== name);
+  document.querySelectorAll("#tabs a").forEach(a => a.getAttribute("href") === "#" + name ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+}
+window.addEventListener("hashchange", () => { showTab(location.hash.slice(1)); window.scrollTo(0, 0); });
+showTab(location.hash.slice(1));
+
+/* ---------------- tooltip ---------------- */
+const tip = $("#tip");
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.style.display = "none"; return; }
+  tip.innerHTML = t.getAttribute("data-tip"); tip.style.display = "block";
+  const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  tip.style.left = x + "px"; tip.style.top = (e.clientY + 16) + "px";
+});
+
+/* ---------------- overview ---------------- */
+const status = [
+  ["done","Phase 1","First walking policy (flat, ideal motors)"],
+  ["done","Phase 2.0 · S0a","Fixes + realistic servos"],
+  ["done","Phase 2.1 · S0b","Commands, terrain, standing, randomisation"],
+  ["progress","Phase 2.2 · S1","Blind trunk accepted; memory-window sweep and seeds running"],
+  ["blocked","S1b","Waiting on the camera-simulation capacity test"],
+  ["planned","S2","Depth camera stage"],
+  ["planned","S3","Depth + colour stage (main)"],
+  ["planned","Hardware","Real-robot tests"]];
+$("#statusStrip").innerHTML = status.map(([k, t, d]) => `<div class="st ${k}"><b>${t}</b><span>${d}</span>${pill(k === "done" ? "done" : k, k === "done" ? "Done" : k === "progress" ? "In progress" : k === "blocked" ? "Blocked" : "Planned")}</div>`).join("");
+const crit = [
+  ["Correctness fixes in the code (critic contract, sequence buffer, physics-quiz loss, clock-free floor rewards, routing tests)","done"],
+  ["Static torque check of the resting pose","done"],
+  ["Widen the policy input without changing its behaviour (0.000001 test)","done"],
+  ["S0a / S0b and the random-start control arm","done"],
+  ["Blind trunk: seeds, memory-window sweep, velocity estimator must pass its tests","progress"],
+  ["Headroom test: Oracle vs Blind — does knowing the ground ahead help at all?","planned"],
+  ["One-day bench session: camera minimum depth, mount at 45–50°, drop rate, prediction age, rolling-shutter timing","planned"],
+  ["Fix the renderer mode, run artefact tests, measure camera-simulation capacity","planned"],
+  ["Depth-hole bench test and the visual-detectability check","planned"],
+  ["One-seed pilot of B2 and F to fix the stage budgets","planned"],
+  ["Depth stage (S2) and main camera stage (S3) for every arm","planned"],
+  ["Real-robot tests","planned"]];
+$("#critPath").innerHTML = crit.map(([t, k]) => `<li class="${k === "progress" ? "cur" : ""}"><span>${t}</span>${pill(k, k === "done" ? "Done" : k === "progress" ? "Now" : "Planned")}</li>`).join("");
+
+/* ---------------- robot ---------------- */
+table($("#robotFacts"), ["Item","Value"], [
+  ["Legs and joints","6 legs × 3 servos = 18 joints: hip (coxa), upper leg (femur), lower leg (tibia)"],
+  ["Leg order","right-front, right-middle, right-back, left-front, left-middle, left-back (checked when the simulation starts)"],
+  ["Leg segment lengths","hip → upper-leg joint 5.3 cm; upper-leg joint → knee 6.0 cm; knee → toe 9.5 cm forward and 9 cm down"],
+  ["Body","about 25 cm long, 13–20 cm wide, ≈ 13–14 cm of clearance under the belly"],
+  ["Mass","3.22 kg + 0.15 kg camera mast + random payload 0.1–1.0 kg"],
+  ["Resting pose","hip 0°, upper leg +30°, lower leg +30°; standing height ≈ 0.17 m"],
+  ["Joint limits","hip ±55°, upper leg −98° to +90°, lower leg −45° to +125°"],
+  ["Action","18 joint targets = resting pose + 0.5 × policy output (radians), clipped to the limits"],
+  ["Rates","control 50 per second; physics 200 per second"],
+  ["Sensors","18 servo positions, inertial sensor (acceleration, rotation rate, gravity direction); planned: Intel RealSense D435 depth + colour camera"],
+  ["Onboard computer","NVIDIA Jetson Orin Nano (8 GB)"]]);
+table($("#terrainTable"), ["Type","Share","Hardest training level (14)","Held-out level 20"], [
+  ["Flat","15 %","—","—"],["Rough","20 %","± 2.25 cm","± 3.0 cm"],["Slope down","15 %","15°","≈ 19.7°"],["Slope up","15 %","15°","≈ 19.7°"],
+  ["Bumps","15 %","up to 3 cm","4 cm"],["Stairs down","10 %","3 cm steps, 0.3 m treads","4 cm"],["Stairs up","10 %","3 cm steps","4 cm"]]);
+table($("#materialTable"), ["Material","Grip (static friction)","Softness","Shiny"], [
+  ["Concrete","0.8–1.0","rigid","no"],["Rubber mat","0.9–1.1","20,000–50,000 N/m","no"],["Teflon (PTFE)","0.2–0.3","rigid","no"],
+  ["Talc / graphite","0.25–0.4","rigid","no"],["Dry dust","0.35–0.5","rigid","no"],["Foam","0.7–0.9","2,000–8,000 N/m","no"],
+  ["Wet tile","0.2–0.35","rigid","yes"],["Wet rubber","0.6–0.8","10,000–30,000 N/m","yes"],["Glossy grit","0.9–1.1","rigid","yes"],["Polished coating","0.8–1.0","rigid","yes"]]);
+$("#drList").innerHTML = [
+  "Foot damping 10–200 N·s/m (per simulation, fixed for the run).",
+  "Payload 0.1–1.0 kg on the body, centre of mass shifted ±1 cm.",
+  "Servo strength ×0.9–1.1, compliance slope 16 / 32 / 64, gear play 0.3–1.0°, joint friction up to 0.05 N·m, bus delay 5–10 ms.",
+  "Dropped-reading rate scaled ×0.5–2 per episode (blind trunk onward).",
+  "Inertial-sensor noise (acceleration 0.05 m/s², rotation 0.02 rad/s) plus a fixed bias per episode.",
+  "Start position ±0.5 m, random heading, joints ±0.25 rad from rest.",
+  "Before the blind trunk: one random foot material per simulation (grip 0.3–1.1, half of them soft)."].map(x => `<li>${x}</li>`).join("");
+
+/* ---------------- architecture diagram ---------------- */
+const C = [20, 250, 480, 720, 960], W = 190, H = 58;
+const N = {
+  joints:{c:0,y:280,s:"built",t:"Joint position sensors",t2:"18 servo readings"},
+  imu:{c:0,y:352,s:"built",t:"Inertial sensor",t2:"acceleration · rotation · gravity"},
+  cmd:{c:0,y:424,s:"built",t:"Speed & turning command",t2:"3 numbers"},
+  clock:{c:0,y:496,s:"built",t:"Rhythm clock",t2:"removed in stage S2"},
+  frame:{c:1,y:316,s:"built",t:"Per-step body reading",t2:"111 numbers"},
+  enc:{c:2,y:280,s:"built",t:"Body-sensing encoder",t2:"last 1 s → 64 numbers"},
+  vel:{c:2,y:370,s:"built",t:"Velocity & force estimator",t2:"15 numbers"},
+  v0:{c:2,y:460,s:"retired",t:"Old velocity estimator",t2:"phased out in S1"},
+  policy:{c:4,y:330,s:"built",t:"Walking policy (actor)",t2:"1,125 numbers in"},
+  servos:{c:4,y:440,s:"built",t:"18 joint targets",t2:"to the servos"},
+  cam:{c:0,y:60,s:"planned",t:"Depth + colour camera",t2:"RealSense D435, 30 per s"},
+  venc:{c:1,y:60,s:"planned",t:"Vision encoder",t2:"image → 8 × 6 feature grid"},
+  fah:{c:2,y:20,s:"planned",t:"Foothold prediction",t2:"front feet: where & when"},
+  look:{c:2,y:105,s:"planned",t:"Feature lookup",t2:"image features at foothold"},
+  mem:{c:2,y:190,s:"planned",t:"Contact memory",t2:"last 4 front-leg contacts"},
+  pred:{c:3,y:105,s:"planned",t:"Future body-sensing predictor",t2:"+60 · +200 · +400 ms"},
+  probes:{c:1,y:600,s:"built",t:"Physics quiz heads",t2:"186 answers, sim only"},
+  contract:{c:3,y:600,s:"built",t:"Privileged contract",t2:"683 true values"},
+  critic:{c:4,y:600,s:"built",t:"Critic (value judge)",t2:"simulator only"},
+  ema:{c:2,y:600,s:"planned",t:"Slow encoder copy",t2:"answer key for predictor"},
+  inv:{c:0,y:600,s:"planned",t:"Action-recovery head",t2:"guards against collapse"}
+};
+const E = [
+  ["joints","frame"],["imu","frame"],["clock","frame"],["frame","enc"],["enc","vel"],["frame","v0"],
+  ["frame","policy"],["enc","policy"],["vel","policy"],["v0","policy"],["cmd","policy"],["policy","servos"],
+  ["cam","venc",1],["venc","fah",1],["venc","look",1],["fah","look",1],["enc","fah",1],["vel","fah",1],["look","pred",1],["mem","pred",1],
+  ["enc","pred",1],["enc","mem",1],["pred","policy",1],["look","policy",1],
+  ["enc","probes","t"],["pred","probes","t2"],["contract","critic","t"],["policy","critic","t"],["pred","ema","t2"],["ema","inv","t2"]
+];
+const D = {
+  joints:{p:"The 18 servo position readings, 50 times a second, 0.29° resolution. A reading can fail; then the last good value is repeated and flagged.",i:"servo bus",o:"18 angles + 18 fresh-reading flags",l:"—",r:"Yes",st:"Built (servo model in the simulator; real robot later)"},
+  imu:{p:"Inertial measurement unit: senses acceleration, rotation rate and which way is down. The main early warning of a slip.",i:"—",o:"3 + 3 + 3 numbers",l:"—",r:"Yes",st:"Built (simulated with noise and bias)"},
+  cmd:{p:"What the operator asks for: forward speed, sideways speed and turning rate.",i:"operator / training schedule",o:"3 numbers",l:"—",r:"Yes",st:"Built"},
+  clock:{p:"Training scaffolding: a sine/cosine phase per leg that says when each leg should swing. It sets the step rhythm from the forward command (command ÷ 0.20 m, at least 0.8 steps per second). It stops and reads zero when standing, and is removed over the first 30 % of stage S2.",i:"forward command",o:"12 numbers",l:"—",r:"No (removed before the camera stages end)",st:"Built; removal planned"},
+  frame:{p:"One snapshot of everything the body feels in one control step: joint angles, joint speeds (from two readings 40 ms apart), how far each joint is from its target (a stand-in for load), the last action, inertial readings, the clock and the fresh-reading flags.",i:"sensors",o:"111 numbers (99 once the clock is gone)",l:"—",r:"Yes",st:"Built"},
+  enc:{p:"Summarises the last second of body readings (50 snapshots) into 64 numbers that describe how the robot is moving and what the ground feels like. Technically a temporal convolution network: 4 layers that look further back each time (1, 2, 4, 8 steps), covering 61 steps.",i:"last 50 per-step body readings",o:"64-number body-sensing summary (z_p)",l:"Velocity estimation, the physics quiz and a spread-keeping loss (VICReg). Planned for F: future-prediction and action-recovery losses. Never changed by the reinforcement-learning signal.",r:"Yes",st:"Built (stage S1); window of 25 / 50 / 75 steps being compared"},
+  vel:{p:"Estimates how fast the body is really moving and how hard each foot pushes. It starts from pure leg geometry (planted feet move backwards as fast as the body moves forwards) and learns a correction, which becomes a slip estimate. Had to pass two tests before the policy could use it: error while slipping under 3 × the error on firm ground, and at least 1.5 × worse when the inertial sensor is blanked.",i:"body-sensing summary + leg geometry",o:"body speed (3) + normal and sideways force per foot (12) = 15 numbers (ê)",l:"Compared with the true speed and forces in the simulator (sliding samples weighted more).",r:"Yes",st:"Built; passed its tests at iteration ≈ 400 of every pilot"},
+  v0:{p:"A small network used in S0 to estimate speed from the last 5 body readings. Frozen in S1 and switched off whole episodes at a time, with probability rising 0 → 1 over 1,000 iterations. Its 3 inputs remain in the layout, always zero afterwards.",i:"last 5 body readings",o:"3 numbers",l:"Frozen",r:"No",st:"Retired during S1 (≈ iteration 2,400)"},
+  policy:{p:"The walking brain: turns everything it is allowed to see into 18 joint targets, 50 times a second. The same network shape for every arm; only the allowed inputs differ. 3 hidden layers of 256, 128 and 64 units.",i:"1,125 numbers (unused blocks held at zero)",o:"18 joint targets",l:"Reinforcement learning (proximal policy optimisation, PPO) from the reward.",r:"Yes (CPU, full precision)",st:"Built"},
+  servos:{p:"Joint target = resting pose + 0.5 × policy output, clipped to the servo limits; sent in one broadcast write.",i:"policy output",o:"servo commands",l:"—",r:"Yes",st:"Built"},
+  cam:{p:"Intel RealSense D435 on a mast, about 22 cm up and tilted 45–50° down. Depth is aligned to the colour image, resized to 128 × 96 without cropping. Colour uses a rolling shutter that smears during fast turns, and shiny surfaces create holes in the depth image; both are simulated.",i:"—",o:"colour (3) + inverse depth (1) + depth-valid flag (1) channels",l:"—",r:"Yes",st:"Planned (S2 depth only, S3 colour added)"},
+  venc:{p:"Turns each camera image into an 8 × 6 grid of feature vectors plus one summary vector. Four image-shrinking layers followed by 3 attention layers.",i:"128 × 96 image, 5–6 channels",o:"8 × 6 × 64 feature grid + 64-number summary",l:"Indirectly, through the prediction and quiz losses of each arm.",r:"Yes (8-bit integer precision on the GPU)",st:"Planned"},
+  fah:{p:"Foothold anticipation head: predicts where each front foot will land, when, and how sure it is. It is not given the clock, so it must work out the gait phase from the body-sensing summary.",i:"body-sensing summary, command, velocity estimate, foot positions",o:"per front leg: landing point (3), time to landing (1), uncertainty",l:"Compared with the true touchdown recorded by the simulator's contact sensor.",r:"Yes",st:"Planned (arms B2, F, B3)"},
+  look:{p:"Projects each predicted landing point into the camera image and reads the image features there, blurred by the uncertainty. A small learned nudge (±2 grid cells) corrects calibration error. A flag switches the reading off if the point is outside the image, too close, hidden by a leg or too uncertain.",i:"feature grid + predicted foothold",o:"64 features + valid flag per front leg",l:"—",r:"Yes",st:"Planned"},
+  mem:{p:"Stores what the body felt at the last 4 front-leg touchdowns per side, so the middle and rear legs can anticipate ground they cannot see. Marked optional: removed if it shows no effect.",i:"body-sensing summary at each front touchdown",o:"≈ 8 tokens of 64 numbers",l:"—",r:"Yes",st:"Planned"},
+  pred:{p:"The core of the proposed method: predicts the 64-number body-sensing summary 60, 200 and 400 ms ahead, given the image features at the footholds, the current body state, the held action and the contact memory. Three attention layers. In arm B2 the same block exists but its outputs have no time meaning and are not trained to predict the future.",i:"foothold features, image summary, body-sensing summary, action, command, velocity, uncertainty, contact memory",o:"three 64-number predictions (ẑ)",l:"Future-prediction loss against the slow encoder copy, plus the action-recovery loss.",r:"Yes (half precision on the GPU)",st:"Planned (arm F; B3 predicts raw readings instead)"},
+  probes:{p:"A physics quiz used only in training: small networks must read, from the body-sensing summary, the current contact state, grip and softness under each foot and the local ground heights, plus where and when each foot will land next and what material is there. Answering well forces the encoder to learn about the ground. Each answer comes with its own uncertainty (β-weighted likelihood, β = 0.5). Same quiz and same weight for every arm (except B1-K).",i:"body-sensing summary (planned: the three predictions)",o:"84 current + 102 next-touchdown answers = 186",l:"Compared with simulator truth; statistics fixed from a run of the standing-and-walking policy.",r:"No",st:"Built"},
+  contract:{p:"The critic's cheat sheet, identical for every arm: true body speed and height, true foot forces and contacts, the true grip/softness of 24 points ahead of each leg, a 77-point height scan and the randomised robot settings.",i:"simulator truth",o:"683 numbers",l:"—",r:"No",st:"Built"},
+  critic:{p:"Judges how good the current situation is, which makes reinforcement learning much more efficient. A separate network (3 layers: 512, 256, 128) that sees a frozen copy of the policy's input plus the contract. It never shares parts with the policy.",i:"1,125 + 683 = 1,808 numbers",o:"one value",l:"Predicts the future reward.",r:"No",st:"Built"},
+  ema:{p:"A slowly-updated copy of the body-sensing encoder (exponential moving average, momentum 0.996 → 0.9999). Its output on future readings is the 'answer key' the predictor is graded against; a slow copy prevents the two from agreeing on a trivial answer.",i:"future body readings",o:"target summaries",l:"Not trained directly; follows the encoder slowly.",r:"No",st:"Planned (arm F)"},
+  inv:{p:"Must recover the action taken from the current summary and a future summary. This keeps the summaries meaningful (they cannot collapse to a constant) and is what distinguishes arm F from arm B2 along with the future prediction.",i:"current + future summaries",o:"18 actions",l:"Compared with the action actually taken.",r:"No",st:"Planned (arm F)"}
+};
+function drawArch() {
+  const vb = [1170, 680]; const pos = k => ({ x: C[N[k].c], y: N[k].y });
+  let s = `<svg viewBox="0 0 ${vb[0]} ${vb[1]}" role="img" aria-label="Architecture block diagram">`;
+  s += `<rect class="band planned-only" x="6" y="8" width="${vb[0]-12}" height="252" rx="8"/><text class="bandlabel planned-only" x="20" y="250">PLANNED CAMERA PATH (30 PER SECOND)</text>`;
+  s += `<text class="bandlabel" x="20" y="274">BODY-SENSING PATH (50 PER SECOND)</text>`;
+  s += `<rect class="band" x="6" y="572" width="${vb[0]-12}" height="100" rx="8"/><text class="bandlabel" x="20" y="590">TRAINING-ONLY HELPERS (SIMULATOR, REMOVED ON THE ROBOT)</text>`;
+  for (const [a, b, kind] of E) {
+    const A = pos(a), B = pos(b); let d;
+    if (N[b].y >= 580 || N[a].y >= 580) {
+      const x1 = A.x + W / 2, y1 = N[a].y >= 580 && N[b].y >= 580 ? A.y + H / 2 : A.y + H, x2 = B.x + W / 2, y2 = N[a].y >= 580 && N[b].y >= 580 ? B.y + H / 2 : B.y;
+      d = N[a].y >= 580 && N[b].y >= 580 ? `M${x1 + (x2 > x1 ? W/2 : -W/2)},${y1} L${x2 + (x2 > x1 ? -W/2 : W/2)},${y2}` : `M${x1},${y1} C${x1},${(y1+y2)/2} ${x2},${(y1+y2)/2} ${x2},${y2}`;
+    } else if (C[N[a].c] === C[N[b].c]) {
+      const x = A.x + W; d = `M${x},${A.y + H/2} C${x+30},${A.y+H/2} ${x+30},${B.y+H/2} ${x},${B.y+H/2}`;
+    } else {
+      const x1 = A.x + W, y1 = A.y + H / 2, x2 = B.x, y2 = B.y + H / 2, m = (x1 + x2) / 2;
+      d = `M${x1},${y1} C${m},${y1} ${m},${y2} ${x2},${y2}`;
+    }
+    const planned = kind === 1 || N[a].s === "planned" || N[b].s === "planned";
+    const cls = kind === "t" || kind === "t2" ? "edge train" : planned ? "edge planned" : "edge";
+    s += `<path class="${cls}${planned ? " planned-only" : ""}" d="${d}" marker-end="url(#arr)"/>`;
+  }
+  for (const k in N) {
+    const n = N[k], x = C[n.c];
+    s += `<g class="node ${n.s}${n.s === "planned" ? " planned-only" : ""}" data-k="${k}" tabindex="0" role="button" aria-label="${esc(n.t)}">` +
+      `<rect x="${x}" y="${n.y}" width="${W}" height="${H}" rx="6"/>` +
+      `<text x="${x + 10}" y="${n.y + 24}">${esc(n.t)}</text><text class="t2" x="${x + 10}" y="${n.y + 43}">${esc(n.t2)}</text></g>`;
+  }
+  s += `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/></marker></defs></svg>`;
+  $("#archCanvas").innerHTML = s;
+  $("#archCanvas").querySelectorAll(".node").forEach(g => {
+    g.addEventListener("click", () => selectNode(g.dataset.k));
+    g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectNode(g.dataset.k); } });
+  });
+}
+function selectNode(k) {
+  $("#archCanvas").querySelectorAll(".node").forEach(g => g.classList.toggle("sel", g.dataset.k === k));
+  const n = N[k], d = D[k];
+  $("#archDetail").innerHTML = `<div class="eyebrow">Component</div><h3>${esc(n.t)}</h3><div>${pill(n.s, n.s === "built" ? "Built" : n.s === "planned" ? "Planned" : "Retired")}</div>
+   <dl><div><dt>What it does</dt><dd>${d.p}</dd></div><div><dt>Takes in</dt><dd>${d.i}</dd></div><div><dt>Gives out</dt><dd>${d.o}</dd></div>
+   <div><dt>How it learns</dt><dd>${d.l}</dd></div><div><dt>Kept on the real robot?</dt><dd>${d.r}</dd></div><div><dt>Status</dt><dd>${d.st}</dd></div></dl>`;
+}
+drawArch(); selectNode("enc");
+$("#plannedToggle").addEventListener("click", e => {
+  const on = e.currentTarget.getAttribute("aria-pressed") === "true";
+  e.currentTarget.setAttribute("aria-pressed", String(!on));
+  e.currentTarget.textContent = on ? "Showing: built only" : "Showing: full planned system";
+  $("#archCanvas").classList.toggle("hide-planned", on);
+});
+
+/* policy input bar */
+const actor = [
+  ["Per-step body reading","o_p",111,"live","joint angles, joint speeds, distance to target, last action, inertial readings, clock, fresh-reading flags","every arm"],
+  ["Old velocity estimate","V_0",3,"old","phased out during S1; zero afterwards","history"],
+  ["Speed & turning command","twist_cmd",3,"live","what the operator asks for","every arm"],
+  ["Body-sensing summary","z_p",64,"live","64-number summary of the last second","all but B1-K"],
+  ["Velocity & force estimate","ê",15,"gated","used once the estimator passed its tests","every arm"],
+  ["True ground material ahead","M*",576,"zero","grip, softness and damping at 24 points ahead of each leg; the 'cheat' only the Oracle arm gets","O only"],
+  ["Scene and foot summaries (KiVi style)","z_s, z_F",20,"zero","from the re-implemented competitor's memory module","B1-M (B1-K own layout)"],
+  ["Three output tokens","ẑ or u",192,"zero","F: predicted future body summaries; B2: fused features without time meaning","B2, F, B3"],
+  ["Front-foothold image features","v_ℓ ⊙ m_ℓ",128,"zero","image features at the predicted front footholds","B2, F, B3"],
+  ["Foothold valid flags","m_ℓ",2,"zero","is the looked-up feature usable","B2, F, B3"],
+  ["Foothold uncertainty","σ̂_ℓ",8,"zero","how sure the foothold prediction is","B2, F, B3"],
+  ["Remaining look-ahead","rem",3,"zero","how much of each prediction's 60 / 200 / 400 ms is left, given its age","camera arms"]];
+const totalA = actor.reduce((a, r) => a + r[2], 0);
+$("#actorBar").innerHTML = actor.map(r => `<div class="${r[3]}" style="flex:${r[2]}" data-tip="<b>${esc(r[0])}</b> (${r[2]})<br>${esc(r[4])}"></div>`).join("");
+const stTxt = { live: pill("built","live"), gated: pill("progress","after gate"), old: pill("retired","phased out"), zero: pill("planned","zero until later") };
+table($("#actorTable"), ["Block","Symbol","Numbers","Today","What it is","Used by"], actor.map(r => [r[0], `<span class="sym">${r[1]}</span>`, r[2], stTxt[r[3]], r[4], r[5]]), [2]);
+console.assert(totalA === 1125, "actor total", totalA);
+const contract = [["True body speed",3],["True height above the ground",1],["Foot force, along and across the ground",12],["Foot contact on/off",6],["True ground material at 24 points ahead of each leg",576],["Height scan, 11 × 7 points 5 cm apart",77],["Randomised robot settings (servo strength, slope, mass, centre of mass, delay, drop rate)",8]];
+$("#contractBar").innerHTML = contract.map((r, i) => `<div class="live" style="flex:${r[1]};opacity:${1 - i * 0.1}" data-tip="<b>${esc(r[0])}</b> (${r[1]})"></div>`).join("");
+table($("#contractTable"), ["Part","Numbers"], contract.map(r => [r[0], r[1]]).concat([["<b>Total</b>","<b>683</b>"]]), [1]);
+table($("#lossTable"), ["Training signal","Plain meaning","Trains","Status"], [
+  ["Reinforcement learning (proximal policy optimisation, PPO)","Try actions, keep what earned more reward. Clip 0.2, 5 passes over each batch, discount 0.99; policy learning rate 0.0001, critic 0.0003.","policy",pill("built","Built")],
+  ["Critic value loss","Predict how much reward is still to come.","critic",pill("built","Built")],
+  ["Velocity & force estimation loss","Match the true body speed and foot forces; sliding moments count more.","encoder, estimator",pill("built","Built")],
+  ["Physics quiz loss (β-weighted likelihood)","Answer the 186 ground and touchdown questions, each with a confidence; material under the next touchdown counts double. Same constant weight from S1 to the end of S3.","encoder, quiz heads",pill("built","Built")],
+  ["Spread-keeping loss (VICReg)","Keeps the 64 summary numbers varied and non-redundant so they cannot collapse to a constant.","encoder",pill("built","Built")],
+  ["Foothold prediction loss","Where and when will each front foot land (with uncertainty).","foothold module",pill("planned","Planned")],
+  ["Future-prediction loss (the JEPA loss)","Predicted future summary must match the slow copy's summary 60 / 200 / 400 ms later. This and the next row are what F has and B2 does not.","predictor, encoder",pill("planned","Planned")],
+  ["Action-recovery loss (inverse dynamics)","Recover the action from now + future summaries.","encoder, predictor",pill("planned","Planned")]]);
+
+/* ---------------- stages ---------------- */
+const stages = [
+  {id:"S0a",k:"done",name:"Realistic servos and sensors",goal:"Make the original policy work with the real servo model, lost readings, noisy sensors and no true speed input.",change:"Servo model and dropped readings, joint speed from two readings, sensor noise, estimated speed replaces true speed, actions clipped to servo limits, resting pose moved (+30° / +30°).",sees:"114 numbers (body reading + speed estimate).",budget:"4,498 iterations (runs 3 + 4).",gate:"Falls within +2 points of the original; foot-down share 0.5 ± 10 %; toe lift ± 10 % (reinterpreted); no more hip vibration.",result:"All met. Later superseded: the random-start control arm made the whole lineage history."},
+  {id:"S0b",k:"done",name:"Commands, standing, terrain, randomisation",goal:"Follow speed and turning commands on generated terrain with full randomisation; stand still on a zero command.",change:"Command input, clock from the command, standing mode, terrain levels 0–14, randomised robot and feet, mirror training, clock-free floor rewards.",sees:"117 numbers.",budget:"From scratch: stopped on the plateau rule at 12,214 iterations.",gate:"Speed error ≤ 0.03 m/s at 0.10 and 0.15 m/s; stride within ± 10 %; falls ≤ 5 %; lost readings cost ≤ +5 %.",result:"π_S0 passes everything with 0 falls in 17,408 episodes."},
+  {id:"S1",k:"progress",name:"Blind trunk",goal:"Learn the body-sensing encoder, velocity estimator and physics quiz on ground with location-varying materials, without a camera. Every arm branches from here.",change:"Policy input widened to 1,125 (unused blocks zero), new critic with the 683-number contract, estimator replaces the old speed estimate, reward changes D28–D29.",sees:"117 + 64 (summary) + 15 (estimate), the rest zero.",budget:"8,000 iterations (≈ 524 million steps), from pilot 2's plateau.",gate:"At least as good as S0; quiz loss flat; velocity estimator passes its two tests.",result:"Pilot 3 accepted 2026-09-27. Memory-window sweep and seeds 43–46 running."},
+  {id:"S1b",k:"blocked",name:"Blind, at the camera-stage batch size",goal:"Separate the effect of the larger camera-stage batch from everything else that changes in S2.",change:"Only the batch shape (N_v × T_v).",sees:"Same as S1.",budget:"Until reward plateaus.",gate:"—",result:"Blocked: N_v (how many camera simulations fit on the GPU) is not measured."},
+  {id:"S2",k:"planned",name:"Depth camera",goal:"Learn foothold prediction, image-feature lookup and geometric anticipation; remove the rhythm clock.",change:"Each arm's own blocks switch on; clock and clock rewards removed over the first 30 %; depth rendered only on camera frames; depth blanked in 10 % of episodes.",sees:"Each arm's layout (see Comparison arms).",budget:"B_S2, fixed by a one-seed pilot of B2 and F (the larger need).",gate:"Clock removal finished ≥ 20 % before the end; foothold timing error flat; for F, prediction beats 'copy the last value' by ≥ 10 % at every horizon.",result:"Not started."},
+  {id:"S3",k:"planned",name:"Depth + colour (the main stage)",goal:"Learn to see slippery and soft materials ahead of the front legs.",change:"Colour images from a fixed real-time renderer mode; colour blanked 100 % → 10 % over the first 30 %; only clock-free rewards.",sees:"Deployment layout; clock inputs zero.",budget:"B_S3 ≥ 1.5 × B_S2, never shortened.",gate:"Gradual-friction test flat; blanking colour clearly hurts; uncertainty about the front legs' landing grip falls early in the stage.",result:"Not started."}];
+$("#stageList").innerHTML = stages.map(s => `<div class="stage"><div><div class="id">${s.id}</div>${pill(s.k, {done:"Done",progress:"In progress",blocked:"Blocked",planned:"Planned"}[s.k])}</div>
+  <div class="block"><h4>${s.name}</h4><dl><dt>Goal</dt><dd>${s.goal}</dd><dt>What changes</dt><dd>${s.change}</dd><dt>Policy sees</dt><dd>${s.sees}</dd>
+  <dt>Budget</dt><dd>${s.budget}</dd><dt>Pass criteria</dt><dd>${s.gate}</dd><dt>Result</dt><dd>${s.result}</dd></dl></div></div>`).join("");
+
+/* ---------------- arms ---------------- */
+const arms = {
+  O:{n:"Oracle",r:"Upper bound: shown the true ground material ahead instead of seeing it. Simulator only.",vis:"none (true material ahead)",foot:"no",fut:"no",tok:"—",loss:"estimation, physics quiz, spread",quiz:"yes",seeds:"5",from:"shared blind trunk",hw:"no"},
+  B0:{n:"Blind",r:"The floor: body sensing only. How far does feeling alone get?",vis:"none",foot:"no",fut:"no",tok:"—",loss:"estimation, physics quiz, spread",quiz:"yes",seeds:"5",from:"shared blind trunk",hw:"yes"},
+  "B1-K":{n:"KiVi, faithful",r:"The competing published method (KiVi, 2025) re-implemented on this robot under this recipe: depth images, a memory module, next-step prediction.",vis:"depth only",foot:"no",fut:"next step, raw readings (variational autoencoder)",tok:"—",loss:"KiVi's own estimator losses (no physics quiz)",quiz:"no (by design)",seeds:"3",from:"its own blind trunk (S1-K)",hw:"optional"},
+  "B1-M":{n:"KiVi, matched",r:"KiVi with the same supervision, encoders and size as F, to separate 'better training signals' from 'better architecture'.",vis:"depth + colour",foot:"no",fut:"next step, raw readings (variational autoencoder)",tok:"—",loss:"KiVi losses + estimation, physics quiz",quiz:"yes",seeds:"5 (at least 3)",from:"shared blind trunk",hw:"recommended"},
+  B2:{n:"Foothold-attended, no predictor",r:"The falsification arm: everything F has except predicting the future. If F does not beat B2, the claim fails.",vis:"depth + colour",foot:"yes",fut:"no",tok:"u: three fused outputs without time meaning",loss:"estimation, foothold, physics quiz, spread",quiz:"yes",seeds:"8 (at least 5)",from:"shared blind trunk",hw:"yes"},
+  F:{n:"VP-JEPA (proposed)",r:"Predicts the body-sensing summary 60, 200 and 400 ms ahead and walks on that prediction.",vis:"depth + colour",foot:"yes",fut:"multi-horizon, compact summary (slow-copy target)",tok:"ẑ: predictions at +60 / +200 / +400 ms",loss:"estimation, foothold, physics quiz, spread, future prediction, action recovery",quiz:"yes",seeds:"8 (at least 5)",from:"shared blind trunk",hw:"yes"},
+  B3:{n:"Raw-reading predictor",r:"F, but predicts raw future sensor readings instead of the compact summary: is the summary target better?",vis:"depth + colour",foot:"yes",fut:"multi-horizon, raw readings",tok:"ẑ decoded to raw readings",loss:"as F, target = raw readings",quiz:"yes",seeds:"3, dropped unless compute remains",from:"shared blind trunk",hw:"no"}};
+const armRows = [["Role","r"],["Camera input","vis"],["Looks up image features at predicted footholds","foot"],["Predicts the future","fut"],["Output tokens","tok"],["Training signals","loss"],["Physics quiz","quiz"],["Seeds","seeds"],["Starts from","from"],["Real-robot test","hw"]];
+$("#armCards").innerHTML = Object.entries(arms).map(([k, a]) => `<div class="card arm block"><h4><span class="code">${k}</span>${a.n}</h4><p class="small">${a.r}</p>
+  <div class="small"><b>Sees:</b> ${a.vis} · <b>Predicts:</b> ${a.fut} · <b>Seeds:</b> ${a.seeds}</div>${pill("planned","Planned")}</div>`).join("");
+const selA = $("#armA"), selB = $("#armB");
+selA.innerHTML = selB.innerHTML = Object.entries(arms).map(([k, a]) => `<option value="${k}">${k} — ${a.n}</option>`).join("");
+selA.value = "F"; selB.value = "B2";
+const drawCmp = () => { const a = arms[selA.value], b = arms[selB.value];
+  table($("#armCmp"), ["", selA.value + " — " + a.n, selB.value + " — " + b.n], armRows.map(([l, f]) => ({_cls: a[f] !== b[f] && f !== "r" ? "diff" : "", cells:[`<b>${l}</b>`, a[f], b[f]]}))); };
+selA.addEventListener("change", drawCmp); selB.addEventListener("change", drawCmp); drawCmp();
+const Y = "✓", _ = "—";
+table($("#layoutTable"), ["Block","Numbers","O","B0","B1-K","B1-M","B2","F","B3"], [
+  ["Per-step body reading (clock zero after S2)",111,Y,Y,Y,Y,Y,Y,Y],["Body-sensing summary",64,Y,Y,_,Y,Y,Y,Y],["KiVi body summary",20,_,_,Y,_,_,_,_],
+  ["Velocity & force estimate",15,Y,Y,Y,Y,Y,Y,Y],["True ground material ahead",576,Y,_,_,_,_,_,_],["KiVi scene & foot summaries",20,_,_,Y,Y,_,_,_],
+  ["Three output tokens",192,_,_,_,_,"u","ẑ","ẑ"],["Front-foothold image features",128,_,_,_,_,Y,Y,Y],["Foothold valid flags",2,_,_,_,_,Y,Y,Y],
+  ["Foothold uncertainty",8,_,_,_,_,Y,Y,Y],["Remaining look-ahead",3,_,_,Y,Y,Y,Y,Y],["Speed & turning command",3,Y,Y,Y,Y,Y,Y,Y]], [1]);
+table($("#questionTable"), ["Comparison","Question it answers"], [
+  ["O vs B0","Is there any value in anticipating the ground on this task? (headroom test; if equal, stop and redesign)"],
+  ["<b>F vs B2</b>","<b>The core claim:</b> does predicting future body sensations add anything beyond looking at the footholds?"],
+  ["F vs B1-M","Does F beat a supervision-matched version of the best published competitor?"],
+  ["B1-M vs B1-K","Is the competitor's performance driven by its training signals or by its architecture?"],
+  ["F vs B3","Is a compact-summary target better than predicting raw readings?"],
+  ["Camera vs blind on held-out terrain","Expected to favour cameras on geometry; reported, but not a claim."]]);
+table($("#falsTable"), ["Outcome","Meaning","Action"], [
+  ["O ≈ B0","No headroom","Stop and redesign"],["F ≈ B2 in S3 (interval includes 0)","Core claim falsified","Reframe or stop"],
+  ["F > B2 but B1-M ≥ F","A global memory is enough","Too weak to submit"],["F > B2 only on sharp boundaries","Edge detection, not physics","Investigate colour shortcuts"],
+  ["F > B2 on physical-only transitions","Carried by contact memory and body prediction","Report as the trailing-leg half"],
+  ["F reacts to painted lines with no physical change","Reacts to edges","Fix how material and appearance are tied"],
+  ["F > B2 in simulation, not on hardware","Camera sim-to-real problem","Check rolling shutter, depth holes, image processing, renderer"],
+  ["B1-M ≫ B1-K","Supervision drives the competitor","Report both"],["Gap appears only in S3","Benefit depends on seeing friction","State it; never credit rendering"],
+  ["Adding delay to predictions changes nothing","Predictions are ignored","Stop claiming the main contribution"],
+  ["B3 ≈ F","The compact-summary target adds nothing","Contribution becomes multi-horizon prediction"],
+  ["F > B2 on shiny but not matte surfaces","Depth holes carry the cue","Label it a sensor cue"]]);
+
+/* ---------------- rewards ---------------- */
+const rewards = [
+  ["Follow the commanded speed","track_lin_vel","+30","walk","Kernel on the speed error (width 0.05 m/s) minus the plain error. Tripled after the policy ignored slow commands."],
+  ["Follow the commanded turning rate","track_yaw","+10","walk","Same form for turning (width 0.1 rad/s)."],
+  ["Stay alive","alive","+10","survival","Constant bonus per step; makes falling expensive."],
+  ["Lift the toe on the clock's half-sine","cpg_z_target","+5","clock","Toe height follows a half-sine peaking at 4 cm during each leg's swing window (tight kernel, 1 cm)."],
+  ["Swing-height floor","swing_clearance","+5","walk","At touchdown, pays peak toe lift ÷ 4 cm, capped at 1. Clock-free; stays after S2."],
+  ["Push with the hip in the needed direction","cpg_coxa_contact","+1","clock","Hip sweep of planted legs in the direction the command needs, weighted by how far the toe reaches out (so spinning a tucked foot earns nothing)."],
+  ["Keep feet down when standing","standing_contact","+5","standing","Share of feet touching the ground, after a 1.5 s settle window."],
+  ["Stiff knees in stance (clock)","cpg_stance_rigidity","−0.5","clock","Knee and ankle joint speed while the clock says 'on the ground'."],
+  ["Carry the right load per foot","cpg_force_target","−0.5","clock","Foot force vs a half-sine target peaking at one third of the weight (plain error, never squared)."],
+  ["Planted feet do not slide","stance_rigidity_contact","−0.5","walk","Sliding speed of feet in contact + 0.1 × their joint speed. Clock-free; stays after S2."],
+  ["No body rocking","ang_vel_xy","−0.5","safety","Roll and pitch rate squared."],
+  ["Keep the body level","base_orientation","−5","safety","Tilt, gentle below 8°, ten times steeper above."],
+  ["Do not overload servos","joint_torque_excess","−0.05","safety","Servo torque above 1.2 N·m (80 % of stall)."],
+  ["Smooth commands","action_rate","−0.01","safety","Penalises jerky changes between steps."],
+  ["Body parts off the ground","non_foot_body","−30","safety","Upper legs closer than 5 cm to the terrain."],
+  ["Toe does not swing in and out","swing_radial","−2","clock","Toe moving towards or away from the hip while in the air; enforces a lift that uses upper and lower leg together."],
+  ["Land at the right reach","touchdown_reach","−600","clock","Landing distance from the hip vs target: 10 cm for front legs, resting reach (6.7 cm) for the others."],
+  ["Return to the resting pose when standing","standing_pose","−3","standing","Total joint distance from the resting pose."],
+  ["Hold still when standing","standing_joint_speed","−0.2","standing","Any joint motion after the settle window."],
+  ["Share weight evenly when standing","standing_load_share","−5","standing","Uneven load across the six feet."],
+  ["Keep legs apart","leg_proximity","−1,600","safety","Neighbouring legs closer than 2 cm (leg shapes modelled as capsules). A safety term: the simulator lets legs pass through each other."],
+  ["Do not command past servo limits","action_beyond_clip","−10","safety","How far a requested target lies beyond the servo stop (without it, a parked leg got no signal to come back)."],
+  ["Fall penalty","terminating","−5","survival","Once, when the episode ends by falling."]];
+const groups = {all:"All",walk:"Walking",clock:"Rhythm clock (leave in S2)",standing:"Standing",safety:"Safety & smoothness",survival:"Survival"};
+let rg = "all";
+const drawRewards = () => table($("#rewardTable"), ["Term","Code name","Weight","Group","What it pays for or penalises"],
+  rewards.filter(r => rg === "all" || r[3] === rg).map(r => [`<b>${r[0]}</b>`, `<span class="sym">${r[1]}</span>`, r[2], groups[r[3]], r[4]]), [2]);
+$("#rewardFilters").innerHTML = Object.entries(groups).map(([k, v]) => `<button class="btn" type="button" data-g="${k}" aria-pressed="${k === "all"}">${v}</button>`).join("");
+$("#rewardFilters").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; rg = b.dataset.g;
+  $("#rewardFilters").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b))); drawRewards(); });
+drawRewards();
+
+/* ---------------- progress: stories ---------------- */
+const story = (items) => items.map(([h, o, c, f]) => `<div><h4>${h}</h4><div class="story"><div class="o"><b>What happened</b>${o}</div><div class="c"><b>Why</b>${c}</div><div class="f"><b>Fix / result</b>${f}</div></div></div>`).join("");
+$("#storyS0a").innerHTML = story([
+  ["Run 1: the robot just stood still","Even the original policy's own actions barely moved the legs under the new servo model, with any gain or rate tried.","A simulator setting: with the default solver option, explicit motor torques were applied only once per physics step instead of in every solver iteration, so they barely acted.","One physics setting (apply external forces every iteration) and a small rotor inertia for stability. The original gait then walked at 0.165 m/s."],
+  ["Run 2: the policy learned to fall on purpose","Falls rose from 57 % to 99.7 % within 240 iterations.","92 % of the original reward came from a hip term that paid for buzzing back and forth; once corrected, every behaviour earned a negative reward per step, while a fall cost −5 only once.","Rebuilt the reward so walking > standing > falling: a bounded toe-lift reward, larger survival bonus and stand-still penalty."],
+  ["Run 3: 'too low' toe lift that was not","The toe-clearance test failed (2.9 cm vs the original 8.2 cm).","The measurement averaged in tiny sub-5 mm stutters; and the original's high steps came from tracking the wrong point on the leg.","Metric fixed (real swings only: 3.8 cm, on target); criterion reinterpreted with the user. It also revealed the original's two crutch legs."],
+  ["Run 4: even stepping","Right-middle leg still stuttered.","The toe-lift reward still paid for small stutters.","Tighter toe-lift kernel (2 → 1 cm): every leg now steps 1.48–1.50 times per second."]]);
+$("#storyGait").innerHTML = story([
+  ["Feet tucked under the hips","Middle and rear toes stood 1–2 cm from their hips (resting reach 6.7 cm); stance 25 % narrower; hip swings of 95°.","Holding torque grows with how far the foot is from the joint, and nothing asked for a wide stance, so tucking was cheapest. Also, a measurement bug: the resting reach had been read in the wrong pose (20.8 cm), weakening the hip reward to about one third.","Bug fixed (6.7 cm, checked at start-up). A footprint penalty was tried and failed (the policy bent the knee further)."],
+  ["Toe swinging in and out in the air","The toe was pulled 5 cm towards the hip at lift-off and landed 5 cm inside where it lifted.","At this pose, lifting with the knee pulls the toe inward and lifting with the upper leg pushes it outward; a straight lift needs both together.","'Toe does not swing in and out' (−2) and 'land at the right reach' (−600). Fine-tuning could not escape the old habit even at 5× weights, so S0 was retrained from scratch: toe path per swing 20 cm → 6–8 cm."],
+  ["Legs passing through each other","Neighbouring legs overlapped by up to 6.3 cm in the simulator — a hardware risk.","Leg-to-leg collision is off in the simulator, so overlap cost nothing.","'Keep legs apart' penalty using capsule shapes fitted to the leg meshes: closest gap +1.3 cm."]]);
+$("#storyS1").innerHTML = story([
+  ["The critic's crash when the estimator went live","Training crashed at iteration ≈ 400.","The estimator's statistics were written in a way the training library forbids during data collection.","Written the correct way; a regression test was added."],
+  ["The physics quiz got worse as the robot improved","Touchdown-quiz error rose from 0.35 to 2.9.","Answer scaling had been fixed from the first data, collected on the easiest terrain.","Scaling fixed once from the standing-and-walking policy on all levels 0–14; shared by every seed and arm."],
+  ["Random start-up crashes","Every training launch crashed about 1 s after start.","A math library's worker threads raced with the simulator's start-up process fork (it had been mistaken for a telemetry glitch).","One environment setting (single-threaded math library): clean starts."],
+  ["Legs creeping together in pilot 1","Closest leg gap fell to −0.6 cm; toe lift sank.","The landing-reach reward pulled the front legs from their natural 12 cm to a single 6.7 cm target, which paid more than the proximity penalty cost.","Pilot 2: proximity ×4; pilot 3: a separate 10 cm target for the front legs and a 4 cm toe-lift target."]]);
+
+table($("#lineageTable"), ["Run","Change","What it taught"], [
+  ["1","S0b as designed","All tests passed except stride at 0.10 m/s (+18 %)."],
+  ["2","Stronger stand-still rewards","Stride stuck at +16 %; standing flickered on 3–4 legs."],
+  ["3","Speed error averaged over a stride","Worse (+27 %): the within-stride surge grew once only the average was scored."],
+  ["4","Speed reward ×3, per step","Real cause: the policy barely responded to slow commands (slope 0.36 instead of 1). All walking tests pass."],
+  ["5","Zero the clock inputs when standing","The policy kept obeying the frozen clock; now five legs stand."],
+  ["6–8","Penalty for commanding past servo limits; standing-pose pull","Right-rear hip parked 14° past its stop (no learning signal there). Fixed the clipping, not the tucked leg."],
+  ["9","50 % standing practice","No change: standing is a rarely practised situation."],
+  ["10","1.5 s settle window before holding still","Real cause: with six feet down, the pose can only change by stepping, and every hold penalty made stepping dearer. First standing fix that worked."],
+  ["11","Turning","Right turns 75 %, left turns 27 % of the command."],
+  ["12","Terrain levels 0–14 with stairs","Mean level 9.3 of 14, no falls."],
+  ["13","Hip reward weighted by toe reach","Found a cheat: tucked toes earned full reward for spinning the hip. Left turns still 38 %."],
+  ["14","Mirror training","Left turns 52 %, standing better; gap not closed → random-start control arm."]], [0]);
+
+table($("#oldNewTable"), ["","First from-scratch policy (superseded)","Final π_S0"], [
+  ["Training length","20,749 iterations, 12.9 h","12,214 iterations, 7.3 h"],
+  ["Stride error at 0.10 m/s (levels 0 / 5 / 9)","+3.9 / +4.2 / +4.6 %","+1.0 / +0.3 / −0.7 %"],
+  ["Turning on the spot (of ±0.3 rad/s)","±0.26","+0.321 / −0.311"],
+  ["Terrain cells passed, training levels","108 / 108","108 / 108"],
+  ["Terrain cells passed, held-out levels","52 / 72","50 / 72 (lower tracking error)"],
+  ["Toe path in and out per swing","≈ 20 cm","5.7–7.9 cm"],
+  ["Middle/rear stance reach (resting 6.7 cm)","1.8–2.1 cm","6.7–7.1 cm"],
+  ["Closest leg-to-leg gap","−6.3 cm (overlap)","+1.3 cm"]]);
+
+table($("#pilotTable"), ["Blind trunk at 8,000 iterations","π_S0 on the same ground","Pilot 2","Pilot 3 (accepted)"], [
+  ["Falls, 17 conditions","0 %","0 %","0 %"],
+  ["Stride error 0.10 m/s (levels 0 / 5 / 9)","+0.2 / −1.0 / −1.4 %","+1.3 / +1.5 / +2.0 %","+0.5 / +0.2 / +0.7 %"],
+  ["Stride error 0.15 m/s","−0.9 / −1.9 / −2.1 %","−2.3 / −2.4 / −2.2 %","−2.6 / −2.9 / −2.7 %"],
+  ["Turning on the spot (of ±0.3)","+0.320 / −0.309","+0.310 / −0.313","+0.309 / −0.306"],
+  ["Standing: feet down, levels 0 / 5 / 9","0.97 / 0.84 / 0.82","0.98 / 0.95 / 0.91","0.98 / 0.95 / 0.91"],
+  ["Speed-estimate error; sliding ÷ firm; inertial sensor blanked","—","0.019–0.025; ≤ 2.2×; ≈ 8–9×","0.019–0.025; ≤ 2.2×; ≈ 8–9×"],
+  ["Closest leg gap; share of steps under 2 cm at 0.15 m/s","+1.3 cm; ≈ 0 %","+1.3 cm; ≤ 2.7 %","+0.5 cm; ≤ 1.8 %"],
+  ["Toe lift front / middle / rear","4.0–4.5 cm","3.5–3.7 / 3.8–3.9 / 4.1–4.2","3.8–3.9 / 4.3–4.4 / 4.3"],
+  ["Front landing reach; front hip swing","11.9 cm; 49°","9.5 cm; 72°","11.2 cm; 60°"],
+  ["Rear hips asked past their limit (rad per step)","0.015","0.022","0.026–0.029 (D30)"]]);
+
+table($("#sinceTable"), ["Run","What it is","Status"], [
+  ["Memory window 25 steps (seed 42)","Encoder looks at 0.5 s instead of 1 s","Finished 8,000 iterations; evaluation files exist; " + pill("progress","not yet reviewed")],
+  ["Memory window 75 steps (seed 42)","Encoder looks at 1.5 s","Finished 8,000 iterations; evaluation files exist; " + pill("progress","not yet reviewed")],
+  ["Seed 43, window 50","Second blind-trunk seed","Finished 8,000 iterations; " + pill("planned","not evaluated")],
+  ["Seed 44, window 50","Third seed","Finished 8,000 iterations; " + pill("planned","not evaluated")],
+  ["Seed 45, window 50","Fourth seed","Finished 8,000 iterations; " + pill("planned","not evaluated")],
+  ["Seed 46, window 50","Fifth seed","Running (≈ 850 iterations on 2026-09-29)"],
+  ["Note","The seed runs were started at window 50 before the window comparison was written up. If a different window is chosen they must be rerun.",pill("risk","check")]]);
+
+const devs = [
+  ["D1","Batch 4,096 × 16 instead of 8,192 × 16 (the original run's real batch; compute limit)","S0"],["D2","Old speed estimator: small network on 5 readings, trained during the run","S0a"],
+  ["D3","In S0a the clock followed the estimated speed (from S0b it follows the command)","S0a"],["D4","S0a critic used a 22-number subset of the contract","S0a"],
+  ["D5","Resting pose +30° / +30°, forced by the torque check","S0a"],["D6","Random payload 0.1–1.0 kg from S0a (user request)","S0a"],
+  ["D7","Flat-ground grip 0.75 = the original policy's effective training grip","S0a"],["D8","Dropped-reading probability driven by servo load, not tracking error","S0a"],
+  ["D9","Hip excluded from the stance-stiffness penalty (it is the stroke the hip reward pays for)","S0a"],["D10","Bounded toe-lift reward, alive ×10, stand-still −75","S0a"],
+  ["D11","Physics setting: apply motor torques in every solver iteration","S0a"],["D12","Foot-down share measured with contact force; clearance test reinterpreted","S0a"],
+  ["D13","Stand-still mode on a zero command","S0b"],["D14","Random material on each simulation's feet instead of a random ground grip","S0b"],
+  ["D15","Command changes every 5 s rather than once per episode","S0b"],["D16","Speed-tracking test averaged over a stride","S0b"],
+  ["D17","Full randomisation already in S0b","S0b"],["D18","50 % standing practice for runs 9–10 (history)","S0b"],
+  ["D19","Turning commands; hip reward follows the commanded motion, weighted by reach","S0b"],["D20","Training terrain levels 0–14 with stairs; 15–20 evaluation only","S0b"],
+  ["D21","Left–right mirror training for every arm","S0b"],["D22","Held-out harder-terrain test as a secondary result (to be defined)","S0b"],
+  ["D23","Old speed estimate kept frozen in S1 and switched off episode by episode","S1"],["D24","Dropped-reading rate ×0.5–2 per episode","S1"],
+  ["D25","Foot damping per simulation, fixed for the run (a soft ground broke the per-foot stiffness)","S1"],["D26","Leg-geometry speed constants calibrated in the simulator","S1"],
+  ["D27","Material patches: visual-only per-material meshes + per-foot physics writes; values redrawn per episode","S1"],
+  ["D28","S1 reward: keep-legs-apart −1,600, swing-height floor 4 cm","S1"],["D29","S1 reward: toe-lift target 4 cm, front-leg landing target 10 cm","S1"],
+  ["D30","Rear-hip commands past the limit accepted in S1; revisit in S2","S1"]];
+const drawDev = q => table($("#devTable"), ["#","Deviation","Stage"], devs.filter(d => !q || d.join(" ").toLowerCase().includes(q.toLowerCase())));
+$("#devSearch").addEventListener("input", e => drawDev(e.target.value)); drawDev("");
+$("#lessons").innerHTML = [
+  "Check the simulator settings, not only the robot model: one solver option made every realistic motor look broken; replaying a known-good policy's actions isolated it.",
+  "Do the reward arithmetic before every training run: the fall exploit, the stride equilibrium, the hip-spinning cheat and the leg overlap were all profitable under the reward as written.",
+  "Passing the tests is not enough: a policy with overlapping legs, tucked feet and a mis-scaled reward passed all of them. Videos and behaviour probes are part of every review.",
+  "Habits survive continued training: the original policy's right-side crutch legs reappeared as a tucked leg and lopsided turning through 14 runs; the random start was symmetric and cheaper.",
+  "Measure at the right moment: the resting reach was read before the resting pose was applied, and quiz statistics were frozen from the easiest terrain.",
+  "Inputs that stop changing still carry meaning: a frozen clock kept 'swing' legs lifted while standing; absent signals are set to zero.",
+  "Decide stop rules in advance: the 1.5 %-per-2,000-iterations plateau rule set both the S0 stop and the S1 budget, and the pilot-3 watch rule caught a regression."].map(x => `<li>${x}</li>`).join("");
+
+/* ---------------- charts ---------------- */
+function lineChart(el, cfg) {
+  const w = 560, h = 250, m = {l: 48, r: 92, t: 14, b: 34};
+  const X = v => m.l + (v - cfg.x[0]) / (cfg.x[1] - cfg.x[0]) * (w - m.l - m.r);
+  const Yp = v => m.t + (1 - (v - cfg.y[0]) / (cfg.y[1] - cfg.y[0])) * (h - m.t - m.b);
+  let s = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(cfg.label)}">`;
+  if (cfg.band) s += `<rect class="band-ok" x="${m.l}" y="${Yp(cfg.band[1])}" width="${w - m.l - m.r}" height="${Yp(cfg.band[0]) - Yp(cfg.band[1])}"/>` +
+    `<text class="lab" x="${w - m.r + 6}" y="${Yp(cfg.band[1]) + 12}">pass band</text>`;
+  for (const t of cfg.yt) s += `<line class="grid" x1="${m.l}" x2="${w - m.r}" y1="${Yp(t)}" y2="${Yp(t)}"/><text class="axis" x="${m.l - 6}" y="${Yp(t) + 4}" text-anchor="end">${t}${cfg.yu || ""}</text>`;
+  for (const t of cfg.xt) s += `<text class="axis" x="${X(t)}" y="${h - m.b + 16}" text-anchor="middle">${t >= 1000 ? (t / 1000) + "k" : t}</text>`;
+  s += `<text class="axis" x="${(m.l + w - m.r) / 2}" y="${h - 4}" text-anchor="middle">training iteration</text>`;
+  if (cfg.ref) s += `<line class="ref" x1="${m.l}" x2="${w - m.r}" y1="${Yp(cfg.ref[0])}" y2="${Yp(cfg.ref[0])}"/><text class="lab" x="${w - m.r + 6}" y="${Yp(cfg.ref[0]) + 4}">${cfg.ref[1]}</text>`;
+  for (const sr of cfg.series) {
+    const pts = sr.d.map(([x, y]) => `${X(x)},${Yp(y)}`).join(" ");
+    s += `<polyline points="${pts}" style="fill:none;stroke:${sr.c};stroke-width:2;stroke-linejoin:round"/>`;
+    for (const [x, y] of sr.d) s += `<circle cx="${X(x)}" cy="${Yp(y)}" r="4.5" style="fill:${sr.c};stroke:var(--surface);stroke-width:2"/>` +
+      `<circle cx="${X(x)}" cy="${Yp(y)}" r="12" style="fill:transparent" data-tip="<b>${esc(sr.n)}</b><br>iteration ${x.toLocaleString()}: ${y}${cfg.yu || ""}"/>`;
+    const [lx, ly] = sr.d[sr.d.length - 1];
+    s += `<text class="lab" x="${X(lx) + 8}" y="${Yp(ly) + (sr.dy || 0) + 4}">${esc(sr.n)}</text>`;
+  }
+  el.innerHTML = s + `</svg>`;
+}
+lineChart($("#chartReturn"), {label:"Training reward by iteration", x:[1500, 12500], y:[280, 400], yt:[280, 320, 360, 400], xt:[2000, 4000, 6000, 8000, 10000, 12000],
+  series:[{n:"π_S0 reward", c:"var(--accent)", d:[[2000,291.6],[4000,337.3],[6000,365.3],[8000,382.9],[10000,389.5],[12000,395.3]]}]});
+lineChart($("#chartGap"), {label:"Closest leg gap by iteration", x:[1500, 8500], y:[-1, 1.6], yt:[-1, -0.5, 0, 0.5, 1, 1.5], yu:" cm", xt:[2000, 4000, 6000, 8000], ref:[0, "overlap line"],
+  series:[{n:"Pilot 1", c:"var(--s1)", d:[[2000,-0.5],[4000,0.0],[6000,-0.6],[8000,0.3]]},
+          {n:"Pilot 2", c:"var(--s2)", d:[[2000,1.0],[4000,0.8],[6000,1.0],[8000,1.3]], dy:-4},
+          {n:"Pilot 3", c:"var(--s3)", d:[[4000,0.7],[6000,1.1],[8000,0.5]], dy:6}]});
+lineChart($("#chartControl"), {label:"Stride error of the random-start run", x:[3000, 20000], y:[-40, 12], yt:[-40, -30, -20, -10, 0, 10], yu:" %", xt:[4000, 8000, 12000, 16000, 20000], band:[-10, 10],
+  series:[{n:"stride error", c:"var(--accent)", d:[[4000,-36],[8000,-4.9],[18750,-1.8]]}]});
+
+/* ---------------- open items ---------------- */
+$("#blockedList").innerHTML = [
+  `${pill("blocked","Blocked")} <b>Camera-simulation capacity (N_v):</b> how many simulations with rendered cameras fit on the GPU. Blocks S1b and sets the batch for S2/S3 (64 was rejected as far too few). Order of resolution: a compute upgrade, rendering only on camera frames at 256 × 144, or report as a stated limitation.`,
+  `${pill("planned","Gate")} <b>Headroom test (Oracle vs Blind):</b> nothing with a camera starts until knowing the ground ahead is shown to help.`,
+  `${pill("progress","Now")} <b>Memory-window choice:</b> the 25 / 50 / 75-step comparison must be written up; the seed runs assume 50.`,
+  `${pill("planned","Decision")} <b>Simulator version:</b> Isaac Sim 6.0.1 / Isaac Lab 3.0 is pinned; any upgrade had to happen before S0, so it is now fixed.`].map(x => `<li>${x}</li>`).join("");
+$("#benchList").innerHTML = ["Servo gain, compliance, gear play and bus delay (AX-12A)","Dropped-reading rate vs load on the real servo bus","Static torque of the resting pose on the real robot",
+  "Camera mast mass","Grip of each real surface (tilt and drag tests, 5 repeats) and the foot-tip material","Foam stiffness (force vs sink, fitted to simulated sink, not nominal stiffness)",
+  "Inertial-sensor noise","Camera minimum depth at 848 × 480 and 424 × 240","Age of predictions on the Jetson (99th percentile) and camera timing",
+  "Colour-camera rolling-shutter readout time","Depth fill rate on shiny surfaces","Sideways position of the front toes"].map(x => `<li>${x}</li>`).join("");
+table($("#inconsTable"), ["Where","What","Suggested action"], [
+  ["Paradigm specification (v2)","Several sections still describe the 'stay close to the old policy' (KL) anchor as active, although §4.4 marks it void since 2026-09-23.","Update the remaining sections."],
+  ["Paradigm specification (v2)","Seed counts disagree: blind trunk 8 vs 5; B1-K 3 vs 5; B2/F target 8 but the run count uses 5.","Settle one set of numbers."],
+  ["Paradigm specification (v2)","Batch 8,192 × 16 is stated as an invariant; the project uses 4,096 × 16 (D1).","Record D1 in the specification."],
+  ["Code: blind-trunk reward","'Body parts off the ground' (−30) is still active; an earlier schedule meant to fade it is switched off from S0a onward.","Confirm it is intended."],
+  ["Code: environment settings file","The header comments still describe an old reward version; some literal weights differ from what the comments say.","Refresh the comments."],
+  ["Code: demo (play) setting for S1","Uses the pilot-2 toe-lift and front-landing values for demo videos, not the accepted pilot-3 reward.","Never use it for reportable evaluation."],
+  ["Architecture specification (v7)","Describes a 25-step encoder window and switching the physics quiz off in S1; the paradigm specification overrides both (50 steps; constant quiz weight).","Follow the paradigm specification (its §0.5 precedence table)."]]);
+$("#riskList").innerHTML = [
+  "Everything reported so far is one seed (42). Seed-to-seed spread is unknown until seeds 43–46 are evaluated.",
+  "All servo, sensor, material and camera numbers are datasheet or literature placeholders until the bench measurements.",
+  "Leg clearance in the blind trunk is held by a heavy penalty (−1,600), not by the geometry the policy prefers; the front-leg reach pull is still present.",
+  "Once the rhythm clock leaves in S2, only the 4 cm swing floor (about 0.48 reward per second) defends foot lift — to be re-checked before S2.",
+  "Compute: the illustrative estimate for the camera stages is about 16 days of GPU time for 23 camera runs; it is not measured."].map(x => `<li>${x}</li>`).join("");
+
+/* ---------------- glossary ---------------- */
+const G = [
+  ["VP-JEPA","Visual–Proprioceptive Joint-Embedding Predictive Architecture: the proposed method (arm F). Predicts future body-sensing summaries from vision and body sensing."],
+  ["JEPA","Joint-Embedding Predictive Architecture: predict a compact summary of the future instead of the raw future."],
+  ["Proprioception","The robot's sense of its own body: joint angles, joint speeds, loads, inertial readings."],
+  ["Hexapod","Six-legged robot. Legs: RF, RM, RB (right front, middle, back), LF, LM, LB."],
+  ["Coxa / femur / tibia","Hip joint (swings the leg forward and back) / upper leg / lower leg."],
+  ["Tripod gait","Two groups of three legs alternate: RF, RB, LM together, then RM, LF, LB."],
+  ["CPG","Central pattern generator: the rhythm clock that tells each leg when to swing. Training scaffolding, removed in S2."],
+  ["AX-12A","The Dynamixel hobby servo used in every joint (stall torque 1.5 N·m)."],
+  ["IMU","Inertial measurement unit: measures acceleration and rotation rate."],
+  ["D435","Intel RealSense D435 depth-and-colour camera (planned)."],
+  ["Jetson Orin Nano","The robot's onboard computer."],
+  ["Isaac Sim / Isaac Lab / PhysX","NVIDIA's robot simulator, its learning toolkit, and its physics engine."],
+  ["PPO","Proximal policy optimisation: the reinforcement-learning algorithm used."],
+  ["Actor / policy (π)","The network that chooses the 18 joint targets."],
+  ["Critic","The network that judges how good a situation is; simulator only."],
+  ["Episode","One 10-second attempt (500 control steps)."],
+  ["Iteration","One training update, using 4,096 simulations × 16 steps of experience."],
+  ["Seed","The random-number starting point of a run; different seeds show how repeatable a result is."],
+  ["π_base","The Phase 1 policy (flat ground, ideal motors)."],
+  ["π_S0a / π_S0","Policy after stage S0a / the final standing-and-walking policy after S0b, trained from scratch."],
+  ["S0a, S0b, S1, S1b, S2, S3","Training stages: realistic servos; commands and terrain; blind trunk; blind at the camera batch size; depth camera; depth + colour."],
+  ["S1-K","B1-K's own blind trunk (its encoder differs)."],
+  ["O, B0, B1-K, B1-M, B2, F, B3","Comparison arms: Oracle, Blind, KiVi faithful, KiVi matched, foothold-attended without predictor, the proposed method, raw-reading predictor."],
+  ["KiVi","Published competing method (2025) combining body sensing (kinesthetic) and depth (visuospatial)."],
+  ["WMP","World Model-based Perception: the closest competing mechanism (predicts raw observations)."],
+  ["o_p","Per-step body reading: 111 numbers (99 without the clock)."],
+  ["E_p","Body-sensing encoder: summarises the last W steps of body readings."],
+  ["TCN","Temporal convolution network: the type of network used for the body-sensing encoder."],
+  ["W","Memory window of the body-sensing encoder in steps (50 = 1 s)."],
+  ["RF","Receptive field: how many past steps the encoder can actually see (61)."],
+  ["z_p","64-number body-sensing summary."],
+  ["V","Velocity and foot-force estimator."],
+  ["V_0","Old speed estimator used in S0; retired in S1."],
+  ["ê","Estimator output: body speed (3) + foot forces (12)."],
+  ["v_kin / Δv̂","Speed from leg geometry alone / the learned correction (a slip estimate)."],
+  ["twist_cmd","The command: forward speed, sideways speed, turning rate."],
+  ["f_ref","Clock rate: forward command ÷ 0.20 m, between 0.8 and 2.5 per second."],
+  ["E_v","Vision encoder (planned)."],
+  ["FAH","Foothold anticipation head: predicts where and when the front feet land (planned)."],
+  ["P (module)","Future body-sensing predictor (planned). Not to be confused with contract P."],
+  ["Contract P","The critic's 683-number privileged information, identical for every arm."],
+  ["ẑ","Predicted future body-sensing summaries at +60, +200, +400 ms (arm F)."],
+  ["u","Arm B2's three fused output tokens (same slots as ẑ, no time meaning)."],
+  ["z̄_p","The slow encoder copy's summary of the real future: the answer key for ẑ."],
+  ["EMA","Exponential moving average: how the slow encoder copy follows the encoder."],
+  ["Φ","Arm B2's fusion block (same shape as F's predictor)."],
+  ["CM","Contact memory: the last front-leg contacts, for the trailing legs."],
+  ["M*","True ground material strips ahead of each leg (576 numbers); Oracle only."],
+  ["m_ℓ, v_ℓ, σ̂_ℓ","Per front leg (ℓ = L1, R1): valid flag, looked-up image features, uncertainty."],
+  ["L1, R1","Left and right front legs."],
+  ["rem_60/200/400","How much of each prediction's look-ahead is still in the future, given its age."],
+  ["latent_age","How old the latest prediction is when the policy uses it."],
+  ["Physics quiz / probes","186 training-only questions about ground and touchdowns that force the encoder to learn physics."],
+  ["β-NLL","β-weighted negative log-likelihood (β = 0.5): the quiz loss, with a confidence per answer."],
+  ["VICReg","Variance–invariance–covariance regularisation: the spread-keeping loss."],
+  ["L_jepa, L_inv, L_fah, L_est, L_probe, L_vic","Future-prediction, action-recovery, foothold, estimation, quiz and spread-keeping losses."],
+  ["Inverse dynamics","Recovering the action from before-and-after states."],
+  ["KL anchor","A penalty keeping a new policy close to an old one. Dropped for every arm."],
+  ["Warm start","Continuing from an earlier policy instead of a random start. Dropped for every arm; S1 still widens π_S0."],
+  ["Widening","Adding zero-weight input connections so a bigger input changes nothing at first."],
+  ["N_v, T_v","Number of camera-equipped simulations and steps per update in S2/S3 (N_v × T_v ≥ 24,576)."],
+  ["B_S2, B_S3","Budgets of the camera stages in simulator steps (B_S3 ≥ 1.5 × B_S2)."],
+  ["Z_min","Camera minimum reliable depth."],
+  ["T_ro","Rolling-shutter readout time of the colour camera."],
+  ["Rolling shutter","The colour image is captured row by row, so fast turns skew it."],
+  ["ZOH","Zero-order hold: repeat the last valid value."],
+  ["Dropped read","A servo position reading that failed and was replaced by the last good one."],
+  ["DR","Domain randomisation: varying robot and ground properties so the policy works on the real robot."],
+  ["Curriculum","Automatic terrain difficulty that follows the robot's success."],
+  ["Held-out levels","Terrain levels 15–20: never trained on, used only for testing."],
+  ["Stride error","Measured stride length vs command ÷ step rate; a measure of speed accuracy."],
+  ["Cycle RMSE","Speed-tracking error after averaging over each stride."],
+  ["Stall torque","The most torque a servo can hold (1.5 N·m for the AX-12A)."],
+  ["Backlash","Gear play: the joint moves a little before the gears engage."],
+  ["Compliance slope","How softly the servo pushes toward its target."],
+  ["μ_s, μ_d, k, c","Static grip, sliding grip, stiffness, damping of a surface."],
+  ["PTFE","Teflon, a very slippery surface."],
+  ["GRF","Ground reaction force: how hard the ground pushes back on a foot."],
+  ["CoM","Centre of mass."],
+  ["FK","Forward kinematics: computing where the toe is from the joint angles."],
+  ["IQM","Interquartile mean: average of the middle half of the results."],
+  ["D1–D30","Numbered deviations from the specifications (see Progress)."],
+  ["RTX Real-Time","The renderer mode fixed for S3 (path tracing is excluded)."],
+  ["TiledCamera","Isaac Lab's batched camera renderer used for S2 depth."]];
+const glList = $("#glossaryList"), glSearch = $("#glSearch");
+const drawGl = q => { const f = G.filter(([a, b]) => !q || (a + " " + b).toLowerCase().includes(q.toLowerCase()));
+  glList.innerHTML = f.map(([a, b]) => `<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("") || "<dt>No match</dt><dd>Try a shorter word.</dd>";
+  $("#glCount").textContent = `${f.length} of ${G.length} terms`; };
+glSearch.addEventListener("input", e => drawGl(e.target.value)); drawGl("");
+$("#gsearch").addEventListener("input", e => { if (location.hash !== "#glossary") location.hash = "glossary"; glSearch.value = e.target.value; drawGl(e.target.value); });
+</script>
+
+</body>
+</html>

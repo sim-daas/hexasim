@@ -709,6 +709,12 @@ class touchdown_reach(ManagerTermBase):
     """Σ over legs touching down this step of | |r_xy| − rest |r_xy| | (m): the landing distance from the coxa axis.
 
     Replaces the stance footprint, which π_S0 met by bending the tibia further (§2.1.35–37). Standing envs score 0.
+
+    ``front_reach`` (S1 onward, §2.2.8): landing target of the two front legs, m. The single rest-reach target also
+    pulled the front legs, which land naturally at ≈ 12 cm (π_S0), inward to 9.5 cm at a fixed stride — a larger
+    coxa arc and a permanent pull toward the neighbouring legs. Still two-sided (a tucked landing must stay
+    penalised: that is what produced the coordinated lift; a one-sided form let the coxa term sprawl the legs,
+    §2.2.6). ``None`` = the rest reach for every leg, i.e. the S0b term π_S0 was trained with.
     """
 
     def __init__(self, cfg, env: ManagerBasedRLEnv):
@@ -718,12 +724,18 @@ class touchdown_reach(ManagerTermBase):
     def reset(self, env_ids=None):
         self.prev[slice(None) if env_ids is None else env_ids] = True
 
-    def __call__(self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    def __call__(
+        self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, front_reach: float | None = None
+    ) -> torch.Tensor:
         reach = coxa_leg_geometry(env)[1][..., :2].norm(dim=-1)
         contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
         landing = contact & ~self.prev
         self.prev = contact
-        return ((reach - env.coxa_rest_reach).abs() * landing).sum(dim=1) * env.cpg_active
+        target = env.coxa_rest_reach
+        if front_reach is not None:
+            target = target.clone()
+            target[..., [i for i, n in enumerate(LEG_NAMES) if "front" in n]] = front_reach
+        return ((reach - target).abs() * landing).sum(dim=1) * env.cpg_active
 
 
 def leg_proximity_penalty(env: ManagerBasedRLEnv, margin: float) -> torch.Tensor:
