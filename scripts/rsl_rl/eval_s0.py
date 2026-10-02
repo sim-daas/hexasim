@@ -57,6 +57,8 @@ parser.add_argument(
     help="S0b stress sweep: one terrain type, 15 levels (mdp.terrain.EVAL_TERRAIN_TYPES), e.g. stairs_up",
 )
 parser.add_argument("--no_drops", action="store_true", help="S0a/S0b: disable dropped reads")
+parser.add_argument("--drop_k_mult", type=float, default=1.0, help="robustness: multiply the drop slope drop_k")
+parser.add_argument("--layout_seed", type=int, default=None, help="S1: material-field layout seed (held-out ≠ 0)")
 parser.add_argument("--gt_velocity", action="store_true", help="diagnosis: actor sees true base velocity, not V_0")
 parser.add_argument("--stall", type=float, default=None, help="diagnosis: override the AX-12A stall torque, N·m")
 parser.add_argument("--servo", nargs="*", default=[], help="diagnosis: AX-12A cfg overrides, e.g. compliance_slope=4")
@@ -110,6 +112,9 @@ if s0b:
         cfg.scene.terrain.terrain_generator = single_type_generator(args.terrain_type)
 if args.no_drops:
     cfg.drop_p0 = cfg.drop_k = 0.0
+cfg.drop_k *= args.drop_k_mult
+if args.layout_seed is not None:
+    cfg.events.terrain_materials.params["seed"] = args.layout_seed
 if args.rest_tibia_deg is not None:
     cfg.scene.robot.init_state.joint_pos[".*_tibia"] = math.radians(args.rest_tibia_deg)
 if "mast" in args.ablate:
@@ -277,12 +282,21 @@ if s0a:
     m["gt_velocity"] = args.gt_velocity
 if s1 and env.aux.stats_frozen:  # V tests (v7 §4.3) and aux losses on this evaluation's own rollout
     m.update({f"vtest_{k}": v for k, v in env.aux.v_tests().items()})
+    m.update({f"skill_{k}": v for k, v in env.aux.probe_skill().items()})
     with torch.no_grad():
         m.update({f"aux_{k}": v.item() for k, v in env.aux.losses(env.aux.buffer.sample(8192, env.step_dt)).items()})
     m["e_gate"], m["v0_drop_p"] = env.e_gate, env.v0_drop_p
 if s0b:
     vx_c, vy_c, wz_c = args.cmd
-    m.update(cmd=args.cmd, terrain_level=args.terrain_level, terrain_type=args.terrain_type, no_drops=args.no_drops)
+    m.update(
+        cmd=args.cmd,
+        terrain_level=args.terrain_level,
+        terrain_type=args.terrain_type,
+        no_drops=args.no_drops,
+        drop_k_mult=args.drop_k_mult,
+        layout_seed=args.layout_seed,
+        servo=args.servo,
+    )
     m["vx_rmse_step"] = ((vx_traj - vx_c).pow(2) * live_traj).sum().div(live_traj.sum()).sqrt().item()
     standing = vx_c == vy_c == wz_c == 0.0
     if standing:

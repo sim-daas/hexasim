@@ -23,7 +23,7 @@ Paper wording: “KiVi re-implemented on our platform under our training paradig
 | Kickstarting KL anchor (Schmitt 2018) | ~~Adopted, S1 → first 10 % of S2~~ **Void since 2026-09-23** (warm start dropped, §4.2 outcome; §4.4 kept for the record) | Was gait insurance for a warm-started actor; with π\_S0 trained from scratch there is no lineage to anchor to |
 | Residual policy | Fallback only | Caps the ceiling and reads as a bolt-on. If used for one arm, used for all |
 | World-model perception (WMP, Lai 2025) | Prior art to position against; optional arm B3 | Nearest mechanism competitor, below |
-| Symmetry augmentation / mirror loss | Not adopted | Pulls an asymmetric warm start toward symmetry; mirrored RGB is physically exact only if the colour optical centre sits on the sagittal plane |
+| Symmetry augmentation / mirror loss | **Augmentation adopted from S0b for every arm** (§1, research D21); mirror loss not adopted | Vision stages (2026-09-30, D35): mirrored RGB is physically exact only if the colour optical centre sits on the sagittal plane, so the D435 is mounted with its colour optic on the sagittal plane, and the depth corruption (§7.3, incl. the one-sided occlusion shadow) is applied **after** mirroring |
 
 **Positioning gap in v7 §1.** KiVi is the nearest *system* competitor, but the nearest *mechanism* is [WMP](https://arxiv.org/abs/2409.16784): a Dreamer-style recurrent world model over depth and proprioception whose recurrent state drives the policy, trained without teacher–student. Its ablation credits predicting proprioception with capturing physical properties of the environment. PIE (RA-L 2024) also predicts the next observation in a single stage. Neither appears in v7's prior-art table, and a reviewer will raise WMP first.
 
@@ -69,7 +69,7 @@ Your message repeats v1's E1–E8 almost verbatim, including the pasted paradigm
 | V1-9 | §1, §2.2 | Blind arms in S2/S3 not pinned to the vision arms' env count | Equal env steps and equal updates require equal batch; all arms run S2/S3 at N\_v (§1) |
 | V1-10 | §5, §9 | 4,096 envs everywhere; 20 vision runs never budgeted | Your hardware is one RTX A4000 16 GB. Budget arithmetic and cut order in §10.2 |
 | V1-11 | §7.3 | \~150 floats per buffered step | Undercounts labels; \~340 floats (§8.3). Still small |
-| V1-12 | §1, §6, §8.1 | S0/S1 rollout stated as 8,192 × 24, “measured blind optimum” | The base run used 16 steps per env and was undocumented. S0/S1 = 8,192 × 16 until a sweep says otherwise |
+| V1-12 | §1, §6, §8.1 | S0/S1 rollout stated as 8,192 × 24, “measured blind optimum” | The base run used 16 steps per env and was undocumented. S0/S1 = 4,096 × 16 (research D1: the base run's logged batch; “8,192” was a transcription error) |
 
 ### 0.4 Defects in v7 surfaced by this pass
 
@@ -118,7 +118,7 @@ Your message repeats v1's E1–E8 almost verbatim, including the pasted paradigm
 | --- | --- | --- |
 | Robot asset | Same USD, including camera mast mass and inertia, for blind arms too | Otherwise B0 vs vision is confounded by payload |
 | Actuator | v7 §5.1: P-only at measured gain, compliance margin/slope, saturation, velocity falloff, 10-bit quantisation, backlash, deadband, 4–12 ms bus latency | Tracking error is a torque proxy only if the servo model is faithful |
-| Dropped reads *(new)* | Per-servo drops with probability rising with commanded torque or tracking error; ZOH of q and of the last valid q̇; 18-bit validity mask in every per-step input, B1-K's kinesthetic history included; one fill implementation for sim and robot | v7 §4.2a. Drops concentrate on rough terrain; an arm that never sees them is off-distribution exactly there |
+| Dropped reads *(new)* | Per-servo drops with probability rising with commanded torque (servo load, research D8; tracking error rejected); ZOH of q and of the last valid q̇; 18-bit validity mask in every per-step input, B1-K's kinesthetic history included; one fill implementation for sim and robot | v7 §4.2a. Drops concentrate on rough terrain; an arm that never sees them is off-distribution exactly there |
 | Joint velocity *(new, closes A10)* | Two-sample backward difference of ZOH-filled, quantised positions: q̇\_t = (q\_t − q\_{t−2}) / 2Δt. If either endpoint is a held value, hold the last valid q̇. No recursive filter. Quantum 0.128 rad/s, group delay 20 ms. Frozen before S0 | A one-sample difference halves the delay but doubles the quantum (0.256 rad/s). A recursive filter adds delay the 60 ms horizon cannot afford. π\_S0 bakes this choice in |
 | Rewards | v7 §2 set with the §2.2/§2.3/§2.6 fixes; anneal and floors per §5 of this document | — |
 | Training algorithm *(new)* | PPO with left–right mirror data augmentation (rsl\_rl `symmetry_cfg`, augmentation only): reflection y → −y, legs RF↔LF, RM↔LM, RB↔LB, coxa angle/rate/action sign flipped, femur and tibia kept, axial quantities (ω, yaw command) negated, per-leg blocks permuted (the tripods swap = the clock shifted by π). On from S0b for every arm; mapping verified against the simulator to < 1 mm toe error (research/phase2-progress §2.1.27) | The platform is mirror-symmetric but the π\_base lineage was not: it turned one way and stood on one side. An arm trained without it would carry a different asymmetry into the comparison |
@@ -127,7 +127,7 @@ Your message repeats v1's E1–E8 almost verbatim, including the pasted paradigm
 | Critic | Separate network, same architecture; input sg\[actor obs\] ⊕ privileged contract P, with P identical for all arms (§3.5) | Value quality must not differ by privileged content |
 | Probes | Universal probe set (§3.2), β-NLL, constant weight — B1-K excepted by design | Equal supervision budget |
 | Warm start | **Removed 2026-09-23** (§4.2 control-arm outcome): every arm starts from π\_S0, which is itself trained from scratch; no KL anchor (§4.4 is void). Widening per §4.3 still applies at S1 | The blind from-scratch control passed the S0b gates at 0.30 × the warm-start budget, so the warm start bought nothing and would only carry the π\_base lineage's asymmetries into every arm |
-| Envs and batch *(new)* | S0/S1: 8,192 × 16 (base run; unverified optimum). S2/S3: N\_v envs × T\_v steps for **every** arm, blind arms included, with N\_v·T\_v ≥ 24,576 | Equal env steps and equal updates imply equal batch. Otherwise B0 at 8,192 envs gets a 16× larger batch than a vision arm at 512 |
+| Envs and batch *(new)* | S0/S1: 4,096 × 16 (the base run's real batch and the compute limit, research D1; the earlier “8,192” was wrong). S2/S3: N\_v envs × T\_v steps for **every** arm, blind arms included, with N\_v·T\_v ≥ 24,576 | Equal env steps and equal updates imply equal batch. Otherwise B0 at 4,096 envs gets an 8× larger batch than a vision arm at 512 |
 | Camera, vision arms | Colour intrinsics (§7.5); extrinsics ±2° / ±5 mm; 30 Hz, rendered on camera ticks only (§7.3); latency up to the measured hardware p99, with drops; rolling shutter; depth corruption (§7.3); one image operator (§7.5). B1-K also at 30 Hz | Platform properties, not method parameters |
 | Staleness, vision arms *(new)* | rem\_60, rem\_200, rem\_400 and the 150 ms vision-loss cutoff (v7 §4.9a) | Asynchrony is a platform property; an arm without these features is handicapped by an unmodelled input |
 | Modality dropout | v7 §5.5 rates, vision arms | — |
@@ -165,6 +165,8 @@ Your message repeats v1's E1–E8 almost verbatim, including the pasted paradigm
 **Actor:** \[o\_p, z\_p, ê, twist, M\*\]. M\* is a privileged material strip per leg: 8 × 3 points (forward −6 to +15 cm, lateral ±3 cm, 3 cm spacing) anchored at that leg's nominal foothold in the body frame. Each point carries (μ\_s, μ\_d, log k, log c): 6 × 24 × 4 = 576 dims.
 
 M\* is computed from the current base pose and terrain, so it is causal and action-independent (fixes V1-3). The strip reaches +15 cm because the 400 ms-horizon landing point sits at most \~11 cm ahead of nominal at 0.15 m/s: 6 cm of travel plus \~5 cm to the front of the stroke. Height is deliberately excluded, so O vs B0 isolates the value of knowing the *material* ahead. The nominal foothold is the rest-pose toe position in the body frame (fixed, clock-independent).
+
+**O-geo (added 2026-10-02, research D37).** A second oracle, identical to O except that its privileged block is **H\*** = terrain height at the same 6 × 24 strip points minus the terrain height at that leg's nominal foothold (shape ahead, independent of body height and swing phase) (144 dims, own zero-held block, appended at the end of the union layout) instead of M\*. O (= O-mat) vs B0 measures the value of knowing the *material* ahead (the S3 / friction claim); O-geo vs B0 measures the value of knowing the *shape* ahead (the S2 / depth claim: gentle first contact on bumps and steps instead of a collision followed by a correction). Both are sim-only, blind, never rendered, and branch from the same S1 trunk.
 
 **Purpose:** O is anticipatory by construction. If O ≈ B0 on transition terrain, anticipation has no value on this task and every vision run is wasted. O branches at S2 from the shared S1 (§10.1), which makes O–B0 a paired comparison; it runs S2/S3 at N\_v envs without rendering.
 
@@ -226,7 +228,7 @@ Target restricted to the q, q̇, tracking-error and IMU dims of o\_p^{t+k}. Acti
 
 ### 2.9 Actor observation layouts
 
-Dims are per block. S1 uses the union of all layouts except B1-K's, with unused blocks held at exactly zero (§10.1).
+Dims are per block. S1 uses the union of all layouts except B1-K's, with unused blocks held at exactly zero (§10.1). Column O = O-mat; O-geo has the same layout with H\* in place of M\*. H\* was added after S1: the S1 trunks are widened by its 144 zero columns at the S2 branch (§4.3 rule), for every arm.
 
 | Block | Dims | O | B0 | B1-K | B1-M | B2 | F | B3 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -235,6 +237,7 @@ Dims are per block. S1 uses the union of all layouts except B1-K's, with unused 
 | z\_K | 20 | — | — | ✓ | — | — | — | — |
 | ê = \[v̂\_b, f̂\] | 15 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | M\* material strips | 576 | ✓ | — | — | — | — | — | — |
+| H\* height strips (O-geo only, sim; appended last, research D37) | 144 | O-geo | — | — | — | — | — | — |
 | z\_s, z\_F | 20 | — | — | ✓ | ✓ | — | — | — |
 | Three output tokens | 192 | — | — | — | — | u | ẑ | ẑ |
 | v\_ℓ ⊙ m\_ℓ for L1, R1 | 128 | — | — | — | — | ✓ | ✓ | ✓ |
@@ -466,7 +469,7 @@ After S1, a blind segment at N\_v × T\_v until returns plateau, before any bran
 |  | S0a / S0b Recondition | S1 / S1b Blind trunk | S2 Depth | S3 RGB-D |
 | --- | --- | --- | --- | --- |
 | Runs | S0a + S0b, shared; + 1 from-scratch control | 5 seeds (§10.1; 2026-09-28: 5 run — 8 would be needed for 8 paired B2/F seeds, §10.2) + 5 S1-K (3 if B1-K is cut, §10.2) | Per arm × seed | Per arm × seed |
-| Envs × rollout | 8,192 × 16 | 8,192 × 16; S1b at N\_v × T\_v | N\_v × T\_v | N\_v × T\_v |
+| Envs × rollout | 4,096 × 16 (D1) | 4,096 × 16 (D1); S1b at N\_v × T\_v | N\_v × T\_v | N\_v × T\_v |
 | Renderer | None | None | TiledCamera depth (vision arms); none for O, B0 | Real-time RTX RGB + depth; none for O, B0 |
 | Actor inputs | o\_p + substitution ramp (S0a); + twist\_cmd (S0b) | Final union layout, zero-init; clock observable; vision and M\* slots zeroed | Arm's own slots live; clock dropout 0 → 100 % over the first 30 % | Deployment layout; clock zeros |
 | Auxiliary losses | V\_0 if needed | L\_est, L\_probe (z\_p heads), L\_vic | + arm-specific: FAH, L\_jepa, … | Same |
@@ -493,7 +496,7 @@ The copy-last check is essential. On a quasi-periodic gait, a predictor that rep
 
 ### 6.2 The RTX A4000 envelope
 
-One RTX A4000 with 16 GB; 8,192 × 16 is the base run's setting, not a verified optimum; the vision ceiling is unknown. Measure it before any pilot:
+One RTX A4000 with 16 GB; 4,096 × 16 (D1) is the base run's setting and the S0/S1 batch, not a verified optimum; the vision ceiling is unknown. Measure it before any pilot:
 
 1. Run the full S3 stack — renderer, E\_v, FAH, P, critic, buffer on host — at N ∈ {256, 512, 1,024}.
 2. Record env-steps/s and peak VRAM.
@@ -528,7 +531,7 @@ No camera in S0/S1; run headless with cameras disabled. B0 and O stay blind thro
 1. Clip to \[Z\_min, 3.0\] m, with Z\_min from the bench.
 2. Disparity-domain noise σ\_Z = Z² σ\_d / (f B), B = 50 mm, f at capture resolution, σ\_d \~ U\[0.05, 0.15\] px.
 3. Invalidation band of 1–3 px at depth discontinuities.
-4. One-sided occlusion-shadow band beside discontinuities.
+4. One-sided occlusion-shadow band beside discontinuities. The whole post-process runs **after** mirror augmentation (D35), so a mirrored sample keeps the shadow on the physical side.
 5. Alignment holes where colour-to-depth reprojection is occluded.
 6. Material-bound dropout: per-material hole probability and blob size, sampled jointly with friction. Specular and transparent entries drop out; PTFE, talc and graphite do not (V1-2).
 7. Random blob dropout, 0–5 % of the image.
@@ -601,7 +604,7 @@ At the end of S2, evaluate F and B2 on step-up and step-down transitions, sharp 
 
 | Parameter | S0 / S1 | S2 / S3 |
 | --- | --- | --- |
-| Envs × steps per rollout | 8,192 × 16 (base run; unverified optimum) | N\_v × T\_v, with N\_v·T\_v ≥ 24,576 |
+| Envs × steps per rollout | 4,096 × 16 (base run, D1; unverified optimum) | N\_v × T\_v, with N\_v·T\_v ≥ 24,576 |
 | γ / λ | 0.99 / 0.95 | Same |
 | Clip | 0.2 | Same |
 | Epochs × minibatches | 5 × 4 | 5 × 4 |
@@ -636,7 +639,7 @@ At the end of S2, evaluate F and B2 on step-up and step-down transitions, sharp 
 - Samples only positions whose targets are all resolved and with no reset in \[t − W, t + k\_max\] — v7 §4.12's masking.
 - The same number of auxiliary minibatches per PPO iteration for every arm.
 
-**Memory.** About 340 floats per step: ≈ 89 MB at N\_v = 512, ≈ 1.4 GB at S1's 8,192 envs — put it in pinned host memory if VRAM is tight. Vision frames are 128 × 96 × (3 B RGB + 2 B fp16 depth + 1 B validity) ≈ 73.7 KB, 77 frames per env over 128 steps at 30 Hz: ≈ 2.9 GB at N\_v = 512, in pinned host memory. At N\_v ≤ 512 store every env; v1's 512-env subset rule is no longer needed.
+**Memory.** About 340 floats per step: ≈ 89 MB at N\_v = 512, ≈ 0.7 GB at S1's 4,096 envs — put it in pinned host memory if VRAM is tight. Vision frames are 128 × 96 × (3 B RGB + 2 B fp16 depth + 1 B validity) ≈ 73.7 KB, 77 frames per env over 128 steps at 30 Hz: ≈ 2.9 GB at N\_v = 512, in pinned host memory. At N\_v ≤ 512 store every env; v1's 512-env subset rule is no longer needed.
 
 ### 8.4 Latent drift into the actor
 
@@ -669,7 +672,7 @@ With the standard residual block — two causal convs, n\_c = 2 — and k = 3, d
 
 **Retraining:** none. E\_p is new at S1 regardless.
 
-**Open dependency.** If evaluation commands reach \~0.5 m/s (f → 2.5 Hz, a 20-step period), 50 steps spans 2.5 cycles and 25 may suffice. The command distribution is still unstated.
+**Open dependency.** If evaluation commands reach \~0.5 m/s (f → 2.5 Hz, a 20-step period), 50 steps spans 2.5 cycles and 25 may suffice. Resolved: the command distribution is stated in §1 (training v\_x ~ U[0.05, 0.20] m/s, evaluation 0.10 / 0.15 m/s), so 25 steps is below one stance at the 0.8 Hz floor. Sweep outcome (research §2.2.10, D32): the rule selects no window (W 25 better on V, worse on both probes); W = 50 kept as a deviation because blind S1 metrics cannot see what a longer window buys in S2/S3.
 
 ### 9.2 Velocity and acceleration in the history
 
@@ -715,7 +718,7 @@ R\_v is the measured env-steps/s at N\_v with the S3 renderer (§6.2); using it 
 
 If T\_vision exceeds your calendar, cut in this order: B3 → B1-K to 3 seeds → B1-M to 3 seeds. Never shorten S3 to save time.
 
-**Primary pre-registered statistic:** a paired t-test on seed-level mean F − B2 differences, with a 95 % CI. The sign test is secondary: with 5 pairs its minimum p is 1/32, and its power is ≈ 0.33 if P(F > B2 per seed) = 0.8. Target 8 F/B2 seeds, funded by dropping B3 and reducing B1-K first; 5 remains the hard floor.
+**Primary pre-registered statistic:** a **one-sided** paired t-test (H1: F > B2) on seed-level mean F − B2 differences, α = 0.05, with a 95 % CI. The unit of analysis is the **seed**: episodes are averaged within seed per condition before the test; episodes are never the unit. The sign test is secondary: with 5 pairs its minimum p is 1/32, and its power is ≈ 0.33 if P(F > B2 per seed) = 0.8. Target 8 F/B2 seeds, funded by dropping B3 and reducing B1-K first; 5 remains the hard floor.
 
 Run order: O and B0 (the headroom gate) → B2 → F → B1-M → B1-K → B3.
 
@@ -724,8 +727,8 @@ Run order: O and B0 (the headroom gate) → B2 → F → B1-M → B1-K → B3.
 - Frozen terrain set: sharp, gradual, visual-only and physical-only transitions × friction and compliance, plus the matched matte/shiny pair at equal friction (v7 §12).
 - Common random numbers: identical material draws, spawn poses and commands across arms, per episode.
 - ≥ 200 episodes per condition per seed, deterministic actions.
-- Report IQM with stratified bootstrap 95 % CIs (rliable), probability of improvement of F over B2, all five per-seed F − B2 differences individually, and the pre-registered sign test.
-- Behaviour metrics: stride shortening and stance extension primary, CoM lowering secondary (v7 §5.2); lead time and peak GRF as headline.
+- Report IQM with stratified bootstrap 95 % CIs (rliable), probability of improvement of F over B2, all five per-seed F − B2 differences individually, and the sign test as a **secondary** statistic (§10.2).
+- Behaviour metrics (revised 2026-10-02, research §2.3.4–2.3.7): **primary = task metrics in a window around each transition** — cycle-averaged v\_x tracking error, stance slip, falls — and, for geometric transitions, **first-contact impact** (peak normal force at touchdown / leg load, toe speed at touchdown, stumbles = touchdowns before 60 % of the median swing); **reaction lead time** (when the gait changes relative to the first front-leg touchdown on the transition) and peak GRF as headline. Stride shortening, stance extension and CoM lowering are **descriptive only**: under the shared reward the profitable anticipatory response is holding the commanded speed, not shortening the stride (research §2.3.4), so a stride-based primary metric would read ≈ 0 for every arm.
 - Hardware checkpoint: the **median** seed by a fixed sim validation metric, pre-registered. Mandatory on hardware: B0, B2, F. Recommended: B1-M.
 
 ### 10.4 Secondary result (TBD): held-out harder-terrain suite
@@ -746,6 +749,8 @@ Sim-only unless rough hardware surfaces are built; the headline claim stays fric
 | Outcome | Interpretation | Action |
 | --- | --- | --- |
 | O ≈ B0 | No anticipation headroom on this task | Stop. Redesign terrain, speeds or transitions before any vision work |
+| *New:* O-geo > B0, O(-mat) ≈ B0 | Shape foresight pays, material foresight does not | Keep S2 (depth) arms; the friction / S3 claim has no headroom — narrow the claim to geometry before S3 |
+| *New:* O(-mat) > B0 only on slopes / steps × low μ | Material foresight matters only where gravity loads the contact (flat low-μ is harmless for this robot, research §2.3.4) | Evaluate and report material transitions on slopes and steps; flat material transitions are a negative control |
 | F ≈ B2 in S3 (paired CI includes 0) | **Core claim falsified:** the contribution reduces to foothold-attended fusion | Reframe or stop before hardware |
 | F > B2, but B1-M ≥ F | Global memory fusion suffices | Claim too weak to submit |
 | F > B2 only on sharp boundaries | Edge detection, not physics anticipation | Investigate RGB shortcuts |
@@ -764,13 +769,13 @@ Sim-only unless rough hardware surfaces are built; the headline claim stays fric
 
 **Code-level correctness fixes come first, then S0, then the blind O-vs-B0 headroom gate; no vision run starts before that gate passes.**
 
-1. **Correctness changes before any run:** separate critic with contract P (§3.5); sequence buffer with episode masking (§8.3); β-NLL at constant weight (§3.3–3.4); phase-free floors (§5); velocity pipeline, toe point and friction combine mode frozen (§1); gradient-routing unit tests (§8.2).
-2. Static torque envelope at rest pose (§4.2 prerequisite). S0 audit is done (§4.1).
-3. Widening, normaliser carry, and the 1e-6 unit test (§4.3).
-4. S0a and S0b, plus the from-scratch control arm; pass the gates (§4.2).
-5. S1 × 5 and S1-K × 5, then S1b (§6.0); W sweep on S1 (§9.1); V must pass v7 §4.3 before FAH trains.
+1. **Correctness changes before any run:** separate critic with contract P (§3.5); sequence buffer with episode masking (§8.3); β-NLL at constant weight (§3.3–3.4); phase-free floors (§5); velocity pipeline, toe point and friction combine mode frozen (§1); gradient-routing unit tests (§8.2). **Done** (research §2.0–2.2).
+2. Static torque envelope at rest pose (§4.2 prerequisite). S0 audit is done (§4.1). **Done in sim** (research §2.0.3); bench confirmation pending.
+3. Widening, normaliser carry, and the 1e-6 unit test (§4.3). **Done** (widening test max |Δ| 0.0, research §2.2.3; normaliser carry void with the warm start).
+4. S0a and S0b, plus the from-scratch control arm; pass the gates (§4.2). **Done** (research §2.1.30–2.1.39).
+5. S1 × 5 and S1-K × 5, then S1b (§6.0); W sweep on S1 (§9.1); V must pass v7 §4.3 before FAH trains. **S1 × 5 done 2026-09-30** (research §2.2.11), W sweep done (D32), V passes; S1-K and S1b open.
 6. **O vs B0 headroom test** — blind S2/S3, no rendering. Gate for everything below.
-7. Bench, one day: Z\_min at 848 × 480; the mount at pitch 45–50° (§7.5); bus drop rate against torque; latent\_age p99; rolling-shutter readout.
+7. Bench, one day: Z\_min at 848 × 480; the mount at pitch 45–50° (§7.5); bus drop rate against torque; latent\_age p99; rolling-shutter readout; **servo stall, compliance slope, backlash, bus latency (18-servo read cycle)**. Deferred past S1 by user decision (research D34). **Pre-registered keep/rerun rule:** the S1 trunks are kept iff every measured value (stall, compliance slope, backlash, latency, drop slope vs load) lies inside the range randomised in training; otherwise every arm reruns from S0b on the corrected model. The v\_kin stance constants (D26) are recalibrated on bench data in either case.
 8. Renderer pinning and temporal-artifact tests (§7.4); N\_v benchmark or compute upgrade (§6.2).
 9. Real-surface fill-rate bench; visual-detectability gate (§7.6).
 10. One-seed pilot of B2 and F through S2 → fix budgets (§6.1); feasibility check (§10.2).
@@ -779,7 +784,7 @@ Sim-only unless rough hardware surfaces are built; the headline claim stays fric
 
 **Still needed from you**
 
-- [ ] Static torque envelope at rest pose, femur vs stall (§4.2)
+- [x] Static torque envelope at rest pose, femur vs stall (§4.2) — done in sim (research §2.0.3); bench confirmation pending
 - [ ] Per-tile μ\_s / μ\_d by tilt and drag test on the robot; foot tip material (§1)
 - [ ] Body-frame lateral y of the L1/R1 toe at nominal stance (§7.5)
 - [ ] N\_v benchmark or compute-upgrade decision (§6.2, blocked)

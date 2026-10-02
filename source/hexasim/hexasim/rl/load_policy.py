@@ -22,6 +22,7 @@ def task_for(ck: dict) -> str:
 def configure(cfg, ck: dict) -> None:
     if "s1_state" in ck:
         cfg.aux.window = ck["s1_state"]["window"]
+        cfg.arm = ck["s1_state"].get("arm", "B0")  # S1 trunks predate the field (they are B0-layout)
 
 
 def load_env_state(env, ck: dict) -> None:
@@ -32,6 +33,7 @@ def load_env_state(env, ck: dict) -> None:
         env.aux.load_state_dict(ck["aux_state_dict"])
         env.e_gate = 1.0 if ck["s1_state"]["gate_iter"] >= 0 else 0.0
         env.v0_drop_p = ck["s1_state"]["v0_drop_p"]
+        env.clock_drop_p = ck["s1_state"].get("clock_drop_p", 0.0)
 
 
 def eval_physx_buffers(cfg) -> None:

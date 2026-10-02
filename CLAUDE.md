@@ -155,12 +155,19 @@ code before relying on any line here.
   requests past the ±55° clip (0.026–0.029 rad/step vs 0.015 in π_S0), to revisit in S2. Checkpoint
   `logs/rsl_rl/hexapod_s1/2026-09-26_19-41-49_s1_pilot3_seed42_resume4500/model_7999.pt`. W sweep done: **W = 50** (D32).
   **5 S1 trunks** (seeds 42–46, D31; run dirs `…/hexapod_s1/*_s1_w50_seed4{3..6}`): **all five** pass every gate with 0
-  falls in 21,760 episodes and a small seed spread (§2.2.11) — the pairing units for the spec §10.1 statistics. Next (spec §12): N_v benchmark → S1b → S2 reward design → blind O vs B0 headroom
-  test before any vision arm; S1-K (B1-K trunk) deferred. Eval seeds must be fixed across arms: terrain geometry
+  falls in 21,760 episodes and a small seed spread (§2.2.11) — the pairing units for the spec §10.1 statistics. Next: the blind headroom pilot (bullet below), then N_v benchmark → S1b → S2; S1-K (B1-K trunk)
+  deferred. Eval seeds must be fixed across arms: terrain geometry
   depends on the run seed (Isaac Lab rough/bump terrains use numpy's global RNG, §2.2.9).
   Gotchas: `OPENBLAS_NUM_THREADS=1` for Kit scripts; evals next to S1 training need `load_policy.eval_physx_buffers`;
   load S1 checkpoints with `load_policy.load_env_state` before `env.reset()`; a resume (`--resume --load_run … --checkpoint
   …`) writes a new run dir and `max_iterations` counts from the loaded iteration.
+- **S1 review response (research/phase2-progress §2.3, 2026-10-02):** W 50 is deviation D32 (rule selects no W); trunks
+  hold every gate at 15 ms latency + 2× drop slope; held-out material layout (seed 1) ≡ training layout — frozen evals
+  use layout ≠ 0; flat-ground friction is harmless for this robot, so material transitions matter only on slopes/steps;
+  **primary behaviour metrics = transition-window tracking/slip/falls + first-contact impact, stride descriptive (D38)**.
+  **Next: blind headroom pilot B0 vs O-mat (M*) vs O-geo (H* height strips, D37)** from seed 43 at 4,096 × 16, spec
+  in §2.3.7 (pre-registered go/no-go). Partly implemented (`Hexapod-S2-v0`, `train.py --branch_from`, `env.clock_live`,
+  `cfg.arm`, `S1PPO` clock anneal/re-burn-in); H* block, trunk widening, smoke test and the headroom eval still to do.
 - **S0b (research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
   clock, standing mode at zero command (`env.cpg_active`), terrain curriculum (`mdp/terrain.py`, height map gives
   `env.terrain_z` / `terrain_normal`; never use absolute z), full DR incl. per-env foot material (bound on the tibia

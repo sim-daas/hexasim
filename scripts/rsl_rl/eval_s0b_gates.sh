@@ -6,13 +6,14 @@
 #   standing (zero command) on levels 0, 5 and 9; turning (D19): on the spot ±0.3 rad/s and walk 0.10 m/s + 0.2 rad/s
 #   on levels 0 and 5.
 # Usage: scripts/rsl_rl/eval_s0b_gates.sh <checkpoint> <tag> [num_envs]   (num_envs = episodes per condition, 256)
+# EXTRA="..." appends eval_s0.py flags to every condition, e.g. EXTRA="--servo max_delay=3 --drop_k_mult 2".
 set -euo pipefail
 CK=$1
 TAG=$2
 N=${3:-256}
 mkdir -p logs/eval
 ev() { python scripts/rsl_rl/eval_s0.py --headless --task "${TASK:-Hexapod-S0b-v0}" --ckpt "$CK" --num_envs "$N" \
-  --out "logs/eval/${TAG}_$1.json" "${@:2}" > /dev/null 2>&1; }
+  --out "logs/eval/${TAG}_$1.json" "${@:2}" ${EXTRA:-} > /dev/null 2>&1; }
 for L in 0 5 9; do
   for V in 0.10 0.15; do
     ev "v${V}_L${L}" --cmd "$V" 0 0 --terrain_level "$L"

@@ -660,7 +660,6 @@ class HexapodEnvCfg_PLAY(HexapodEnvCfg):
         self.episode_length_s = 10000.0
 
 
-
 @configclass
 class HexapodFlatResumeEnvCfg(HexapodEnvCfg):
     """Resume variant — no curriculum, max target weights from start."""
@@ -775,7 +774,6 @@ class HexapodS0aEnvCfg_PLAY(HexapodS0aEnvCfg):
         self.scene.num_envs = 1
         self.scene.env_spacing = 2.5
         self.episode_length_s = 10000.0
-
 
 
 ##
@@ -1029,6 +1027,8 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
     drop_k_scale_range: tuple[float, float] = (0.5, 2.0)
     # Material field seed: fixed so every arm and seed sees one terrain material layout.
     material_field_seed: int = 0
+    # Arm (paradigm spec §2): the S1 trunk is B0-layout; "O" makes M* live from S2 (contract P's material strips).
+    arm: str = "B0"
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -1054,6 +1054,13 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
         # 6.7 cm rest target); middle/back keep the rest reach. Two-sided, weight unchanged.
         self.rewards.cpg_z_target.params["step_height"] = 0.04
         self.rewards.touchdown_reach.params["front_reach"] = 0.10
+
+
+@configclass
+class HexapodS2EnvCfg(HexapodS1EnvCfg):
+    """S2 blind arms O / B0 (headroom pilot, phase2-progress §2.3): S1 + per-episode clock dropout driven by the
+    algorithm (``S1PPO.clock_anneal_iters``); ``arm`` = "O" or "B0" (Hydra ``env.arm=O``). Rewards = S1: the
+    clock-phase terms leave with the clock (``env.clock_live``)."""
 
 
 @configclass

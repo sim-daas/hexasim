@@ -246,6 +246,20 @@ class FootWriter:
             self.write(ids, vals)
 
 
+def strip_course(env, start: float = 0.5, length: float = 0.5, low=(0.25, 0.22, 6.0), high=(0.9, 0.85, 6.0)):
+    """Evaluation-only transition course (phase2-progress §2.3): replaces the env's material field by one strip of
+    ``low`` (μ_s, μ_d, log10 k) at world x ∈ [start, start + length) m ahead of each env's spawn, ``high`` elsewhere.
+    Patches ``env.palette.at``, so foot physics, probe labels, contract P and O's M* all see the course. Needs flat
+    tiles and reset yaw 0 (the strip lies across world x)."""
+    lo, hi = torch.tensor(low, device=env.device), torch.tensor(high, device=env.device)
+
+    def at(field, xy: torch.Tensor) -> torch.Tensor:
+        s = xy[..., 0] - env.spawn_xy[:, 0].view(-1, *([1] * (xy.dim() - 2)))
+        return torch.where(((s >= start) & (s < start + length)).unsqueeze(-1), lo, hi)
+
+    env.palette.at = at
+
+
 def build_terrain_materials(mesh_path: str, device, seed: int, res: float = 0.02):
     """Build the field over the terrain mesh's extent (same origin as ``HeightMap``) and add one visual submesh per
     library entry (dominant entry at each triangle's centroid, semantic label = entry). The source mesh stays the only

@@ -1791,28 +1791,36 @@ W = 25 and W = 75 trained at seed 42 for 8,000 iterations with the final S1 code
 episodes × 17 gate conditions, material probe, leg-gap / swing probes). Summary by
 `scripts/rsl_rl/summarize_s1_runs.py` (`logs/s1_sweep_summary.md`); full table in `phase2-run-logs.md` §2.2.10.
 
-| | W 25 | **W 50** (pilot 3 = seed 42) | W 75 | W 50, seeds 42–45 range |
+| | W 25 | W 50, seed 42 (pilot 3, resumed) | W 75 | **W 50, seeds 43–46 range** (clean runs) |
 | --- | --- | --- | --- | --- |
 | Gates (17 conditions) | all pass, 0 falls | all pass, 0 falls | all pass, 0 falls | all pass, 0 falls |
 | V slip RMSE, training 6k–8k (m/s) | **0.0527** | 0.0564 | 0.0597 | 0.0550–0.0566 |
-| V rigid RMSE, training 6k–8k | 0.0269 | 0.0284 | 0.0294 | 0.0281–0.0284 |
-| Current-probe NLL, training 6k–8k | −0.0904 | −0.0999 | −0.1034 | −0.1132 … −0.0999 |
-| Touchdown-probe NLL | 0.0863 | 0.0742 | 0.0660 | 0.0569–0.0742 |
+| V rigid RMSE, training 6k–8k | 0.0269 | 0.0284 | 0.0294 | 0.0281–0.0283 |
+| Current-probe NLL, training 6k–8k | −0.0904 | −0.0999 | −0.1034 | −0.1132 … −0.1069 |
+| Touchdown-probe NLL | 0.0863 | 0.0742 | 0.0660 | 0.0569–0.0667 |
 | Gait (lift, reach, gap, coxa range) | equivalent | equivalent | equivalent | — |
 
-**Decision: W = 50 for every arm** (the seeds already use it). The spec rule — the smallest W within noise of the best,
-on V's slip-stratified error and the current-probe NLL — does not produce a single winner, because the two criteria
-pull in opposite directions. With the W 50 seed spread as the noise yardstick:
+The noise yardstick is the spread of seeds **43–46**, not 42: pilot 3 was resumed at 4,500 with a restarted RNG and a
+refilled aux buffer, and it is the outlier on the probe NLL (revised 2026-09-30 after the external S1 review; the
+first version of this section used 42–45).
 
-- **W 75** is worse than every W 50 seed on V (0.0597 vs ≤ 0.0566), and its probe advantage lies inside the W 50 seed
-  range. Dominated.
-- **W 25** is better than every W 50 seed on V (0.0527 vs ≥ 0.0550), and worse than every W 50 seed on the current probe
-  (−0.090 vs ≤ −0.100) and on the touchdown probe. A genuine trade-off. W 25 is below one stance at the 0.8 Hz floor
-  (31 steps), and its weaker touchdown-timing probe is exactly the capacity S2 needs once the clock leaves (spec §9.1
-  reasons 1–2).
+**What the §9.1 rule gives.** The rule is "the smallest W within noise of the best, on V's slip-stratified error and the
+current-probe NLL". Against the 43–46 range:
 
-Caveat: one seed per W; the sweep ran against seed 42, whose probe NLL is the weakest of the four W 50 seeds (resumed
-run). Gait effects of W are within seed-to-seed scatter.
+- **W 25** lies outside the range on both criteria, in opposite directions: better on V (0.0527 < 0.0550, ≈ 4 seed sd),
+  worse on the current probe (−0.090 > −0.107) and on the touchdown probe (0.086 > 0.067). It is *not* within noise of
+  the best on the probe criterion, so the rule does not select it (and the seeds need no rerun).
+- **W 75** is worse than every clean W 50 seed on V (0.0597) *and* on the current probe (−0.103 > −0.107); only its
+  touchdown NLL (0.066) is inside the range. Dominated.
+- **W 50** is not the best on V either, so the rule, applied literally, selects **no** window: the two criteria disagree.
+
+**Decision: W = 50 for every arm — a deviation (D32), not a sweep result.** Reason: blind S1 scoring is biased toward
+short windows. Both §9.1 criteria are measured on the S1 limit-cycle gait, where one gait period of history suffices;
+what a longer window buys — state estimation on off-limit-cycle gaits once the clock leaves in S2, touchdown timing
+(W 25 = 0.5 s is below one stance at the 0.8 Hz floor, 31 steps) — is invisible to a blind S1 metric. The weaker W 25
+touchdown probe is the one S1-measurable signal of that capacity. Revisit only if an S2 pilot shows no W effect.
+
+Caveat: one run per W (seed 42, not resumed for W 25 / 75). Gait effects of W are within seed-to-seed scatter.
 
 ### 2.2.11 S1 seeds (W 50): the result is robust across seeds
 
@@ -1869,7 +1877,7 @@ trunks, so these five are the pairing units (D31: five trunks cap B2 / F at the 
 | # | Deviation | Why |
 | --- | --- | --- |
 | D31 | S1 trunk seeds: 5 (42–46), not 8 | User decision (compute). Spec: B2 / F target 8 paired seeds, hard floor 5; every arm except B1-K branches from an S1 seed, so 5 trunks cap B2 / F at the floor unless three more trunks are trained |
-| D32 | W sweep at one seed; W 50 chosen on a criteria trade-off, not by the spec's "smallest W within noise of the best" | The two §9.1 criteria disagree (§2.2.10) |
+| D32 | W 50 kept as a deviation: the §9.1 rule selects no window (W 25 better on V, worse on both probes, vs the clean seeds 43–46) | Blind S1 metrics cannot see what a longer window buys in S2 / S3 (§2.2.10) |
 
 **Keep in mind for S2 and later:**
 
@@ -1931,3 +1939,188 @@ the clock anneal, O's M* path) and the blind headroom test, not the vision arms 
    §6.0 S1b, stage-table KL row, §8.2 routing) and in CLAUDE.md's paradigm rules. §4.4 stays as the record.
 4. **Play config guarded.** `eval_s0.py` now refuses `*-Play-v0` tasks, and the S1 Play config carries a comment that
    its pilot-2 reward values are demo-only (§2.2.9).
+
+## Phase 2.3: S1 review response — sim-only corrections before the N_v benchmark (started 2026-09-30)
+
+An external review of the S1 results raised eight items plus spec drift. User decisions (2026-09-30): the hardware bench
+is deferred until the sim-only S1 results are presented (D34); in the vision stages mirror augmentation stays, with the
+colour optic on the sagittal plane and depth corruption after mirroring (D35); the blind O vs B0 headroom pilot is built
+and run now at 4,096 × 16 as a non-reportable go/no-go.
+
+### 2.3.1 Review items already resolved or stale
+
+- Seed counts and the KL anchor were reconciled in the spec on 2026-09-29 (§2.2.12); nothing left.
+- The W comparison was written up (§2.2.10) but used seeds 42–45 as the noise yardstick and was framed as a sweep
+  result. Revised: yardstick = clean seeds 43–46; W 25 lies outside that range on **both** criteria in opposite
+  directions (better V, worse probes), so the §9.1 rule selects no window and the seeds need no rerun; W 50 is recorded
+  as deviation D32 with the reason that blind S1 metrics are biased toward short windows.
+
+### 2.3.2 Spec drift fixed (paradigm spec v2)
+
+Batch 8,192 → 4,096 × 16 (D1) in §1, V1-12, stage table, §6.2, §8.1, §8.3 memory note; §0.1 symmetry row (adopted,
+D21/D35); dropped-reads row (load, D8); §9.1 stale command-distribution note resolved + sweep outcome; §10.2 primary
+test made **one-sided** paired t-test with the seed as the unit; §10.3 sign test secondary; §12 steps 1–5 marked, torque
+envelope "sim done, bench pending", bench keep/rerun rule pre-registered (step 7); §7.3 corruption after mirroring. v7
+camera-mount item: colour optic on the sagittal plane.
+
+### 2.3.3 Deviations added
+
+| # | Deviation | Why |
+| --- | --- | --- |
+| D34 | Servo/bus bench deferred past S1; trunks trained on datasheet servo values | User timeline (sim-only results first). Keep/rerun rule pre-registered in spec §12 step 7; v_kin recalibrated on bench data regardless |
+| D35 | Mirror augmentation kept in S2/S3: D435 colour optic on the sagittal plane, depth corruption after mirroring | A mirrored frame must correspond to a camera the robot has; the one-sided occlusion shadow must stay on the physical side |
+| D36 | Latency DR 1–3 physics steps (5–15 ms) from S1b for every arm | Spec says 4–12 ms; trained 5–10 ms; trunks hold every gate at 15 ms (§2.3.5) |
+| D37 | Second oracle O-geo (H*, 144-D) beside O-mat | Spec O excludes height, so it cannot test shape foresight (§2.3.6) |
+| D38 | Primary behaviour metrics = transition-window task metrics + first-contact impact; stride descriptive | Under the shared reward stride shortening is not the profitable anticipatory response (§2.3.4) |
+
+### 2.3.4 Does the reward pay for anticipation? (review item 3)
+
+`scripts/tests/anticipation_economy.py` (new): transition course `mdp.materials.strip_course` — one 0.5 m rigid low-μ
+strip across the path (μ_d = 0.88 μ_s), μ 0.9 / 0.85 elsewhere; spawn at the tile centre, yaw 0; command 0.15 m/s,
+256 envs × one 10 s episode, deterministic. `walk` = the policy as is; `cautious` = scripted stride shortening (the
+actor sees v_x × 0.73 from 0.3 m before the strip to its end; clock and rewards keep 0.15). Reward summed over the
+episode, dt-scaled; S2 = S1 minus the four clock-phase terms. Policy: S1 seed 43 (`…_s1_w50_seed43/model_7999.pt`).
+
+| Course | walk: falls; v_x / slip on strip (m/s) | walk reward S1 | cautious − walk, S1 / S2 | biggest term of the difference |
+| --- | --- | --- | --- | --- |
+| flat, μ 0.25 | 0; 0.149 / 0.015 | 504.5 | −94.8 / −92.3 | track_lin_vel −98.2 |
+| flat, μ 0.10 | 0; 0.146 / 0.025 | 491.2 | −89.6 / −87.8 | track_lin_vel |
+| flat, μ 0.05 | 0; 0.143 / 0.035 | 474.2 | −83.2 / −81.4 | track_lin_vel −88.9 |
+| slope down 15°, μ 0.9 (control) | 0; 0.149 / 0.019 | 463.5 | −85.8 / −86.3 | track_lin_vel |
+| slope down 15°, μ 0.25 | 0; **0.188** / 0.067 | 384.4 | −22.3 / −23.6 | track_lin_vel −32.9 |
+| slope up 15°, μ 0.9 (control) | 0; 0.142 / 0.012 | 428.8 | −55.3 / −58.6 | track_lin_vel |
+| slope up 15°, μ 0.25 | 0; **0.101** / 0.074 | 338.7 | −29.8 / −34.5 | track_lin_vel −52.3 |
+
+Reading:
+
+1. **On flat ground friction does not matter** for this 3.2 kg hexapod at 0.15 m/s: even μ 0.05 (below the library's
+   0.2 minimum) costs the unwarned walker 30 reward units in 10 s, with no falls and 3.5 cm/s toe slip. There is nothing
+   to anticipate on flat transitions; any headroom must come from slopes (and steps) × low μ.
+2. **On 15° slopes a μ 0.25 strip is expensive** (−79 downhill: the robot runs away at 0.188 m/s; −90 uphill: it
+   stalls at 0.101 m/s) — so a policy that knows the strip is coming *can* gain.
+3. **But the gain is not in stride shortening.** Shortening cut slip only 0.067 → 0.055 m/s and still lost 22–35 units,
+   almost all through `track_lin_vel` (per-step exp σ 0.05 + L1, ×30). The slip-related term
+   (`stance_rigidity_contact`) moved by +0.5. `touchdown_reach` taxes it little (+2.4 in favour of cautious). The
+   reviewer's risk is confirmed in a sharper form: under this reward the optimal anticipatory response is to *hold the
+   commanded speed* on the strip, not to shorten the stride, so stride shortening as the primary behaviour metric
+   (spec §10.3) would likely read "no effect" for every arm.
+4. The per-step tracking term is the tax: slowing by 27 % for ≈ 5 s costs ≈ 90 units anywhere, while the worst
+   physical outcome of not slowing costs ≤ 90 and never a fall.
+
+### 2.3.5 Robustness, held-out layout, compliance and probe skill (review items 2 sim proxy, 5, 6, 8)
+
+Driver `scripts/rsl_rl/eval_s1_review.sh` (all five trunks, 256 deterministic episodes per cell; JSON
+`logs/eval/review_s4<N>_*.json`), new `eval_s0.py` flags `--drop_k_mult`, `--layout_seed` and the `skill_*` outputs of
+`S1Aux.probe_skill()`; `scripts/rsl_rl/eval_s0b_gates.sh` takes `EXTRA="…"` for every condition.
+
+```
+scripts/rsl_rl/eval_s1_review.sh s42=<pilot3 model_7999> s43=… s44=… s45=… s46=…
+python scripts/tests/gait_by_material.py --headless --split compliance --cmd {0.10,0.15} s43=<ckpt> s46=<ckpt>
+```
+
+**Latency 15 ms + 2× drop slope** (`--servo min_delay=3 max_delay=3 --drop_k_mult 2`, i.e. above the trained 5–10 ms
+and at drop slopes up to 4× nominal; 83 of 85 cells — s42 `stand_L0` and `v0.15_L0` did not write output, Kit exit):
+**0 falls in every cell**, every S0b gate still passes: stride error 0.10 m/s −3.2 … +0.4 %, 0.15 m/s −5.5 … −2.5 %
+(nominal −2.6 … +0.1 %), worst cycle RMSE 0.0077 m/s (gate 0.03), turn on the spot +0.280 … +0.290 / −0.277 … −0.285
+(nominal ≈ ±0.30), standing drift ≤ 1.5 cm. Latency costs ≈ 2–3 % of stride at 0.15 m/s and ≈ 5 % of turn rate, nothing
+else. Against the pre-registered bench rule (spec §12 step 7) this is reassurance, not a substitute: if the bench reads
+a latency above 10 ms the rule still says rerun — but the trunks show no cliff up to 15 ms.
+
+**Held-out material layout** (layout seed 1 vs the training layout 0; walking 0.10 / 0.15 on levels 0, 5, 9, five
+seeds, 30 cells each): indistinguishable — 0 falls both; stride −3.1 … +2.9 % vs −3.0 … +2.6 %; V slip / rigid RMSE
+0.036 / 0.018 both; probe skill identical to the second decimal (below). **Nothing is memorised.** From now on every
+frozen evaluation set uses layout seed ≠ 0 (training keeps 0).
+
+**Probe skill vs the mean predictor** (R² = 1 − SSE/SST against the batch mean; contact: Brier skill; mean over the 30
+cells, layout 0 → 1):
+
+| Probe | R² | Reading |
+| --- | --- | --- |
+| contact (Brier skill) | 0.989 → 0.990 | |
+| current μ_s, front legs / rear four legs | 0.639 → 0.628 / 0.701 → 0.698 | **the trailing-leg half exists**: z_p knows the friction under the feet that have touched it |
+| current log k, rear legs | 0.566 → 0.568 | compliance is sensed too, less well |
+| touchdown μ_s / log k | 0.642 → 0.644 / 0.558 → 0.557 | |
+| touchdown Δt | 0.922 → 0.927 | |
+| damping (per env, D25) | ≈ 0 | expected: it is constant within an episode and barely observable |
+
+**Compliance signature at matched friction** (μ 0.8 / 0.75 both groups, rigid k 1e6 vs foam k 3.2e3; seeds 43, 46;
+0.10 and 0.15 m/s): foam toes sit **1.6 mm lower** in stance (+0.01 … +0.02 → −0.14 … −0.15 cm), femur + tibia stance
+tracking error rises **5–12 %** (e.g. 7.03 → 7.81°, 5.40 → 5.77°), swing lift drops 0.1–0.2 cm, speed, slip and gaps
+unchanged. Consistent in sign across seeds and speeds, and the log-k probes are well above the mean predictor, so the
+proprioceptive signature exists — but it is small (PhysX's effective foot stiffness ≈ 2.5 × nominal, §2.1). The
+compliance half of the claim is therefore **kept as secondary**; whether foresight of it buys anything is answered by
+O-mat on the compliance-only transitions of the headroom pilot (§2.3.7), and if O-mat ≈ B0 there, the headline narrows
+to friction before S2.
+
+### 2.3.6 Decisions (user, 2026-10-02)
+
+1. **Option A — keep the reward, change the primary metric.** S2 reward = S1 reward; the clock-phase terms leave with
+   the clock. The primary behaviour metrics become task metrics in a window around each transition (tracking error,
+   slip, falls) plus first-contact impact on geometric transitions (the user's case: a policy that knows a bump is
+   coming touches it gently; a reactive one collides first and then adapts); reaction lead time and peak GRF headline;
+   stride shortening descriptive (spec §10.3 revised). **D38.**
+2. **Two oracles.** The spec's O sees material only (height deliberately excluded), so it cannot test the bump case.
+   O-mat (= spec O, M*) and **O-geo** (H*: terrain height at the same strip points relative to the nominal-foothold
+   ground, 144-D) both branch with B0 from one trunk (spec §2.2, §2.9, §11 updated). **D37.**
+3. Bench deferred (D34), mirror kept for the vision stages with the colour optic on the sagittal plane (D35) — §2.3.3.
+
+Deviations added: D36 latency DR widened to 1–3 physics steps (5–15 ms) from S1b for every arm (the trunks hold at 15 ms,
+§2.3.5; the spec's 4–12 ms range was not covered); D37 O-geo; D38 primary metrics.
+
+### 2.3.7 The O vs B0 headroom pilot — exactly what will be run (not started; implemented in a separate session)
+
+**Question.** Would perfect foresight of the ground ahead help a blind walker at all? O-mat answers it for material
+(friction, softness — the S3 claim), O-geo for shape (bumps, steps, rough ground — the S2 claim). It is *not* a test of
+latent prediction (that is F vs B2). If neither oracle beats B0, no camera-based method can either, and the vision runs
+stop (spec §11).
+
+**Arms** (one seed: S1 seed 43, a fresh run, not resumed; non-reportable go/no-go at 4,096 × 16 — the reportable
+version runs later at N_v × T_v):
+
+| Arm | Actor input on top of B0 | What it isolates |
+| --- | --- | --- |
+| B0 | — (M*, H* held at exactly zero) | reactive baseline |
+| O-mat | M*: (μ_s, μ_d, log k, log c) at 6 legs × 24 points from −6 to +15 cm around each nominal foothold (contract P's material strips) | material foresight |
+| O-geo | H*: terrain height at the same points minus the nominal-foothold ground | shape foresight |
+
+**Training, identical for all three:** `train.py --task Hexapod-S2-v0 --branch_from <seed-43 model_7999.pt>`
+(Hydra `env.arm=…`), S1 reward, S1 terrain (levels 0–14 incl. stairs, slopes ≤ 15°, bumps; materials layout 0), S1 DR,
+mirror augmentation, 6,000 iterations (≈ 393 M env steps), per-episode clock dropout 0 → 1 over the first 1,800
+iterations (30 %), actor frozen for 50 re-burn-in iterations at the branch, milestone review every 2,000 iterations
+(gait regression watch: leg gap, lift per leg type, landing reach, coxa range, clip term). Run one at a time on tmux 0:2,
+≈ 7 h each.
+
+**Evaluation** (clock fully dropped = deployment; layout seed 1; fixed eval seeds; common random numbers across arms;
+≥ 256 episodes per condition; deterministic):
+
+| Condition | Course | Expected if foresight helps |
+| --- | --- | --- |
+| Material, gravity-loaded | `strip_course` μ 0.25 strip on 15° slope up / down (+ μ 0.9 control) | O-mat < B0 on tracking error and slip in the window |
+| Material, flat (negative control) | μ 0.25 and foam strips on flat | O-mat ≈ B0 (§2.3.4: flat friction is harmless) |
+| Compliance only | foam strip at matched μ, flat and slope | O-mat < B0 on sink-driven tracking error, if at all |
+| Shape | bumps, stairs up / down, rough — training level 9 and 14, held-out 17 | O-geo < B0 on first-contact impact and stumbles |
+| All | the 17 S0b gate conditions | no arm worse than B0 (gates still pass) |
+
+Window metrics: ±0.5 m around the transition: cycle-averaged v_x error, stance slip, falls; per touchdown: peak normal
+force in the first 40 ms after contact ÷ static leg load (L1, never squared), toe speed at touchdown, stumbles
+(touchdowns before 60 % of the median swing duration); reaction lead time (first gait change vs the first front-leg
+touchdown on the transition); stride length descriptive.
+
+**Pre-registered go / no-go** (per oracle, against B0, episode-bootstrap 95 % CI over the evaluation episodes):
+- **Go** if the oracle improves its target metric by ≥ 10 % with the CI excluding 0 on its own conditions (O-mat: slope
+  × μ 0.25 tracking error or slip; O-geo: first-contact impact or stumble rate on bumps / stairs), and passes every gate.
+- **No-go** for both → stop before N_v (spec §11, first row). O-geo only → keep the S2 depth arms, narrow the claim to
+  geometry before S3 (spec §11, new row). O-mat on the flat negative control ≠ B0 → investigate (shortcut).
+
+**Code state for the separate session.** Already written this session (uncommitted, S1 behaviour unchanged,
+`scripts/tests/test_s1.py` passes): `env.clock_on` / `env.clock_live` (clock observation and the four clock-phase terms
+share one per-episode flag); `cfg.arm` with O's M* = contract P's strips; `S1PPO` branch logic (`clock_anneal_iters`,
+`reburn_iters`, M* normaliser statistics set from the first batch and unfrozen); checkpoint fields `s2_start`,
+`clock_drop_p`, `arm` (read by `load_policy`); `train.py --branch_from`; `Hexapod-S2-v0` + `PPORunnerCfg_S2`
+(`hexapod_s2`, anneal 1,800); `mdp.materials.strip_course`; `scripts/tests/anticipation_economy.py`. **Not run in sim
+yet.** Still to do: (1) H* block `h_star` (144, appended last; mirror = strip with one value per point) and the O-geo
+fill; (2) widen the 1,125-D trunk to the new layout at the branch for every arm — actor and the critic's first layer
+(zero columns inserted after the actor block, before P), normaliser identity on the new dims — with a widening test
+< 1e-6 in `test_s1.py`; (3) a 20-iteration branch smoke test per arm (clock_drop_p ramps, actor frozen 50 iterations,
+O-mat M* statistics set, B0 / O-geo M* columns get zero gradient); (4) the headroom evaluation (window and impact
+metrics above, transition courses with fixed seeds); (5) the three runs and the evaluation.

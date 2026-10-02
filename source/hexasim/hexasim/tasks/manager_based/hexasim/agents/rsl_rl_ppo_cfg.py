@@ -121,6 +121,8 @@ class S1PpoAlgorithmCfg(S0PpoAlgorithmCfg):
     imu_zero_min: float = 1.5  # v7 §4.3 test 2 ("materially": provisional)
     v0_retire_delay: int = 1000
     v0_retire_iters: int = 1000
+    clock_anneal_iters: int = 0  # S2 only: per-episode clock dropout 0 → 1 over this many iterations
+    reburn_iters: int = 50  # S2 only: actor frozen after the branch
 
 
 @configclass
@@ -150,3 +152,15 @@ class PPORunnerCfg_S1(PPORunnerCfg_S0b):
         self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
             use_data_augmentation=True, use_mirror_loss=False, data_augmentation_func=mirror_augmentation_s1
         )
+
+
+
+@configclass
+class PPORunnerCfg_S2(PPORunnerCfg_S1):
+    """Blind S2 arms (O / B0), branched from an S1 trunk with ``train.py --branch_from``."""
+
+    experiment_name = "hexapod_s2"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.clock_anneal_iters = 1800  # 30 % of the 6,000-iteration headroom pilot (spec §5)

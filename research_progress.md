@@ -45,7 +45,7 @@ verbatim per-run logs and milestone tables: `research/phase2-run-logs.md`. Secti
 `phase2-progress.md`. Plain-language overview (architecture built vs planned, stages, arms, rewards, progress):
 `docs/dashboard/hexasim-dashboard.html` (open in a browser; source fragment `docs/dashboard/dashboard-source.html`).
 
-### Status at a glance (2026-09-30)
+### Status at a glance (2026-10-02)
 
 | Stage | Status | Artefact |
 | --- | --- | --- |
@@ -55,10 +55,13 @@ verbatim per-run logs and milestone tables: `research/phase2-run-logs.md`. Secti
 | From-scratch control arm (spec §4.2) | Passed at 0.30 × the warm-start budget | → warm start and KL anchor dropped for every arm |
 | S1 infrastructure (materials, E_p, V, probes, contract P, S1PPO) | Done, merge-gating tests pass | `Hexapod-S1-v0` |
 | S1 pilot (seed 42, W 50) | Accepted 2026-09-27 | `logs/rsl_rl/hexapod_s1/2026-09-26_19-41-49_s1_pilot3_seed42_resume4500/model_7999.pt` |
-| S1 W sweep (W 25, 75; seed 42) | Done: **W = 50 kept** for every arm (§2.2.10) | `…/hexapod_s1/2026-09-27_12-18-34_s1_sweep_w25_seed42`, `…/2026-09-27_20-17-13_s1_sweep_w75_seed42` |
+| S1 W sweep (W 25, 75; seed 42) | Done: rule selects no W; **W = 50 kept as deviation D32** (§2.2.10) | `…/hexapod_s1/2026-09-27_12-18-34_s1_sweep_w25_seed42`, `…/2026-09-27_20-17-13_s1_sweep_w75_seed42` |
 | S1 seeds at W 50 (5 trunks, D31) | **Done: all 5 seeds (42–46) evaluated — every gate passes, 0 falls in 21,760 episodes, small seed spread** (§2.2.11) | `…/hexapod_s1/2026-09-2{8,9}_*_s1_w50_seed4{3,4,5,6}` |
 | S1-K (B1-K's own trunk, ×5) | Not started, deferred by design (B1-K is first in the cut order) | — |
-| N_v benchmark, S1b, O vs B0 headroom test, S2, S3 | Not started (N_v blocks S1b and the S2/S3 batch, spec §6.2) | — |
+| S1 review response (2.3) | Done: spec drift fixed, W = 50 as deviation, latency / held-out layout / compliance / probe-skill evals, anticipation economy | §2.3 |
+| O vs B0 headroom pilot (B0, O-mat, O-geo; seed 43, 4,096 × 16) | **Designed, partly implemented, not run** (§2.3.7) | — |
+| Soft-ground compliance (5–10 mm sink, D39) | Planned, not implemented: solver check → two soft entries → pilot conditions | Phase 2.3 section |
+| N_v benchmark, S1b, S2, S3 | Not started (after the headroom pilot) | — |
 
 Headline: π_S0 passes every spec §4.2 S0b gate with **0 falls in 17,408 evaluation episodes**, all 108
 training-range terrain cells and 0 falls in all 180 sweep cells up to 4 cm stairs / ≈ 20° slopes; the S1 pilot keeps
@@ -448,11 +451,11 @@ training or evaluation: the saved configs of every S1 run differ only in their i
 and bump terrains use numpy's global RNG, so each seed trains on its own terrain instance; eval seeds must stay fixed
 across arms.
 
-**W sweep → W = 50.** All three windows pass every gate with equivalent gaits; W shows only in the learned
-representations, and the spec's two criteria disagree. V's slip error prefers short windows (W 25 0.0527 m/s, W 50
-0.0550–0.0566 across seeds, W 75 0.0597), and the probes prefer long ones (current NLL −0.090 / −0.100 … −0.113 / −0.103).
-W 75 is dominated (worse V than every W 50 seed, probe gain inside the seed spread). W 25 trades V for touchdown timing
-(below one stance at 0.8 Hz, the capacity S2 needs once the clock leaves). W 50 is kept (D32).
+**W sweep → W = 50, as a deviation (D32).** All three windows pass every gate with equivalent gaits. Against the clean
+W 50 seeds 43–46 (seed 42 was resumed): W 25 is better on V's slip error (0.0527 vs 0.0550–0.0566) but worse on both
+probes (current NLL −0.090 vs −0.113 … −0.107); W 75 is worse on V and the current probe. The §9.1 rule therefore selects
+no window. W 50 is kept because blind S1 metrics are biased toward short windows: what a longer window buys (estimation
+off the limit cycle once the clock leaves, touchdown timing; W 25 is below one stance at 0.8 Hz) is invisible in S1.
 
 **S1 seeds (W 50), all five (42–46), 256 episodes × 17 conditions each:**
 
@@ -499,7 +502,79 @@ its own terrain instance — reproduce it. These five trunks are the pairing uni
 
 ---
 
-### Deviations from the specs (D1–D33, reasons in `research/phase2-progress.md`)
+### Phase 2.3 — S1 review response (2026-09-30 → 2026-10-02)
+
+An external review of the S1 results asked for eight checks before more seeds. Sim-only answers (the servo bench is
+deferred until the sim results are presented, D34; keep/rerun rule pre-registered in spec §12 step 7):
+
+| Review item | Result |
+| --- | --- |
+| W choice | Against the clean seeds 43–46 the §9.1 rule selects no window (W 25 better V, worse probes); W 50 kept as deviation D32 — blind S1 metrics cannot see what a longer window buys later |
+| Servo / bus latency | Spec 4–12 ms vs trained 5–10 ms. At 15 ms and 2× drop slope all five trunks keep every gate, 0 falls (stride −2…−3 %, turn rate −5 %). Latency DR widened to 5–15 ms from S1b (D36) |
+| Reward vs anticipation | `anticipation_economy.py`: flat-ground friction is harmless for this robot (even μ 0.05: 0 falls); on 15° slopes a μ 0.25 strip costs ≈ 80–90 reward (runaway / stall), but stride shortening barely reduces slip and loses to velocity tracking. → primary metrics become transition-window tracking / slip / falls and first-contact impact; stride descriptive (D38) |
+| Mirror in vision stages | Kept: colour optic on the sagittal plane, depth corruption after mirroring (D35) |
+| Compliance signature | Small but consistent: foam sinks 1.6 mm more, stance tracking error +5–12 %; compliance kept as a secondary claim |
+| Probe skill | z_p beats the mean predictor: friction R² 0.63–0.70 (rear legs 0.70 — the trailing-leg half exists), log k 0.56, touchdown timing 0.92 |
+| Headroom test now | Designed: B0 vs O-mat (material foresight) vs O-geo (shape foresight, new, D37) from seed 43, blind, non-reportable go/no-go with pre-registered rules (phase2-progress §2.3.7) |
+| Held-out material layout | Layout seed 1 ≡ layout 0 on every metric — nothing memorised; frozen eval sets use layout ≠ 0 |
+| Spec drift | Batch 4,096 × 16, one-sided paired t-test with the seed as unit, sign test secondary, symmetry row, dropped-reads row, §9.1, §12 progress — fixed |
+
+#### Planned: soft-ground compliance (D39, decided 2026-10-02 — to do, nothing implemented or run yet)
+
+**Why.** Outdoor dirt / clay sinks ≈ 5–10 mm under a foot. The simulator has never produced that: the softest library
+entry (foam, nominal k 2e3–8e3 N/m) gave a *measured* 1.6 mm of extra stance sink at k 3.2e3 (§2.3.5), and scaling by
+1 / k gives an *estimated* ≈ 2.6 mm at k 2e3, ≈ 3.5 mm with the +1 kg payload — PhysX applies the stiffness per contact
+point, so the ground behaves ≈ 2.5 × stiffer than nominal. Every trunk has therefore seen ≤ ≈ 3.5 mm, and a
+"no headroom for compliance" result from the pilot would say nothing about real soft ground.
+
+**What is and is not modelled** (to be stated in the paper):
+
+| | Status |
+| --- | --- |
+| Friction | Spatial material field, 10-entry library μ 0.2–1.1, per-episode value inside each entry's range, per-foot writes, combine mode multiply verified by slide / tilt tests |
+| Compliance | PhysX spring–damper contact, k 2e3–5e4 N/m, c 10–200 N·s/m — too stiff for soil; spatially varying damping had no effect (spike T6) |
+| Not modelled (PhysX cannot) | Permanent sinkage and ruts, granular flow (gravel rolling, mud shearing), sinkage-dependent friction |
+
+Scope of the claim that follows: surfaces with Coulomb friction and *elastic* softness (tiles, mats, foam, firm soil).
+Mud and loose gravel are out of scope and reported as a limitation unless a sinkage model is added. The sim2real risk is
+the appearance → physics binding (it transfers only for surfaces whose real μ and k are measured and inside the
+randomised ranges); the trailing-leg path learns from what the feet feel and transfers as long as real contact falls
+inside those ranges.
+
+**Clarifications recorded with the decision.** (i) Joint tracking error `q_cmd − q` is an observation and v_kin's stance
+cue, not a reward term: soft ground costs the policy only through body height, pitch, touchdown timing and velocity
+tracking. (ii) The clock and the four clock-phase reward terms leave over the first 30 % of **S2**, not in S1b (S1b is
+the blind batch-size change with the clock on); the headroom pilot is a blind S2, so they leave there. (iii) "Oracle ≫
+blind on soft ground" is the hypothesis the pilot tests, not an assumption — on flat friction it already failed.
+
+**Steps, in order:**
+
+1. **Solver check (sim only, before any training on it).** Static-load and walking sink test at nominal k 4e2 N/m, 5 ms
+   step (pattern: `scripts/tests/material_field_test.py`, `gait_by_material.py --split compliance`): sink ≈ leg load /
+   k_eff, no jitter, no toe passing through the terrain mesh. If it fails: raise the softest k until it holds and record
+   the reachable sink.
+2. **Two provisional library entries** (wide randomisation instead of bench numbers, user decision): `soft_soil`
+   k 4e2–1e3 N/m, μ 0.4–0.7; `wet_clay` k 6e2–2e3 N/m, μ 0.25–0.5 — target 5–10 mm sink at 10.5–14 N per leg. Ranges are
+   placeholders until the bench.
+3. **Introduce them for every arm at the same point:** at the branch of the headroom pilot (B0, O-mat, O-geo, non-
+   reportable) and formally at **S1b** for the reportable runs — the library is a shared invariant (spec §1), like the
+   latency change D36. Probe target statistics (`probe_stats_pi_s0.pt`) stay fixed (softer k only gives larger z-scores);
+   recompute only if the log-k probe degrades.
+4. **Re-run V's tests on soft ground** (slip-stratified error, IMU-zero ratio): uneven sink changes the tracking-error
+   and toe-plane cues v_kin's stance weights use (D26).
+5. **Pilot evaluation gets soft-ground conditions:** foam, soft_soil and wet_clay strips at matched μ on flat and on 15°
+   slopes; window metrics as §2.3.7 plus stance sink, body height / pitch error and touchdown-timing error.
+6. **Claim rule.** Compliance is promoted from a secondary to a primary claim (beside slip) only if O-mat beats B0 on the
+   soft-ground conditions under the pre-registered go rule (≥ 10 %, CI excluding 0, every gate passing); otherwise the
+   headline stays friction and soft ground is reported as tested-without-benefit.
+7. **Bench, with the deferred servo bench (D34):** static and walking sink per leg on real dirt / clay under known load;
+   fit k and μ; apply the keep/rerun rule (keep iff the fitted values lie inside the randomised ranges).
+
+**Next (order):** soft-ground solver check → remaining headroom pieces (H* block, trunk widening, the two soft entries,
+branch smoke test, headroom evaluation incl. soft-ground conditions) → run B0 / O-mat / O-geo from seed 43 → go/no-go
+(phase2-progress §2.3.7) → only then N_v → S1b (latency 5–15 ms, soft entries) → S2.
+
+### Deviations from the specs (D1–D39, reasons in `research/phase2-progress.md`)
 
 | # | Deviation | § |
 | --- | --- | --- |
@@ -534,8 +609,14 @@ its own terrain instance — reproduce it. These five trunks are the pairing uni
 | D29 | S1 reward: `cpg_z_target` 4 cm, per-leg `touchdown_reach` (front 10 cm) | 2.2.8 |
 | D30 | Back-coxa clip excess accepted in S1, revisit in S2 (mostly the resumed pilot: fresh seeds 0.018–0.019) | 2.2.8, 2.2.11 |
 | D31 | 5 S1 trunk seeds (42–46), not 8: caps B2 / F at the 5-seed floor unless three more trunks are trained | 2.2.12 |
-| D32 | W sweep at one seed; W 50 chosen on a criteria trade-off (the two §9.1 criteria disagree) | 2.2.10 |
+| D32 | W 50 kept as a deviation: §9.1 rule selects no window vs clean seeds 43–46; blind S1 metrics favour short W | 2.2.10 |
 | D33 | `non_foot_body` (femur < 5 cm, −30) never annealed: live since S0a (the resume config dropped its schedule); ≈ 0 effect, same for every arm; decide in S2 | 2.2.12 |
+| D34 | Servo / bus bench deferred past S1; keep/rerun rule pre-registered | 2.3.3 |
+| D35 | Mirror kept in vision stages: colour optic on the sagittal plane, corruption after mirroring | 2.3.3 |
+| D36 | Latency DR 5–15 ms from S1b, every arm | 2.3.5 |
+| D37 | Second oracle O-geo (height strips) beside O-mat | 2.3.6 |
+| D38 | Primary metrics: transition-window tracking / slip / falls + first-contact impact; stride descriptive | 2.3.4, 2.3.6 |
+| D39 | Planned: soft-ground entries `soft_soil`, `wet_clay` (k 4e2–2e3 N/m, 5–10 mm sink) for every arm from the headroom pilot / S1b; elastic only, mud and gravel out of scope | Phase 2.3 summary above |
 
 ### Lessons from Phase 2 (checklist for S2/S3)
 
@@ -565,7 +646,8 @@ its own terrain instance — reproduce it. These five trunks are the pairing uni
 **Left in S1:** S1-K ×5 for B1-K later (its own KiVi-style trunk, not needed before B1-K's S2); S1b once N_v is known.
 All five S1 trunks (seeds 42–46) are trained and evaluated.
 
-**Next phase — not yet the vision arms.** Spec §12 order: (1) **N_v benchmark** on the A4000 with a rendering + E_v
+**Superseded 2026-10-02 by the order at the end of the Phase 2.3 section** (headroom pilot before N_v; S2 reward =
+S1 reward, D38). Kept for the record — spec §12 order as of 2026-09-30: (1) **N_v benchmark** on the A4000 with a rendering + E_v
 prototype (decides the S2 / S3 batch N_v × T_v for every arm, blind ones included); (2) **S1b** per seed at N_v × T_v;
 (3) **S2 reward design** with the clock and clock-phase terms annealed together over the first 30 % of S2, checked
 with the per-term ledger (4 cm lift floor weight ≈ 0.48 / s, D30 clip term, the front-leg reach target, and

@@ -97,6 +97,12 @@ parser.add_argument(
     help="π_base (→ S0a) or π_S0a (→ S0b) checkpoint to widen into the actor (hexasim.rl.s0_ppo). Critic starts fresh.",
 )
 parser.add_argument(
+    "--branch_from",
+    type=str,
+    default=None,
+    help="S1 checkpoint to branch an S2 arm from: full runner state (actor, critic, aux, iteration), new run dir.",
+)
+parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
@@ -271,6 +277,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO]: Loading model checkpoint from: {resume_path}")
             # load previously trained model
             runner.load(resume_path)
+        elif args_cli.branch_from:
+            print(f"[INFO]: Branching from: {args_cli.branch_from}")
+            runner.load(args_cli.branch_from)
         elif args_cli.warmstart:
             from hexasim.assets.robot import PXMARK4_CFG
             from hexasim.rl.s0_ppo import warmstart_actor_state, widen_actor_state

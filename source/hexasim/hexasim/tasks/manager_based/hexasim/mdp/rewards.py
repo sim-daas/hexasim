@@ -472,7 +472,7 @@ def cpg_z_target_l1_penalty(
     target_z = step_height * torch.sin(phases / swing_end * math.pi) * is_swing
     toe_z = toe_pos_w(robot, asset_cfg.body_ids)[..., 2]
     error = torch.abs(toe_z - (target_z + env.cpg_foot_baseline)) / step_height
-    return (error * is_swing).sum(dim=1) * env.cpg_active
+    return (error * is_swing).sum(dim=1) * env.clock_live
 
 
 def cpg_z_target_kernel_reward(
@@ -495,7 +495,7 @@ def cpg_z_target_kernel_reward(
     target_z = step_height * torch.sin(phases / swing_end * math.pi) * is_swing
     toe_z = toe_pos_w(robot, asset_cfg.body_ids)[..., 2]
     k = torch.exp(-torch.square((toe_z - (target_z + env.cpg_foot_baseline)) / sigma)) * is_swing
-    return k.sum(dim=1) / is_swing.sum(dim=1).clamp(min=1) * env.cpg_active
+    return k.sum(dim=1) / is_swing.sum(dim=1).clamp(min=1) * env.clock_live
 
 
 def cpg_force_target_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -509,7 +509,7 @@ def cpg_force_target_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg)
     is_stance = phases >= swing_end
     stance_phase = (phases - swing_end) / (2.0 * math.pi - swing_end) * math.pi
     target = env.tripod_leg_load * torch.sin(stance_phase) * is_stance
-    return torch.abs(force_z - target).mean(dim=1) * env.cpg_active
+    return torch.abs(force_z - target).mean(dim=1) * env.clock_live
 
 
 def coxa_leg_geometry(env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor]:
@@ -564,7 +564,7 @@ def cpg_coxa_contact_reward(
     planted = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
     is_stance = env.cpg_phase >= _swing_end(env)
     rate = torch.clamp(sign * joint_vel, -max_rate, max_rate)
-    return (rate * (is_stance & planted)).sum(dim=1) * env.cpg_active
+    return (rate * (is_stance & planted)).sum(dim=1) * env.clock_live
 
 
 def cpg_stance_rigidity_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -572,7 +572,7 @@ def cpg_stance_rigidity_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCf
     robot: Articulation = env.scene[asset_cfg.name]
     joint_vel = robot.data.joint_vel.torch[:, asset_cfg.joint_ids]
     is_stance = (env.cpg_phase >= _swing_end(env))[:, joint_leg_index(robot, asset_cfg.joint_ids)]
-    return (torch.abs(joint_vel) * is_stance).sum(dim=1) * env.cpg_active
+    return (torch.abs(joint_vel) * is_stance).sum(dim=1) * env.clock_live
 
 
 # ---------------------------------------------------------------------------

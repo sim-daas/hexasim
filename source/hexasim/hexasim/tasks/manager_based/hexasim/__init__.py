@@ -106,6 +106,16 @@ gym.register(
 )
 
 gym.register(
+    id="Hexapod-S2-v0",
+    entry_point=f"{__name__}.hexapod_env:HexapodS1Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.hexapod_env_cfg:HexapodS2EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg_S2",
+    },
+)
+
+gym.register(
     id="Hexapod-S1-Play-v0",
     entry_point=f"{__name__}.hexapod_env:HexapodS1Env",
     disable_env_checker=True,

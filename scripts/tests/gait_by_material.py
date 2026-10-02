@@ -3,19 +3,24 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Gait metrics split by ground friction (phase2-progress §2.2.6: swing-lift drift and leg clearance in the S1 pilot).
+"""Gait metrics split by ground friction or compliance (phase2-progress §2.2.6 lift and clearance; §2.3 sink).
 
 Hexapod-S1-v0, flat tiles, fixed walking command, deterministic actions. Every env's palette is overwritten after the
 reset: even envs all-slippery (μ_s 0.25, μ_d 0.22), odd envs all-grippy (μ_s 0.9, μ_d 0.85), all rigid (k 1e6), so the
-only difference between the groups is friction. Per policy and group, over T steps after a settle:
+only difference between the groups is friction. ``--split compliance``: even envs rigid (k 1e6), odd envs foam
+(k 3.2e3, the library's foam range 2e3–8e3), both μ_s 0.8 / μ_d 0.75 — the only difference is stiffness.
+Per policy and group, over T steps after a settle:
   lift      mean peak toe height above the terrain per swing (≥ 5 airborne steps), front / middle / back legs, cm
   coxa      coxa angle range (max − min over the window), front / middle / back, deg
   gap       worst and 1st-percentile same-side leg capsule surface gap, and share of steps < 2 cm
   clip      Σ |requested − clipped joint target| (rad, the action_beyond_clip term), mean per step
   slip      mean horizontal toe speed of feet in contact, m/s
   v_x       mean base forward speed, m/s
+  sink      mean toe height above the terrain of feet in contact, cm (compliance lowers it)
+  err       mean |q_cmd − q| of femur + tibia of feet in contact, deg (stance-load sag, v_kin's stance cue)
 
 Usage: python scripts/tests/gait_by_material.py --headless --cmd 0.15 pi_s0=<ckpt> s1=<ckpt> [--num_envs 512]
+       [--split compliance]
 """
 
 import argparse
@@ -29,6 +34,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("policies", nargs="+", help="tag=checkpoint")
 parser.add_argument("--cmd", type=float, default=0.15)
 parser.add_argument("--num_envs", type=int, default=512)
+parser.add_argument("--split", choices=["friction", "compliance"], default="friction")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
@@ -53,7 +59,10 @@ from isaaclab.terrains import MeshPlaneTerrainCfg  # noqa: E402
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 N, SETTLE, T = args.num_envs, 100, 400
-GROUPS = {"slippery": (0.25, 0.22), "grippy": (0.9, 0.85)}
+GROUPS = {  # (μ_s, μ_d, log10 k); the first group is the even envs
+    "friction": {"slippery": (0.25, 0.22, 6.0), "grippy": (0.9, 0.85, 6.0)},
+    "compliance": {"rigid": (0.8, 0.75, 6.0), "foam": (0.8, 0.75, 3.5)},
+}[args.split]
 LEG_TYPES = {"front": [0, 3], "middle": [1, 4], "back": [2, 5]}
 
 
@@ -72,9 +81,8 @@ def run(tag, path):
     load_env_state(env, ck)
     obs, _ = env.reset()
     even = torch.arange(N, device=env.device) % 2 == 0
-    for name, (mu_s, mu_d) in GROUPS.items():
-        m = even if name == "slippery" else ~even
-        env.palette.v[m] = torch.tensor([mu_s, mu_d, 6.0], device=env.device)
+    for (name, v), m in zip(GROUPS.items(), (even, ~even)):
+        env.palette.v[m] = torch.tensor(v, device=env.device)
     pol = MLPModel(
         TensorDict({"policy": obs["policy"]}, [N]),
         {"actor": ["policy"]},
@@ -99,6 +107,9 @@ def run(tag, path):
     cmin = torch.full((N, 6), 9.0, device=env.device)
     cmax = torch.full((N, 6), -9.0, device=env.device)
     gaps, clip, slip, vx = [], [], [], []
+    sink_sum = torch.zeros(N, device=env.device)
+    err_sum = torch.zeros(N, device=env.device)
+    n_contact = torch.zeros(N, device=env.device)
     clip_j = torch.zeros(N, 18, device=env.device)  # per-joint |requested − clipped| (rad), summed over the window
     act_term = env.action_manager.get_term("joint_pos")
     rm = env.reward_manager
@@ -126,14 +137,19 @@ def run(tag, path):
                     v = ((toe - prev_toe)[..., :2].norm(dim=-1) / env.step_dt) * contact
                     slip.append(v.sum(1) / contact.sum(1).clamp(min=1))
                 vx.append(robot.data.root_lin_vel_b.torch[:, 0])
+                e = (act_term.processed_actions - robot.data.joint_pos.torch).abs()
+                sink_sum += (h * contact).sum(1)
+                err_sum += ((e[:, 6:12] + e[:, 12:18]) * contact).sum(1)
+                n_contact += contact.sum(1)
             peak = torch.where(contact, 0.0, torch.maximum(peak, h))
             air = torch.where(contact, 0.0, air + 1)
             prev_toe = toe
     gaps, clip, slip, vx = torch.stack(gaps), torch.stack(clip), torch.stack(slip), torch.stack(vx)
     lift = lift_sum / lift_n.clamp(min=1)
     crange = torch.rad2deg(cmax - cmin)
-    for name in GROUPS:
-        m = even if name == "slippery" else ~even
+    sink = sink_sum / n_contact.clamp(min=1)
+    err = torch.rad2deg(err_sum / n_contact.clamp(min=1))
+    for name, m in zip(GROUPS, (even, ~even)):
         lf = " ".join(f"{lift[m][:, i].mean() * 100:4.2f}" for i in LEG_TYPES.values())
         cr = " ".join(f"{crange[m][:, i].mean():5.1f}" for i in LEG_TYPES.values())
         g = gaps[:, m]
@@ -141,7 +157,7 @@ def run(tag, path):
             f"MATGAIT {tag:8s} v{args.cmd:.2f} {name:8s} lift f/m/b {lf} cm | coxa range f/m/b {cr} deg |"
             f" gap min {g.min() * 100:+.1f} p1 {g.flatten().quantile(0.01) * 100:+.1f} cm <2cm"
             f" {(g < 0.02).float().mean() * 100:.1f}% | clip {clip[:, m].mean():.4f} | slip {slip[:, m].mean():.3f}"
-            f" | v_x {vx[:, m].mean():.3f}"
+            f" | v_x {vx[:, m].mean():.3f} | sink {sink[m].mean() * 100:.2f} cm | err {err[m].mean():.2f} deg"
         )
     cj = clip_j.mean(0) / T  # (18,) joint order [coxa × 6, femur × 6, tibia × 6], legs RF RM RB LF LM LB
     parts = []

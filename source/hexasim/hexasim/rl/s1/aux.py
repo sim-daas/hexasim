@@ -213,6 +213,42 @@ class S1Aux(nn.Module):
         self.updates += 1
         return logs
 
+    @torch.no_grad()
+    def probe_skill(self, n: int = 16384) -> dict[str, float]:
+        """Probe skill against the best constant predictor (the batch mean): R² = 1 − SSE/SST per group, averaged over
+        the group's dims; contact: Brier skill 1 − Brier/Brier(base rate). ≤ 0 means the probe learned nothing a mean
+        does not know. Material = (μ_s, μ_d, log10 k, log10(1 + c)); front = legs RF, LF, rear = the other four."""
+        b = self.buffer.sample(n, self.dt)
+        z, _, _ = self(b["hist"])
+        cur, td, valid = self._targets(b)
+        mu, _ = self.cur_head(z)
+        p = torch.sigmoid(mu[:, :N_CONTACT])
+        y = cur[:, :N_CONTACT]
+        out = {"contact": (1 - (p - y).pow(2).mean() / (y.mean(0) - y).pow(2).mean().clamp(min=1e-9)).item()}
+
+        def r2(pred, tgt, w=None):
+            w = torch.ones_like(tgt) if w is None else w.float()
+            nw = w.sum(0).clamp(min=1)
+            m = (tgt * w).sum(0) / nw
+            sst = ((tgt - m) ** 2 * w).sum(0)
+            ok = sst > 1e-9 * nw  # skip constant dims (e.g. per-run damping)
+            return (1 - ((pred - tgt) ** 2 * w).sum(0)[ok] / sst[ok]).mean().item() if ok.any() else float("nan")
+
+        pc = mu[:, N_CONTACT:] * self.cur_std[N_CONTACT:] + self.cur_mean[N_CONTACT:]
+        mat_p, mat_t = pc[:, :N_MAT].view(-1, 6, 4), cur[:, N_CONTACT : N_CONTACT + N_MAT].view(-1, 6, 4)
+        front, rear = [0, 3], [1, 2, 4, 5]
+        for j, k in enumerate(("mu_s", "mu_d", "logk", "damp")):
+            out[f"cur_{k}_front"] = r2(mat_p[:, front, j], mat_t[:, front, j])
+            out[f"cur_{k}_rear"] = r2(mat_p[:, rear, j], mat_t[:, rear, j])
+        out["cur_height"] = r2(pc[:, N_MAT:], cur[:, N_CONTACT + N_MAT :])
+        mu_t, _ = self.td_head(z)
+        pt = (mu_t * self.td_std + self.td_mean).view(-1, 6, TD_PER_LEG)
+        tt, vt = td.view(-1, 6, TD_PER_LEG), valid.view(-1, 6, TD_PER_LEG)
+        for k, s in (("pos", slice(0, 3)), ("dt", slice(3, 4)), ("mu_s", slice(4, 5)), ("mu_d", slice(5, 6)),
+                     ("logk", slice(6, 7)), ("height", slice(8, 17))):  # fmt: skip
+            out[f"td_{k}"] = r2(pt[..., s].flatten(1), tt[..., s].flatten(1), vt[..., s].flatten(1))
+        return out
+
     # ------------------------------------------------------------------ V tests (v7 §4.3)
     @torch.no_grad()
     def v_tests(self, n: int = 16384) -> dict[str, float]:

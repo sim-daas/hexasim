@@ -714,7 +714,7 @@ Baselines and the full ablation grid are out of scope here. These two are listed
 
 14. **Bench-characterise AX-12A tracking error against known external load**; compute the static torque envelope (§5.2) including mast mass.
 15. **Add contact switches on all six legs (§7)**, MCU-sampled at ≥ 500 Hz on the shared monotonic clock.
-16. **Mount the camera** at h ≈ 0.22 m, **pitch 45–50°** (v2 §7.5, §3.2), rigid and light, extrinsics properly calibrated.
+16. **Mount the camera** at h ≈ 0.22 m, **pitch 45–50°** (v2 §7.5, §3.2), rigid and light, extrinsics properly calibrated. Mount the D435 laterally offset so its **colour optical centre lies on the sagittal plane** (not the housing centre): mirror augmentation (v2 §1, D35) is then physically exact for RGB, and the sim depth corruption runs after mirroring.
 17. **Build the gradual-transition surface (§5.3).** Procurement lead time; start now.
 18. **Per-surface `μ` measurement (§5.3).** Tilt and drag tests on the robot, 5 repeats each, mean ± SD.
 

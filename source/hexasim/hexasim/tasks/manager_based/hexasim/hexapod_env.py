@@ -48,6 +48,8 @@ class HexapodEnv(ManagerBasedRLEnv):
         self.v_in = torch.zeros(self.num_envs, 3, device=self.device)
         # Envs whose clock runs and whose CPG terms count; S0b clears it for standing (zero-command) envs.
         self.cpg_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        # Envs whose clock is observable this episode; S2 drops it per episode (never per step, spec §5).
+        self.clock_on = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         super().load_managers()
         # Per-env, per-leg peak load in tripod stance: total weight / 3, (N, 1). Read after the startup
         # events added mast and payload, which differ per env.
@@ -67,6 +69,12 @@ class HexapodEnv(ManagerBasedRLEnv):
         forward = torch.tensor([[0.1, 0.0, 0.0]], device=self.device).expand(self.num_envs, 3)
         sign = torch.sign(coxa_stroke_weight(self, forward))
         assert (sign == torch.tensor(COXA_BACKWARD_SIGN, device=self.device)).all(), f"coxa stroke sign: {sign[0]}"
+
+    @property
+    def clock_live(self) -> torch.Tensor:
+        """(N,) clock running and observable: gates the clock observation and every clock-phase reward term, so the
+        two leave together (spec §5)."""
+        return self.cpg_active & self.clock_on
 
     def _velocity_input(self) -> torch.Tensor:
         return self.scene["robot"].data.root_lin_vel_b.torch
@@ -178,7 +186,7 @@ class HexapodS0aEnv(HexapodEnv):
                 # Clock; zeros (the spec's "absent" flag) while the clock is stopped — a frozen phase kept the
                 # "swing" legs of that phase light in standing mode (phase2-progress §2.1.10).
                 torch.stack((torch.sin(self.cpg_phase), torch.cos(self.cpg_phase)), dim=-1).view(self.num_envs, 12)
-                * self.cpg_active.unsqueeze(1),
+                * self.clock_live.unsqueeze(1),
                 p.mask,
             ],
             dim=-1,
@@ -294,6 +302,7 @@ class HexapodS1Env(HexapodS0bEnv):
         self.drop_k_scale = torch.ones(self.num_envs, 1, device=self.device)
         self.e_gate = 0.0
         self.v0_drop_p = 0.0
+        self.clock_drop_p = 0.0  # per-episode clock dropout probability, set by the algorithm in S2
         self.v0_keep = torch.ones(self.num_envs, 1, device=self.device)
         q0 = robot.data.default_joint_pos.torch[0]
         self.aux = S1Aux(self.cfg.aux, self.num_envs, q0, self.step_dt, self.device)
@@ -345,7 +354,7 @@ class HexapodS1Env(HexapodS0bEnv):
             return
         fresh = self._fresh.clone()
         super().refresh_proprio()
-        from .mdp.layout import CONTRACT_P_DIM
+        from .mdp.layout import ACTOR, CONTRACT_P, CONTRACT_P_DIM
         from .mdp.observations import s0a_privileged_obs
         from .mdp.rewards import foot_forces_nt
         from .mdp.symmetry import mirror_frame
@@ -416,6 +425,9 @@ class HexapodS1Env(HexapodS0bEnv):
             dim=-1,
         )
         assert self.s1_contract_p.shape[1] == CONTRACT_P_DIM
+        if self.cfg.arm == "O":  # M* = contract P's material strips (same values, nominal foothold; spec §2.2)
+            m = self.s1_contract_p[:, CONTRACT_P["strips"]]
+            self.s1_actor_obs[:, ACTOR["m_star"]] = m
 
     def step(self, action: torch.Tensor):
         ret = super().step(action)
@@ -438,5 +450,6 @@ class HexapodS1Env(HexapodS0bEnv):
         self.drop_k_scale[ids] = lo + torch.rand(len(ids), 1, device=self.device) * (hi - lo)
         self.proprio.k[ids] = self.cfg.drop_k * self.drop_k_scale[ids]
         self.v0_keep[ids] = (torch.rand(len(ids), 1, device=self.device) >= self.v0_drop_p).float()
+        self.clock_on[ids] = torch.rand(len(ids), device=self.device) >= self.clock_drop_p
         self.aux.buffer.episode_end(ids)
         super()._reset_idx(env_ids)

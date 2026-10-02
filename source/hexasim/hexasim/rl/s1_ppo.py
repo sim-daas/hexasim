@@ -19,6 +19,14 @@ fold, std floor):
   preserving) and the gate opens (binary; PPO grows the columns from zero);
 * **V_0 retirement**: per-episode dropout probability 0 → 1 over ``v0_retire_iters``, starting ``v0_retire_delay``
   iterations after the gate opened.
+
+S2 branch (``clock_anneal_iters`` > 0, run loaded from an S1 checkpoint with ``train.py --branch_from``):
+
+* **clock dropout**: per-episode probability 0 → 1 over ``clock_anneal_iters`` from the branch iteration; the clock
+  observation and every clock-phase reward term leave together (``env.clock_live``, spec §5);
+* **re-burn-in**: actor frozen for ``reburn_iters`` after the branch (spec stage table, S2 critic row);
+* **arm O**: M* (``env.cfg.arm == "O"``) goes live; its normaliser statistics are set from the first batch and it
+  leaves the frozen set. B0 keeps it zero-held.
 """
 
 from __future__ import annotations
@@ -52,12 +60,17 @@ class S1PPO(S0PPO):
         imu_zero_min: float = 1.5,
         v0_retire_delay: int = 1000,
         v0_retire_iters: int = 1000,
+        clock_anneal_iters: int = 0,
+        reburn_iters: int = 50,
         **kwargs,
     ):
         super().__init__(actor, critic, storage, **kwargs)
         self.v_test_every, self.v_test_passes = v_test_every, v_test_passes
         self.slip_ratio_max, self.imu_zero_min = slip_ratio_max, imu_zero_min
         self.v0_retire_delay, self.v0_retire_iters = v0_retire_delay, v0_retire_iters
+        self.clock_anneal_iters, self.reburn_iters = clock_anneal_iters, reburn_iters
+        self.s2_start = -1  # iteration the S2 branch started (−1 = S1)
+        self._live_pending: list[slice] = []
         self.passes = 0
         self.gate_iter = -1  # iteration the ê gate opened (−1 = shut)
         self.last_v_tests: dict[str, float] = {}
@@ -79,6 +92,12 @@ class S1PPO(S0PPO):
     def process_env_step(self, obs, rewards, dones, extras) -> None:
         if self._frozen_stats is None:
             self._snapshot()
+        for cols in self._live_pending:  # blocks going live at the branch: statistics from this batch
+            x = obs["policy"][:, cols]
+            set_block_stats(self.actor.obs_normalizer, cols, x.mean(0), x.var(0).clamp(min=1e-4))
+            self._frozen = self._frozen[(self._frozen < cols.start) | (self._frozen >= cols.stop)]
+            self._snapshot()
+        self._live_pending = []
         super().process_env_step(obs, rewards, dones, extras)
         self._restore(self.actor.obs_normalizer)
         self._restore(self._shadow)
@@ -114,6 +133,9 @@ class S1PPO(S0PPO):
         if self.gate_iter >= 0:
             t = (self.iteration - self.gate_iter - self.v0_retire_delay) / self.v0_retire_iters
             env.v0_drop_p = min(max(t, 0.0), 1.0)
+        if self.s2_start >= 0:
+            env.clock_drop_p = min((self.iteration - self.s2_start) / self.clock_anneal_iters, 1.0)
+            loss["clock_drop_p"] = env.clock_drop_p
         loss.update({f"vtest_{k}": v for k, v in self.last_v_tests.items()})
         loss.update({"e_gate": env.e_gate, "v0_drop_p": env.v0_drop_p, "v_test_passes": float(self.passes)})
         return loss
@@ -129,6 +151,9 @@ class S1PPO(S0PPO):
             "frozen": self._frozen.cpu(),
             "v0_drop_p": self.env.v0_drop_p,
             "window": self.env.cfg.aux.window,
+            "s2_start": self.s2_start,
+            "clock_drop_p": self.env.clock_drop_p,
+            "arm": self.env.cfg.arm,
         }
         return saved
 
@@ -143,4 +168,14 @@ class S1PPO(S0PPO):
         self._snapshot()
         env.e_gate = 1.0 if self.gate_iter >= 0 else 0.0
         env.v0_drop_p = s["v0_drop_p"]
+        self.s2_start = s.get("s2_start", -1)  # S1 checkpoints predate the S2 fields
+        env.clock_drop_p = s.get("clock_drop_p", 0.0)
+        if self.clock_anneal_iters > 0 and self.s2_start < 0:  # branching from an S1 trunk
+            assert s.get("arm", "B0") == "B0", "branch from an S1 trunk, not from another S2 arm"
+            self.s2_start = self.iteration
+            self.actor_frozen = True
+            self.actor.requires_grad_(False)
+            self.actor_freeze_iters = self.iteration + self.reburn_iters
+            if env.cfg.arm == "O":
+                self._live_pending = [layout.ACTOR["m_star"]]
         return ret
