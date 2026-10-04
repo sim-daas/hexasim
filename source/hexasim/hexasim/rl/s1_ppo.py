@@ -25,8 +25,11 @@ S2 branch (``clock_anneal_iters`` > 0, run loaded from an S1 checkpoint with ``t
 * **clock dropout**: per-episode probability 0 → 1 over ``clock_anneal_iters`` from the branch iteration; the clock
   observation and every clock-phase reward term leave together (``env.clock_live``, spec §5);
 * **re-burn-in**: actor frozen for ``reburn_iters`` after the branch (spec stage table, S2 critic row);
-* **arm O**: M* (``env.cfg.arm == "O"``) goes live; its normaliser statistics are set from the first batch and it
-  leaves the frozen set. B0 keeps it zero-held.
+* **widening**: the 1,125-D trunk is widened to the 1,269-D S2 layout (H* appended) for every arm
+  (``widen_checkpoint``, function-preserving, spec §4.3);
+* **oracle arms**: the arm's block (``layout.ARM_BLOCK``: O-mat M*, O-geo H*) goes live; its normaliser statistics are
+  set from the first batch and it leaves the frozen set. Every other non-S1 block stays zero-held, and ``update``
+  asserts its first-layer columns are still exactly zero (an arm must never read a block it is not given).
 """
 
 from __future__ import annotations
@@ -46,6 +49,36 @@ def set_block_stats(norm, cols: slice, mean: torch.Tensor, var: torch.Tensor) ->
         norm._mean[:, cols] = mean
         norm._var[:, cols] = var
         norm._std[:, cols] = var.sqrt()
+
+
+def _pad(t: torch.Tensor, at: int, n: int, fill: float = 0.0) -> torch.Tensor:
+    """Insert ``n`` columns of ``fill`` at column ``at`` (last dim)."""
+    return torch.cat([t[..., :at], t.new_full((*t.shape[:-1], n), fill), t[..., at:]], dim=-1)
+
+
+def widen_checkpoint(ck: dict, new_dim: int) -> dict:
+    """Widen an S1 runner checkpoint's actor input to ``new_dim``, in place, function-preserving (spec §4.3): zero
+    first-layer columns and identity normaliser statistics appended to the actor and inserted after the actor block of
+    the critic input (sg[actor obs] ⊕ P); the matching Adam moments padded with zeros; the new columns join the frozen
+    (zero-held) set."""
+    a, c = ck["actor_state_dict"], ck["critic_state_dict"]
+    at = a["mlp.0.weight"].shape[1]
+    n = new_dim - at
+    assert n > 0, (at, new_dim)
+    first = {a["mlp.0.weight"].shape, c["mlp.0.weight"].shape}
+    for sd in (a, c):
+        sd["mlp.0.weight"] = _pad(sd["mlp.0.weight"], at, n)
+        for key, fill in (("_mean", 0.0), ("_var", 1.0), ("_std", 1.0)):
+            sd[f"obs_normalizer.{key}"] = _pad(sd[f"obs_normalizer.{key}"], at, n, fill)
+    padded = 0
+    for st in ck["optimizer_state_dict"]["state"].values():
+        if st["exp_avg"].shape in first:
+            st["exp_avg"], st["exp_avg_sq"] = _pad(st["exp_avg"], at, n), _pad(st["exp_avg_sq"], at, n)
+            padded += 1
+    assert padded == 2, padded
+    s = ck["s1_state"]
+    s["frozen"] = torch.cat([s["frozen"], torch.arange(at, new_dim)])
+    return ck
 
 
 class S1PPO(S0PPO):
@@ -76,7 +109,8 @@ class S1PPO(S0PPO):
         self.last_v_tests: dict[str, float] = {}
         a = layout.ACTOR
         dims = list(range(a["v0"].start, a["v0"].stop)) + list(range(a["e_hat"].start, a["e_hat"].stop))
-        dims += list(range(a["m_star"].start, layout.ACTOR_DIM))
+        self._width = self.actor.mlp[0].in_features  # 1,125 (S1) or 1,269 (S2, with H*)
+        dims += list(range(a["m_star"].start, self._width))
         self._frozen = torch.tensor(dims, device=self.device)
         self._frozen_stats = None  # taken at the first env step, i.e. after the warm start loaded π_S0's statistics
 
@@ -94,7 +128,22 @@ class S1PPO(S0PPO):
             self._snapshot()
         for cols in self._live_pending:  # blocks going live at the branch: statistics from this batch
             x = obs["policy"][:, cols]
-            set_block_stats(self.actor.obs_normalizer, cols, x.mean(0), x.var(0).clamp(min=1e-4))
+            mean, var = x.mean(0), x.var(0).clamp(min=1e-4)
+            set_block_stats(self.actor.obs_normalizer, cols, mean, var)
+            # The critic sees the block too (sg[actor obs] comes first in its input). Its statistics there are those
+            # of a constant zero (std 0 → gain 1/eps) under a count too large to move, and its first-layer columns
+            # are untrained random initialisation: set the statistics and zero the columns (function-preserving), or
+            # the live block enters the critic as noise × 100 (phase2-progress §2.3.9, O-mat smoke: EV 0.3).
+            set_block_stats(self.critic.obs_normalizer, cols, mean, var)
+            with torch.no_grad():
+                self.critic.mlp[0].weight[:, cols] = 0.0
+            # Adam: the block's columns have zero moments but share the first layer's step count, so there is no bias
+            # correction and their first steps would be ≈ 3 × lr × sign(g) whatever the gradient (√(1 − β₂) / (1 − β₁)).
+            # On 576 strongly correlated inputs that wrecked the O-mat policy in the first unfrozen iteration
+            # (§2.3.9). Seed the second moment with the trained proprioceptive columns' median: steps ∝ gradient.
+            for net in (self.actor, self.critic):
+                v = self.optimizer.state[net.mlp[0].weight]["exp_avg_sq"]
+                v[:, cols] = v[:, : layout.OLD_ACTOR_DIM].median()
             self._frozen = self._frozen[(self._frozen < cols.start) | (self._frozen >= cols.stop)]
             self._snapshot()
         self._live_pending = []
@@ -133,6 +182,12 @@ class S1PPO(S0PPO):
         if self.gate_iter >= 0:
             t = (self.iteration - self.gate_iter - self.v0_retire_delay) / self.v0_retire_iters
             env.v0_drop_p = min(max(t, 0.0), 1.0)
+        # Zero-held blocks (everything after ê except the arm's own block) must still have zero first-layer columns.
+        held = torch.ones(self._width, dtype=torch.bool)
+        held[: layout.ACTOR["m_star"].start] = False
+        if layout.ARM_BLOCK[env.cfg.arm]:
+            held[layout.S2_ACTOR[layout.ARM_BLOCK[env.cfg.arm]]] = False
+        assert self.actor.mlp[0].weight[:, held].abs().max() == 0.0, f"arm {env.cfg.arm}: a zero-held block got weight"
         if self.s2_start >= 0:
             env.clock_drop_p = min((self.iteration - self.s2_start) / self.clock_anneal_iters, 1.0)
             loss["clock_drop_p"] = env.clock_drop_p
@@ -158,6 +213,8 @@ class S1PPO(S0PPO):
         return saved
 
     def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
+        if loaded_dict["actor_state_dict"]["mlp.0.weight"].shape[1] < self._width:  # S1 trunk → S2 layout
+            widen_checkpoint(loaded_dict, self._width)
         ret = super().load(loaded_dict, load_cfg, strict)
         env = self.env
         env.aux.load_state_dict(loaded_dict["aux_state_dict"])
@@ -176,6 +233,6 @@ class S1PPO(S0PPO):
             self.actor_frozen = True
             self.actor.requires_grad_(False)
             self.actor_freeze_iters = self.iteration + self.reburn_iters
-            if env.cfg.arm == "O":
-                self._live_pending = [layout.ACTOR["m_star"]]
+            if layout.ARM_BLOCK[env.cfg.arm]:
+                self._live_pending = [layout.S2_ACTOR[layout.ARM_BLOCK[env.cfg.arm]]]
         return ret

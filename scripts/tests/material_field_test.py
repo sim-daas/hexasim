@@ -10,7 +10,8 @@ Flat tiles (geometry off; the material field is generated as in training), zero 
 2. Read-back: for every foot in contact, the PhysX shape material equals the value in effect (μ_s, μ_d, −k), and
    that value is within one write quantum of the field target under the toe.
 3. Friction from the field: gravity tilted 20° (tan 0.364). Envs whose six feet all stand on μ_s < 0.30 must slide
-   (> 5 cm in 2 s); envs whose six feet all stand on μ_d > 0.55 must hold (< 2 cm).
+   (> 5 cm in 2 s); envs whose six feet all stand on μ_d > 0.55 must hold (< 2 cm). Envs on the soft-ground entries
+   (``--task Hexapod-S2-v0``, k < 2e3) are reported separately: drift in two consecutive 2 s windows.
 4. Stability: no NaN, max base speed on θ = 0 < 0.05 m/s after settling (rigid entries use k = 1e6).
 
 Usage: python scripts/tests/material_field_test.py --headless [--num_envs 512]
@@ -23,6 +24,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type=int, default=512)
+parser.add_argument("--task", default="Hexapod-S1-v0", help="Hexapod-S2-v0 adds the soft-ground entries")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
@@ -39,7 +41,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
 
 def make(theta_deg):
-    cfg = parse_env_cfg("Hexapod-S1-v0", num_envs=args.num_envs)
+    cfg = parse_env_cfg(args.task, num_envs=args.num_envs)
     cfg.seed = 0
     cfg.scene.terrain.terrain_generator.sub_terrains = {"flat": MeshPlaneTerrainCfg(proportion=1.0)}
     cfg.curriculum = None
@@ -48,7 +50,7 @@ def make(theta_deg):
     cfg.commands.base_velocity.rel_standing_envs = 1.0
     th = math.radians(theta_deg)
     cfg.sim.gravity = (9.81 * math.sin(th), 0.0, -9.81 * math.cos(th))
-    env = gym.make("Hexapod-S1-v0", cfg=cfg).unwrapped
+    env = gym.make(args.task, cfg=cfg).unwrapped
     env.reset()
     return env
 
@@ -101,6 +103,9 @@ cur = env.foot_writer.current
 # Footing at the start and the end of the measurement (an env sliding onto a grippy patch is not a failed hold).
 slide = (cur0[..., 0] < 0.30).all(dim=1)
 hold = (cur0[..., 1] > 0.55).all(dim=1) & (cur[..., 1] > 0.55).all(dim=1)
+# Soft ground (k below the S1 library's 2e3, D39) is reported, not gated: its contact springs shear downhill.
+soft = hold & (cur[..., 2] < 3.3).any(dim=1)
+hold &= ~soft
 t3 = bool((drift[slide] > 0.05).all() and (drift[hold] < 0.02).all()) and slide.sum() > 0 and hold.sum() > 0
 print(
     f"3. tan20 0.364: all-feet μ_s<0.30 envs {slide.sum().item()}, sliding {(drift[slide] > 0.05).sum().item()};"
@@ -112,7 +117,16 @@ for i in (hold & (drift > 0.02)).nonzero().flatten()[:6].tolist():
         f"   failed hold env {i}: drift {drift[i]:.3f}, μ_d start {cur0[i, :, 1].tolist()} end {cur[i, :, 1].tolist()},"
         f" log k {cur[i, :, 2].tolist()}"
     )
-mixed = ~slide & ~hold
+if soft.any():
+    x1 = env.scene["robot"].data.root_pos_w.torch[:, 0].clone()
+    run(env, 100)
+    drift2 = (env.scene["robot"].data.root_pos_w.torch[:, 0] - x1).abs()
+    print(
+        f"   soft-footing envs (μ_d > 0.55, k < 2e3) {soft.sum().item()}: drift 0.5–2.5 s median"
+        f" {drift[soft].median():.3f} max {drift[soft].max():.3f} m; 2.5–4.5 s median {drift2[soft].median():.3f} max"
+        f" {drift2[soft].max():.3f} m (≈ 0 in the second window = elastic settling, not creep)"
+    )
+mixed = ~slide & ~hold & ~soft
 print(f"   mixed-footing envs {mixed.sum().item()}: drift median {drift[mixed].median():.3f} m")
 ok &= t3
 env.close()

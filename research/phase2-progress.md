@@ -2124,3 +2124,618 @@ fill; (2) widen the 1,125-D trunk to the new layout at the branch for every arm 
 < 1e-6 in `test_s1.py`; (3) a 20-iteration branch smoke test per arm (clock_drop_p ramps, actor frozen 50 iterations,
 O-mat M* statistics set, B0 / O-geo M* columns get zero gradient); (4) the headroom evaluation (window and impact
 metrics above, transition courses with fixed seeds); (5) the three runs and the evaluation.
+
+*Update 2026-10-02 (later session): items (1)–(4) are done and checked — §2.3.8–2.3.10. Arm names in code are `B0`,
+`O-mat`, `O-geo` (`env.arm=…`); the earlier `O` is gone (nothing was run with it).*
+
+### 2.3.8 Soft-ground solver check (D39 step 1) — passed at nominal k 4e2 N/m
+
+`scripts/tests/gait_by_material.py` gained `--k` (soft-group stiffness of the compliance split) and a solver line
+(deepest toe sink, stance joint speed, falls) plus per-group reward per second with the clock-free ("S2") total.
+S1 seed 43 trunk, flat, 512 envs (256 rigid k 1e6 / 256 soft, both μ 0.8 / 0.75), payload as trained (0.25–1.15 kg
+incl. mast), 5 ms physics step. Output: `logs/eval/soft_solver_check.txt`.
+
+```
+for K in 400 600 1000 2000; do for V in 0 0.15; do
+  python scripts/tests/gait_by_material.py --headless --split compliance --k $K --cmd $V s43=<seed-43 model_7999.pt>
+done; done
+```
+
+| nominal k (N/m) | standing: mean stance sink / deepest (mm) | walking 0.15: mean / deepest (mm) | v_x (m/s) | stance slip (m/s) | femur + tibia stance error (°) | falls |
+| --- | --- | --- | --- | --- | --- | --- |
+| rigid 1e6 | −0.3 / 0.4 | −0.1 / 0.7 | 0.149 | 0.011 | 6.8 | 0 |
+| 2e3 | 1.1 / 2.7 | 2.3 / 5.2 | 0.147 | 0.013 | 7.8 | 0 |
+| 1e3 | 2.4 / 4.0 | 4.1 / 8.3 | 0.147 | 0.015 | 8.5 | 0 |
+| 6e2 | 3.7 / 5.7 | 6.2 / 12.7 | 0.151 | 0.018 | 9.2 | 0 |
+| 4e2 | 5.0 / 8.1 | 8.5 / 17.5 | 0.153 | 0.020 | 10.1 | 0 |
+
+Reading: the solver holds down to k 4e2 — no falls, no jitter (standing stance joint speed 0.07 rad/s soft vs 0.06 rigid,
+standing v_x 0.000), no runaway penetration (deepest single-foot sink 17.5 mm against the 90 mm toe offset). Standing
+sink × k ≈ 2.0–2.4 N against a static leg load of ≈ 6–7 N: the ground acts ≈ 3 × stiffer than nominal (per-contact-point
+stiffness; §2.3.5 estimated 2.5 ×). **The 5–10 mm target is reached while walking at k 4e2–1e3 (4.1–8.5 mm mean) and
+standing only at k 4e2.** What soft ground does to the blind trunk at k 4e2: front lift 4.3 → 3.0 cm (middle 4.9 → 4.1,
+back 4.2 → 3.6), worst leg gap +0.8 → +0.3 cm (< 2 cm share 0.8 → 2.1 %), stance tracking error +49 %, slip ×1.8 — and
+the commanded speed is still held. The provisional ranges stand: `soft_soil` k 4e2–1e3 (walking sink 4–8.5 mm),
+`wet_clay` k 6e2–2e3 (2.3–6.2 mm).
+
+### 2.3.9 Headroom pilot implementation (H*, widening, soft entries, evaluation) and the bugs the smoke tests found
+
+**Design (smallest change that keeps S1 reproducible).**
+- *Layout.* `Hexapod-S1-v0` keeps the 1,125-D actor. `mdp.layout.S2_ACTOR_BLOCKS` = S1 blocks ⊕ `h_star` (144, mirror
+  `strip:1`); `Hexapod-S2-v0` is 1,269-D (`cfg.actor_dim`). S1 checkpoints, S1 evaluations and every script that builds
+  a 1,125-D actor are untouched; `load_policy.TASK_BY_DIM[1269]` routes S2 checkpoints. `layout.ARM_BLOCK` =
+  {B0: none, O-mat: `m_star`, O-geo: `h_star`} is the single place an arm's extra block is named.
+- *H\*.* `terrain_z(strip_xy) − terrain_z(anchor_w)` per leg: the 24 contract-P strip points minus the terrain height at
+  that leg's nominal foothold (independent of body height and swing phase). Mirror: legs swapped, lateral order reversed
+  (`strip:k`, the same rule as the material strips; self-check in `mdp.symmetry`).
+- *Widening at the branch.* `s1_ppo.widen_checkpoint`: zero first-layer columns + identity normaliser statistics appended
+  to the actor and inserted after the actor block of the critic input (before P), the two matching Adam moment tensors
+  padded with zeros, new columns added to the frozen (zero-held) set. Called in `S1PPO.load` when a 1,125-D checkpoint
+  meets a 1,269-D model — every arm, B0 included. `test_s1.py` check 11: widened actor **and** critic of the seed-43
+  trunk equal the trunk over 10,000 random observations with random H*, max |Δ| 2.3e-12 (float64).
+- *Runtime invariant.* `S1PPO.update` asserts every iteration that the first-layer columns of the arm's zero-held blocks
+  are exactly zero — an arm reading a block it is not given now stops the run instead of confounding it.
+- *Soft entries.* `soft_soil` (μ 0.4–0.7, k 4e2–1e3) and `wet_clay` (μ 0.25–0.5, k 6e2–2e3, shiny) appended to
+  `mdp.materials.LIBRARY`; a task uses the first `cfg.material_entries` (S1 10, S2 12). **Deviation D40:** with 12
+  entries the field's random draws differ, so S2's layout seed 0 is a new layout, not the one the trunks trained on
+  (accepted: §2.3.5 showed a held-out layout is indistinguishable). Probe target statistics unchanged (D39 step 3).
+- *Evaluation.* `scripts/rsl_rl/eval_headroom.py` (one condition → JSON with per-episode values) and
+  `scripts/rsl_rl/eval_headroom.sh` (the §2.3.7 table + soft conditions + the 17 gates, then oracle − B0 with an
+  episode-bootstrap 95 % CI and the pre-registered verdict). Metrics: fall, window |v̄_x − cmd|, stance slip, first-contact
+  impact (peak |F| over the first 40 ms ÷ static tripod leg load, force norm — no world-Z question on slopes), toe speed
+  at touchdown, short-swing share (touchdowns after < 60 % of the median swing: stumbles and touchdown bounces), stance
+  sink, base height, pitch, stride (descriptive). **Not implemented: reaction lead time and touchdown-timing error**
+  (user decision: not in the go rule; added only if the pilot says go).
+
+**Bugs (Observed / Root cause / Fix).**
+
+1. *O-mat: critic explained variance 0.3–0.6 after the branch (B0, O-geo: 0.98), actor never released.*
+   Root cause: the critic input starts with sg[actor obs], so M* going live also enters the critic. There its normaliser
+   statistics are those of a constant zero (variance 0 → gain 1/ε = 100) under a count of 5.2e8 that no longer moves, and
+   its first-layer columns are untrained random initialisation (they never saw a gradient). M* arrived as noise × 100.
+   Fix: when a block goes live, set the critic's statistics for it from the same first batch as the actor's and zero the
+   critic's columns (function-preserving: the inputs were zero). The critic loses nothing — P already holds the strips.
+2. *O-mat: mean reward 42 → −62 within 14 iterations of the actor being released.* Root cause: the new first-layer
+   columns have zero Adam moments but share the layer's step count (154,040), so there is no bias correction and the
+   first updates are ≈ 3.2 × lr × sign(g) whatever the gradient (√(1 − β₂)/(1 − β₁) scaling of m/√v). In one iteration
+   (20 steps) every M* weight reached ≈ 0.0036; M* is 576 strongly correlated unit-variance inputs, so the common mode
+   shifted the hidden layer by O(1) and destroyed the gait. O-geo (144 inputs, |w| 0.003) survived the same kick.
+   Fix: seed the second moment of a newly live block's columns (actor and critic) with the median second moment of the
+   trained proprioceptive columns — steps become proportional to the gradient, as for every trained weight. After the
+   fix O-mat follows B0 (table below). The same seeding applies to any block going live later (vision arms).
+3. *`reward_economy.py` on the S1 trunk: walk at 0.088 m/s under a 0.15 command.* Root cause: the script loaded only V_0,
+   not the aux learner and the ê gate, so the actor ran on an untrained estimator. Fix: `load_policy.load_env_state`.
+4. *`material_field_test.py --task Hexapod-S2-v0` failed twice.* (a) Run next to a 4,096-env training: PhysX CUDA
+   out-of-memory in the second env of the process, nothing moved — not a physics result; run it alone. (b) Alone: all
+   52 low-μ envs slide, 6 of 221 "hold" envs drifted 2–7 cm — all six on `soft_soil`. They settle elastically: 16
+   soft-footing envs drift 1.4 cm median (7.4 max) in the first 2 s and **0.0 cm median (0.4 max) in the next 2 s**. Soft
+   footing is now reported separately; the firm-ground assertions are unchanged and pass.
+
+Noted, not a bug: the first iteration after any branch shows value loss ≈ 1.4e4 and EV ≈ −12 (S1 resume: 263, −1.0) —
+all 4,096 envs start an episode together and 17 % of the ground is new material; EV is back at 0.97 after 5 iterations,
+inside the 50-iteration actor-frozen re-burn-in. **For S1b:** the critic's normaliser count (5.2e8) is effectively
+frozen and at least one contract-P `dr` dim has variance 0 — widening the latency range (D36) will enter the critic at
+gain 100 unless those statistics are reset at the S1b branch (same mechanism as bug 1).
+
+### 2.3.10 Pre-training checks (all on the S1 seed-43 trunk; outputs in `logs/eval/pre/`)
+
+**Reward economy** (`reward_economy.py --task Hexapod-S1-v0 --cmd 0.15 0 0`, 256 × 10 s; "S2" = minus the four
+clock-phase terms, which leave with the clock):
+
+| Behaviour under a 0.15 m/s command | reward / step, S1 | S2 | discounted return |
+| --- | --- | --- | --- |
+| walk (trunk, v_x 0.148, 0 falls) | +1.015 | +0.897 | +92.5 |
+| stand (zero action) | +0.261 | +0.302 | +23.7 |
+| fall on step 0 | — | — | −0.10 |
+
+Walk ≫ stand ≫ fall also without the clock terms (they net +0.117 / step for walking and −0.041 for standing: removing
+them narrows the walk − stand margin from 0.754 to 0.595 / step, still 3 × the standing reward). On soft ground the
+walking reward barely moves: S2 total 45.7 / s rigid vs 44.7 (k 1e3) and 44.9 (k 2e3) (`soft_solver_check.txt`).
+
+**V on soft ground** (v7 §4.3 tests on a 256-episode rollout, flat, 0.15 m/s, whole ground one material at μ 0.8 / 0.75;
+`eval_headroom.py --strip 0.8 0.75 <log10 k> --base 0.8 0.75 6 --start -100 --length 1000`):
+
+| Ground | V RMSE (m/s) | slip / rigid strata (limit < 3) | IMU-zero ratio (limit ≥ 1.5) | short-swing share | toe speed at touchdown (m/s) | impact (× leg load) |
+| --- | --- | --- | --- | --- | --- | --- |
+| rigid | 0.020 | 1.67 | 8.6 | 0.09 | 0.17 | 2.20 |
+| k 2e3 | 0.027 | 1.32 | 6.4 | 0.17 | 0.29 | 1.75 |
+| k 1e3 | 0.029 | 1.20 | 5.8 | 0.18 | 0.31 | 1.41 |
+| k 6e2 | 0.031 | 1.48 | 5.5 | 0.20 | 0.31 | 1.07 |
+| k 4e2 | 0.034 | 1.64 | 4.8 | 0.20 | 0.31 | 0.77 |
+
+**V passes both tests on every soft ground**; its error grows 1.7 × at k 4e2 (never seen in training). The blind trunk
+holds the speed (|v̄_x − cmd| ≤ 0.004 m/s) with 0 falls, so on *flat* soft ground there is little for foresight to win
+on tracking; what changes is the touchdown (toe speed ×1.8, twice as many short swings) — the soft conditions of the
+pilot are therefore read on sink-driven tracking, slip and the touchdown metrics, on slopes as well as flat.
+
+**Material field with 12 entries** (`material_field_test.py --task Hexapod-S2-v0`): PASS — read-back exact, 52 / 52
+low-μ envs slide and 205 / 205 firm high-μ envs hold at 20°, soft footing settles (bug 4).
+
+**Merge-gating tests** (`scripts/tests/test_s1.py`): pass, incl. S2 widening 2.3e-12 and the H* mirror.
+
+**Branch smoke tests** (`train.py --task Hexapod-S2-v0 --num_envs 4096 --seed 43 --branch_from <trunk> env.arm=<arm>
+agent.algorithm.reburn_iters=5`, 20 iterations B0, 40 iterations O-mat / O-geo after the two fixes; logs
+`logs/eval/pre/smoke*.log`, run dirs `logs/rsl_rl/hexapod_s2/*smoke*`):
+
+| Check | B0 | O-mat | O-geo |
+| --- | --- | --- | --- |
+| branch iteration (`s2_start`), `clock_drop_p` after 20 iterations | 8,000; 0.0111 (= 20 / 1,800) | same | same |
+| actor frozen for `reburn_iters`, then released | yes | yes (was stuck before fix 1) | yes |
+| EV at iteration 5 / 20 after the branch | 0.97 / 0.99 | 0.97 / 0.99 (0.29 / 0.60 before fix 1) | 0.97 / 0.99 |
+| mean reward at iteration 20 (episodes still filling) | 199.9 | 197.0 (−61.9 before fix 2) | 198.8 |
+| mean reward at iteration 40 | — | 354.9 | 400.6 |
+| live block statistics set (normaliser std) | — | M* 0.51 | H* 0.008 (floored at 0.01) |
+| first-layer max \|w\| in zero-held blocks | 0 (all) | 0 (all but M*) | 0 (all but H*) |
+| frozen-set size | 1,076 | 500 | 932 |
+
+The first six iterations are identical across arms to the printed digit (0.79, 6.30, 15.28, 22.64, 32.30, 42.71): the
+widened, frozen actor is the trunk in every arm. Iteration time 4.4–5.5 s → 6,000 iterations ≈ 7.5–9 h per arm. The
+terrain curriculum restarts from its initial levels at the branch (levels are not checkpointed) — identical for the
+three arms.
+
+**Stop point (user decision):** runs B0 → O-mat → O-geo start after the user's OK on this section.
+
+### 2.3.11 Fast vs slow on the new terrain before training (the §2.3.4 check for soft ground, bumps, rough, stairs)
+
+Asked by the user before the runs: the §2.3.4 economy (trunk at full speed vs scripted stride shortening, actor sees
+v_x × 0.73) had only been done for friction. `anticipation_economy.py` gained `--k` (strip stiffness), `--base_mu`
+(matched friction) and `--length`; S1 seed-43 trunk, 0.15 m/s, 256 envs × one 10 s episode, deterministic. Soft strips:
+0.5 m long, μ 0.8 on and off the strip (stiffness is the only change). Shape terrains at difficulty 1 (3 cm bumps and
+risers, ± 2.25 cm rough): slow for the whole episode (`--start -100 --length 1000`). Output
+`logs/eval/pre/anticip_soft_shape.txt`; blind-trunk baselines from `eval_headroom.py` in `logs/eval/pre/trunk_*.json`.
+
+```
+python scripts/tests/anticipation_economy.py --headless --ckpt <trunk> --terrain {flat,slope_up,slope_down} --mu 0.8 --base_mu 0.8 --k {400,1000}
+python scripts/tests/anticipation_economy.py --headless --ckpt <trunk> --terrain {bumps,rough,stairs_up,stairs_down} --mu 0.9 --start -100 --length 1000
+```
+
+| Course | walk: falls; v_x / slip on strip (m/s) | walk reward S1 | cautious − walk, S1 / S2 |
+| --- | --- | --- | --- |
+| flat, soft k 4e2 | 0; 0.148 / 0.018 | 476.3 | −87.8 / −83.2 |
+| flat, soft k 1e3 | 0; 0.146 / 0.013 | 496.7 | −99.9 / −96.2 |
+| slope up 15°, soft k 4e2 | 0; **0.049 / 0.084** | **138.9** | +0.6 / −1.8 |
+| slope up 15°, soft k 1e3 | 0; 0.131 / 0.019 | 414.2 | −62.1 / −66.4 |
+| slope down 15°, soft k 4e2 | 1.6 %; **0.063 / 0.089** | **141.0** | +10.1 / +5.1 |
+| slope down 15°, soft k 1e3 | 0; 0.144 / 0.027 | 416.5 | −56.7 / −60.8 |
+| bumps | 0; 0.145 / 0.011 | 477.1 | −108.4 / −109.2 |
+| rough | 0; 0.143 / 0.014 | 441.1 | −119.9 / −113.1 |
+| stairs up | 0; 0.146 / 0.014 | 429.8 | −94.2 / −94.9 |
+| stairs down | 0; 0.147 / 0.017 | 446.9 | −108.7 / −106.7 |
+
+Blind trunk per condition (`eval_headroom.py`, window metrics; shape at level 14):
+
+| Condition | falls | \|v̄_x − cmd\| (m/s) | slip (m/s) | impact (× leg load) | short-swing share | sink (mm) | stride (m) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| flat, rigid strip (control) | 0 | 0.003 | 0.011 | 2.22 | 0.11 | 0 | 0.148 |
+| flat, soft k 4e2 strip | 0 | 0.004 | 0.017 | 1.56 | 0.11 | 3.8 | 0.146 |
+| slope up, rigid (control) | 0 | 0.008 | 0.015 | 2.43 | 0.15 | 0 | 0.142 |
+| slope up, soft k 4e2 | 0 | **0.072** | **0.066** | 2.31 | **0.50** | 12.4 | **0.067** |
+| slope down, rigid (control) | 0 | 0.002 | 0.014 | 2.26 | 0.12 | 0 | 0.149 |
+| slope down, soft k 4e2 | **3.1 %** | **0.059** | **0.065** | 2.00 | **0.52** | 15.9 | **0.078** |
+| bumps L14 | 0 | 0.004 | 0.016 | 2.29 | 0.12 | — | 0.146 |
+| rough L14 | 0 | 0.009 | 0.027 | 2.21 | 0.17 | — | 0.141 |
+| stairs up L14 | 0 | 0.006 | 0.021 | 2.37 | 0.14 | — | 0.144 |
+| stairs down L14 | 0 | 0.004 | 0.022 | 2.21 | 0.14 | — | 0.148 |
+
+Reading:
+
+1. **Flat soft ground, bumps, rough and stairs: nothing to anticipate with speed.** The blind trunk holds the command
+   (error ≤ 0.009 m/s, 0 falls) and slowing costs 83–113 reward units in 10 s — the `track_lin_vel` tax of §2.3.4 again.
+   As there, this says the *slow-down* response is unprofitable; it does not test the response O-geo is meant to find
+   (a gentler or higher step), which has no command knob. On shape terrain the blind numbers leave room only on the
+   touchdown metrics (impact ≈ 2.2–2.4 × leg load, 12–17 % short swings), not on tracking.
+2. **Soft k 4e2 on a 15° slope is the one condition where the blind trunk fails:** it stalls (0.05–0.06 m/s under a 0.15
+   command), slips 6 × more, half its swings are short, stride halves, 1.6–3.1 % fall downhill, and the reward drops
+   from ≈ 415 to ≈ 140. Slowing is then free (+0.6 … +10 S1, −1.8 … +5 S2). At k 1e3 on the same slope the loss is small
+   (414–417, 0 falls) — the cliff lies between k 4e2 and 1e3.
+3. **Caveat before reading (2) as headroom.** The stall happens *on* the strip, so it shows that the trunk — never
+   trained on k < 2e3 — cannot walk there, not that warning helps. All three arms train on soft ground from the branch;
+   if B0 learns to cross it reactively, the oracle gains nothing. Also the sink there (12–16 mm mean in the window) is
+   beyond the 5–10 mm target: on a slope the load shifts to fewer legs. Whether soft-on-slope at k 4e2 is physically
+   meaningful or a compliant-contact shear artefact (§2.3.9 bug 4: elastic downhill settling) is open.
+
+Consequences for the pilot (unchanged plan, sharper expectations): the compliance go/no-go will be decided by the
+soft-on-slope cells; flat soft and the flat friction control should read oracle ≈ B0; O-geo can only win on impact and
+short-swing share.
+
+*Evaluation change (user, 2026-10-03, before any arm was evaluated):* the shape cells of `eval_headroom.sh` cover every
+held-out level 15–20 as well as training levels 9 and 14 (bumps, stairs up / down, rough). The O-geo go / no-go still
+uses only the pre-registered cells (bumps and stairs at levels 9, 14, 17); levels 15, 16, 18–20 are reported as a
+secondary "held-out" block (impact, short-swing share, falls) and cannot turn a no-go into a go.
+
+---
+
+## Phase 2.4: Showcase rendering for the demo videos (2026-10-03)
+
+Presentation work, not an experiment: nothing here is in any arm's training or evaluation path, and no number in
+this document changes because of it. It is recorded because the demo videos shown alongside the paper are produced
+by this code and must be reproducible from it.
+
+### 2.4.1 Why
+
+The videos in `logs/videos/gait/` are hard to read: terrain and background are the same value, so a viewer cannot
+tell where the ground is. Cause, from the code rather than from taste:
+
+| what | state before |
+|---|---|
+| renderer | never configured anywhere in the repo — no `RenderCfg`, no `rendering_mode`. AppLauncher's default `balanced`, and `apps/isaaclab.python.headless.rendering.kit` explicitly disables translucency, reflections, indirect diffuse and ambient occlusion |
+| sky | none. One `DomeLightCfg(intensity=750)` with no texture + one `DistantLightCfg` pointing straight down (`hexapod_env_cfg.py:101-109`), so the background is flat grey and nothing casts a raking shadow |
+| terrain | two colours in total for ten materials — `(0.25,0.25,0.3)` for `shiny`, `(0.45,0.42,0.38)` otherwise (`mdp/materials.py`), with the `# S3 replaces with MDL` note already standing there |
+| robot | one `UsdPreviewSurface` bound to a 1.9 kB flat-black texture |
+| resolution | 1280 × 720 at 50 fps, from the untouched `video_recorder` default |
+
+### 2.4.2 What was added
+
+`source/hexasim/hexasim/tasks/manager_based/hexasim/demo_look.py` — `apply(cfg, …)`, called by the demo scripts on
+an **already-parsed** cfg, before `gym.make`:
+
+- `cfg.sim.render = RenderCfg(...)`. `quality="high"` is the RT2 preset (`rendering_mode="quality"`, GI with
+  `max_bounces=3`, 4 spp, DLAA, AO denoiser mode 0); `quality="mid"` is RT1 (balanced, 2 spp, DLSS quality) and is
+  the one to use next to a training job.
+- `cfg.video_recorder.window_width/height`. This is the only knob that works: `cfg.viewer.resolution` is deprecated
+  and, on this code path, consumed by nothing — the render product is allocated from `video_recorder_cfg.py` via
+  `isaacsim_kit_perspective_video.py`.
+- An HDRI sky dome (`DomeLightCfg.texture_file`, keys in `demo_look.SKIES`, default `Clear/noon_grass_4k.hdr`), a
+  raking sun (yaw 35°, pitch −55°, `angle=1.2` so contact shadows are not razor-sharp) and a **rim light** from low
+  behind. The sky is both the background and the ambient light, which is the single change that separates terrain
+  from background.
+- `color_scheme="none"` on the terrain generator. Safe: `TerrainGenerator` colours the mesh *after* all geometry is
+  generated, from its own `np_rng`, and nothing is drawn from that generator afterwards — the geometry is
+  bit-identical. (The global numpy RNG, which the terrain layout depends on per §2.2.9, is never touched by it.)
+- One MDL per material-library entry, through a new `materials.VISUAL_OVERRIDE` hook (default `None`, so training
+  and eval are untouched): `create_prim_from_mesh` already forwards `visual_material`, so this is two lines in
+  `materials.py`. `project_uvw=True` is mandatory — the per-entry submeshes are built from raw triangles and carry
+  no UVs. Side effect worth having: the friction/compliance patchwork the policy walks over is now *visible*.
+- `robot_mdl=` (default off) re-skins the robot. It has to be a spawn-time `UsdFileCfg.visual_material`, not a stage
+  edit: the robot's material is bound directly on each of its 12 visual meshes **inside instance prototypes**, so it
+  is not editable on the composed stage, and an ancestor binding only wins because `spawn_from_usd` binds with
+  `strongerThanDescendants` (`from_files.py:405-416`). Off by default — the PhantomX is matte black, and a
+  silhouette against lit ground is both legible and honest.
+
+`scripts/rsl_rl/record_gait.py`: `--pretty --sky --quality --res --fps --robot_mdl --smooth`, two new `--view`
+presets (`hero`, `orbit`), and an EMA on the chase-camera anchor (the eye was pinned to the raw root position, so
+body bob and yaw shook the whole frame). `--fps` goes to `RecordVideo(fps=…)` and only changes the muxed frame
+rate: native is 50 (= 1/`step_dt`), and `--fps 25` is a clean 2× slow motion. **30 fps is not reachable natively** —
+control is 50 Hz and raising `render_interval` would desync render from step; transcode instead.
+
+`scripts/rsl_rl/demo_teleop.py`: the same flags plus `--take_seconds` (auto-stop a take).
+
+`scripts/rsl_rl/record_showcase.sh`: the runner. Cell A is the equivalence check, then six 15 s takes, then
+`ffprobe` on each output and stills every 3 s for inspection.
+
+### 2.4.3 Why this cannot be a confound
+
+- The submeshes whose material changes are created with `CollisionAPI … CreateCollisionEnabledAttr(False)`; the
+  single collider is the (hidden) source mesh. Material is geometry-free.
+- DR, observation noise and dropped reads are left exactly as in training — there is deliberately no "clean" flag,
+  so the demo shows the trained condition.
+- `materials.VISUAL_OVERRIDE` is `None` unless `demo_look.apply` is called, which only the two demo scripts do.
+- `scripts/rsl_rl/record_showcase.sh` cell A measures it. An *exact* comparison turned out to be impossible:
+  PhysX on the GPU is not bit-reproducible, so two runs of the same command at the same seed already disagree
+  (§2.4.6). The cell therefore runs the plain command three times to get the simulator's own envelope, runs it
+  once more with `--pretty`, and `scripts/rsl_rl/equiv_check.py` checks that the pretty run falls inside that
+  envelope.
+
+### 2.4.4 Status
+
+Code complete and checked without the GPU (imports, every `RenderCfg` field name against isaaclab 6.1.17,
+`apply()` on real parsed `Hexapod-S1-Play-v0` and `Hexapod-Flat-Play-v0` cfgs, the light-quaternion helper against
+its intended emission directions, the `materials.py` self-check, ruff clean on the new code). Every HDRI and MDL
+URL was checked to exist on the Isaac asset root. **The renders themselves have not been run** — the GPU was busy
+with training and the headroom evaluations (user, 2026-10-03). Run:
+
+```
+bash scripts/rsl_rl/record_showcase.sh                       # defaults: π_S1 seed 43 (2026-09-28_13-48-22 …/model_7999.pt), quality high, 1920x1080
+bash scripts/rsl_rl/record_showcase.sh <ckpt> mid 1280x720   # alongside a training job
+```
+
+on an idle GPU, then write the equivalence result and the chosen takes in here. Note the first run streams the sky
+and the MDLs from the Isaac asset root (the local Omniverse hub cache is empty), so it starts slowly once.
+
+### 2.4.5 What the first renders changed (2026-10-03, verified in frames)
+
+The static checks passed but the first real renders were wrong in four ways. Each was found by extracting stills
+and looking at them, not from the logs.
+
+1. **The sky looked "upside down".** It was not a texture orientation problem. The generated terrain is a small
+   island, and a camera 0.45 m off the ground looks straight past its edge into the sky dome's **lower**
+   hemisphere — in a latlong HDRI that is the ground around the original photographer, and seen from inside the
+   dome it reads as an inverted landscape hanging above the horizon. Rotating the dome (90 / 180 / 270 were all
+   tried in renders) only moved which part of it showed. Fix: `backdrop`, a visual-only ground slab (default
+   400 m) under the terrain that extends the ground to the horizon. It carries no collider — `collision_props` is
+   left `None`, which is what decides it (`shapes.py:296`) — so it cannot touch the robot. `sky_tilt` stays as a
+   flag (default 270) for a differently-authored HDRI.
+2. **Flat brown blobs over the terrain texture.** The slab's top started at z = −0.01 while rough terrain at level
+   13 dips to about −0.023, so the plane cut through the height field and its intersection contours rendered as
+   smooth untextured patches. Fix: `backdrop_z` (default −0.05, which clears flat, rough and bumps). Stairs and
+   slopes descend far further — a 15° slope drops ≈ 0.5 m across a 4 m tile — so those takes pass −0.7.
+3. **Heavily underexposed.** Dome 900 / sun 2500 / rim 600 with `dome_light_upper_lower_strategy=4` rendered dark.
+   Now 1500 / 4000 / 900, full IBL (`strategy=0`) on `quality="high"` and the approximation kept only for `"mid"`,
+   plus a `light_gain` multiplier for the darker HDRIs.
+4. **The robot was a black hole, then white.** `diffuse_color` is linear and renders much lighter than the number
+   suggests under this rig: 0.45 came out near white. The `ROBOT_SURFACE` presets are now calibrated against the
+   dark grey the robot has in the existing `logs/videos/gait` takes — default `gunmetal` = (0.11, 0.115, 0.125),
+   roughness 0.45, metallic 0.15.
+
+Also from this round: the per-material patchwork reads as a patchwork on video, so `terrain_mdl` now puts one
+material over the whole terrain (default `dirt`, see `demo_look.GROUND_MDL`), with `"multi"` keeping the 12-entry
+version that shows the physics. `talc_graphite` no longer maps to `Metals/Steel_Carbon.mdl`, which rendered as
+dark metal rather than ground. `--orbit_turns` (default 0.5) sets revolutions per take, so the orbit rate follows
+`--seconds`. Every footage take except `hero_flat` and the in-place spin now orbits, and the default checkpoint is
+B0 final (`logs/rsl_rl/hexapod_s2/2026-10-02_18-56-36_s2_headroom_B0_seed43/model_13998.pt`).
+
+Verification renders for the above: `logs/videos/skychk/skychk{,2..6}-step-0.mp4`, each
+`record_gait.py --headless --pretty --quality high --res 1280x720 --terrain_type rough --terrain_level 13
+--cmd 0.15 --view orbit --orbit_turns 0.5 --seconds 10` on the B0 checkpoint, differing only in the fix under
+test. The equivalence check (§2.4.3) has **not** been re-run since these changes.
+
+### 2.4.6 The equivalence test had to change: the simulator is not reproducible run to run
+
+First run of the finished script reported the gait tables differing between the plain and the `--pretty` take, so
+the showcase rendering looked like it was changing behaviour. It was not.
+
+- `record_gait.py` never set `cfg.seed`, and Isaac Lab warns about exactly this ("Seed not set for the
+  environment"). Every DR, noise and dropped-read draw, and the terrain layout, were therefore different between
+  any two runs. Fixed: `--seed` (default 42), set on the cfg before `gym.make`.
+- With the seed fixed the tables **still** differed — and so did two runs of the *same* plain command. PhysX on
+  the GPU is not bit-reproducible. Measured over three plain repeats at seed 42 (rough, level 14, 4 s, the O-mat
+  checkpoint): the widest spread across the 51 numbers of the gait table is **1.7** (the units are degrees for
+  the joint-angle columns), i.e. the simulator disagrees with itself by up to ~1.7° on a mean joint angle.
+
+So the test is now relative, not exact (`scripts/rsl_rl/equiv_check.py`): three plain repeats define a per-number
+envelope, and the `--pretty` run must fall inside it, with slack `max(0.5 × envelope width, 0.05)`.
+
+Result, 2026-10-03, O-mat final at `--quality mid`:
+
+```
+plain repeats:            3
+their envelope, widest:   1.7000   (the simulator disagreeing with itself)
+pretty outside it, worst: 0.0010   in 1 of 51 numbers
+budget = max(0.5 x envelope, 0.05) = 0.8500
+EQUIVALENCE OK
+```
+
+The pretty run misses the plain envelope by 0.001 on one of 51 numbers, against a run-to-run spread of 1.7. There
+is no evidence the showcase rendering changes behaviour, which is what the code structure already implies
+(§2.4.3). Worth keeping in mind beyond this section: **the same nondeterminism applies to every eval script in
+the repo**, so any single-run number here carries a run-to-run spread of this order.
+
+### 2.4.7 Mid-take resets: the episode was timing out, not the robot falling
+
+A 30 s take showed the robot snapping back to its spawn twice. Cause: `Hexapod-S2-v0` has **no Play variant**, so
+`record_gait.py` runs the training cfg, whose `episode_length_s` is 10.0 (`hexapod_env_cfg.py:645`); the Play
+cfgs that set 10,000 s (lines 660, 776, 989, 1079) do not cover S2. Every take longer than 10 s was therefore
+cut by a `time_out` termination. Fixed in `record_gait.py`:
+`cfg.episode_length_s = max(cfg.episode_length_s, args.seconds + 1.0)`. A fall (`base_contact`, root below
+0.05 m) still resets, which is the part that should stay visible.
+
+### 2.4.8 Footage recorded (2026-10-03)
+
+`bash scripts/rsl_rl/record_showcase.sh` on the **O-mat** final checkpoint
+(`logs/rsl_rl/hexapod_s2/2026-10-03_02-09-32_s2_headroom_O-mat_seed43/model_13998.pt`, chosen by the user because
+it slips less). Defaults: `quality=mid`, `1920x1080`, `noon_grass`, `terrain_mdl=granite`
+(`Stone/Granite_Light.mdl` — the pale speckled stone the robot stands on at the start of the earlier
+`showcase_rough_L14` take, picked by the user over terrazzo / marble / gravel), 30 s takes, `orbit_turns=0.75`,
+terrain level 12, command 0.12 m/s, and **no** `--robot_mdl` (the robot keeps its own material, as in that same
+take). The equivalence cells are opt-in now (`EQUIV=1`), since they were run and passed above. Takes, all at
+1920×1080 / 50 fps / 1,500 frames, in `logs/videos/showcase`:
+
+| take | view | terrain |
+|---|---|---|
+| `hero_flat` | hero | flat |
+| `orbit_rough_L12` | orbit | rough, level 12 |
+| `orbit_stairs_L12` | orbit | stairs up, level 12 (`--backdrop_z -0.7`) |
+| `orbit_slope_L12` | orbit | slope up, level 12 (`--backdrop_z -0.7`) |
+| `spin_rough_L12` | side | rough, level 12, yaw 0.3 on the spot |
+
+Recorded with `--uniform_friction` (§2.4.9). Tracking, command 0.12 m/s: `hero_flat` 0.119, `orbit_rough_L12`
+0.120, `orbit_stairs_L12` 0.120, `orbit_slope_L12` 0.120, `spin_rough_L12` yaw-only (v_x 0.001). Frames checked:
+ground texture continuous with no slab intersection, horizon clean, stair treads and the slope reading
+correctly, robot legible against the pale stone. An earlier set at level 14 with `terrain_mdl=dirt` and command
+0.15 is still in the same folder under the `_L14` tags; those ran under the trained material field.
+
+### 2.4.9 Friction is not the visual material (and `--uniform_friction`, a deliberate physics change)
+
+The granite takes prompted "does the friction change with the surface, this looks slippery". It does not, and the
+two systems are worth stating plainly because the confusion is natural:
+
+- **Visual:** one submesh per library entry under `/World/ground/materials/<entry>`, each created by
+  `build_terrain_materials` with `CollisionAPI … CreateCollisionEnabledAttr(False)`. They are decoration.
+- **Physics:** `MaterialField` (a Voronoi field of library entries over the terrain) × `Palette` (per-episode μ_s,
+  μ_d, k draws inside each entry's range) → `FootWriter`, which writes μ and compliance onto the **tibia shapes**
+  through the PhysX tensor API. The terrain collider itself is uniform (μ 1.0, multiply).
+
+So `--terrain_mdl` cannot change how slippery the ground is, and every take so far — `multi`, `dirt`, `granite` —
+had identical friction. What one visual material removes is the *legibility*: the robot still crosses `ptfe`
+(μ 0.2–0.3), `wet_tile` (0.2–0.35) and `wet_clay` (0.25–0.5), but they no longer look different. In the earlier
+`showcase_rough_L14` take the robot happened to start on `foam` (μ 0.7–0.9), which is why that opening looked
+well planted.
+
+For presentation footage the user chose uniform high friction, so `record_gait.py` gained
+**`--uniform_friction`**: `cfg.material_entries = 1`, which restricts the field to entry 0, `concrete`
+(μ 0.8–1.0, rigid). Dimensionally safe — the observation's material block is continuous values
+(`hexapod_env.material4` → μ_s, μ_d, log10 k, log10(1+c)), not a one-hot over entries, so the 1,269-D S2
+checkpoint loads unchanged. **But it is a real change to the physics the policy runs under, and a run made with
+it is not the trained condition.** It is on in `record_showcase.sh` for the showcase takes and must never back a
+robustness claim; drop the flag for a take that represents training.
+
+**First attempt hit a latent bug and had to be abandoned.** The obvious implementation —
+`cfg.material_entries = 1` — hangs: `MaterialField._sites` resamples a site's entry until it differs from its
+neighbour's (`while ent and e == ent[-1]`), which cannot terminate when there is only one entry to draw. A run
+sat at scene construction for 30 min at 9 % GPU before this was spotted. The loop is now guarded
+(`while self.entries > 1 and …`), which is inert for every real configuration (S1 uses 10 entries, S2 uses 12)
+and was checked to leave the entries-10 and entries-12 fields bit-identical. `--uniform_friction` instead
+rewrites the **palette** after the env is built — every entry gets concrete's μ range and rigid k — so the field,
+its seed and the observation layout are untouched and nothing in the shared training path changes.
+
+Effect, measured over the five takes (command 0.12 m/s): tracking is 0.119–0.120 m/s everywhere, including
+**slope up at level 12, which managed only 0.043 m/s under the trained material field**. That stall was
+friction-limited, not a terrain-geometry limit — a result worth keeping in mind for S1b/S2, where soft and
+low-μ ground on slopes is already the known weak point (§2.3.11).
+
+### 2.4.10 Not done (deliberate)
+
+- **Indoor/warehouse backdrop.** `Environments/Simple_Warehouse/warehouse.usd` exists on the asset root and
+  `demo_look` is already shaped for it (a `scene=` branch adding one backdrop prim and an indoor HDRI). The open
+  question is geometric, not visual: the 7-type × 3-row terrain strip is ~28 m across and will not sit inside a
+  prebuilt interior without shrinking the layout or cutting the warehouse floor.
+- **Gaussian-splatting backdrop from a phone capture.** Feasible to capture — 3DGS needs only RGB video plus COLMAP
+  poses, so any iPhone works and the LiDAR on Pro models only helps metric scale. The blockers are downstream: a
+  splat has no collision geometry (physics would still run on the terrain generator or a meshed proxy), and the RTX
+  rasteriser does not render 3DGS natively — it needs Isaac Sim's neural-reconstruction path, unverified in this
+  6.0.1 install. It would also only make the *picture* real while the physics stays as it is, so under spec §11
+  ("claims must not depend on renderer fidelity") it is presentation value only.
+
+### 2.3.12 Headroom pilot: runs, evaluation, verdict (2026-10-02 → 2026-10-03)
+
+**Runs** (seed 43, 4,096 × 16, 6,000 iterations from the S1 seed-43 trunk at 7,999, actor frozen 50 iterations at the
+branch, clock dropout 0 → 1 over iterations 8,000–9,800; ≈ 7.2–7.4 h each; logs `logs/s2_headroom_<arm>.log`):
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S2-v0 --headless --num_envs 4096 --seed 43 --max_iterations 6000 \
+  --branch_from logs/rsl_rl/hexapod_s1/2026-09-28_13-48-22_s1_w50_seed43/model_7999.pt env.arm=<arm> \
+  --run_name s2_headroom_<arm>_seed43
+```
+
+| Arm | Run dir (`logs/rsl_rl/hexapod_s2/`) | Final reward (last 500) | Slope per 2,000 at the end |
+| --- | --- | --- | --- |
+| B0 | `2026-10-02_18-56-36_s2_headroom_B0_seed43/model_13998.pt` | 350 | +0.4 % |
+| O-mat | `2026-10-03_02-09-32_s2_headroom_O-mat_seed43/model_13998.pt` | 351 | +1.8 % |
+| O-geo | `2026-10-03_09-32-50_s2_headroom_O-geo_seed43/model_13998.pt` | 355 | +1.1 % |
+
+**Gait at the final milestone** (`logs/milestones/<run>/it13998_*`; lift per swing R front / mid / back, L front / mid /
+back, cm):
+
+| Arm | Lift R | Lift L | Worst leg gap |
+| --- | --- | --- | --- |
+| B0 | 3.89 / 5.00 / 4.52 | 3.87 / 5.09 / 4.52 | +1.7 cm |
+| O-mat | 2.92 / 3.74 / 3.17 | 2.76 / 3.80 / 2.74 | +1.2 cm |
+| O-geo | 2.40 / 5.15 / 4.49 | 2.35 / 4.98 / 4.67 | +1.8 cm |
+
+The three arms converged to **different gaits under the same reward**: O-mat lifts every leg 1–1.8 cm less than B0, O-geo
+its front legs 1.5 cm less. The lift drift appeared only after the clock left (iteration ≥ 9,800) and grew to the end
+(O-geo front 3.3 → 2.4 cm in the last 4,000 iterations). With one seed per arm this is indistinguishable from seed noise
+of the S2 optimum, and it dominates every arm difference below.
+
+**Evaluation** (`scripts/rsl_rl/eval_headroom.sh`, 256 deterministic episodes per cell, clock dropped, layout seed 1,
+eval seed 0 for every arm; 50 condition cells + 17 gate cells per arm; JSON `logs/eval/headroom_<arm>_*.json`, summary
+`logs/eval/headroom_summary.txt`):
+
+```
+scripts/rsl_rl/eval_headroom.sh b0=<B0 model_13998.pt> omat=<O-mat model_13998.pt>   # tmux 0:3
+scripts/rsl_rl/eval_headroom.sh ogeo=<O-geo model_13998.pt>                          # tmux 0:2, in parallel
+SUMMARY_ONLY=1 scripts/rsl_rl/eval_headroom.sh b0=x omat=y ogeo=z
+```
+
+Pre-registered target cells (oracle better than B0 by the relative difference shown; 95 % episode-bootstrap CI):
+
+| Oracle | Cell | Metric | B0 | Oracle | Oracle gain | Rule |
+| --- | --- | --- | --- | --- | --- | --- |
+| O-mat | 15° up, μ 0.25 strip | window \|v̄_x − cmd\| | 0.0135 | 0.0116 | +13.8 % [+6.0, +20.9] | win |
+| O-mat | 15° up, μ 0.25 strip | stance slip | 0.0385 | 0.0311 | +19.2 % [+15.7, +22.6] | win |
+| O-mat | 15° down, μ 0.25 strip | window \|v̄_x − cmd\| | 0.0031 | 0.0036 | −15.8 % [−31.0, −1.7] | worse |
+| O-mat | 15° down, μ 0.25 strip | stance slip | 0.0279 | 0.0273 | +2.3 % [−2.8, +7.2] | — |
+| O-geo | bumps, stairs up / down at L9, L14, L17 (9 cells) | first-contact impact | 2.06–2.23 | same | −1.2 … +2.7 %, every CI spans 0 | — |
+| O-geo | same 9 cells | short-swing share | 0.10–0.21 | 0.13–0.26 | **−20 … −33 % (worse)** in all 9 | worse |
+
+Pre-registered controls and gates:
+
+| Check | Result |
+| --- | --- |
+| O-mat flat negative control (should equal B0) | **Not equal:** flat μ 0.25 tracking +23.3 % [+14.3, +31.1], flat μ 0.9 (no low-friction strip at all) slip +18.6 % [+10.7, +25.5] — O-mat slips less than B0 everywhere, strip or not |
+| Matched-control difference-in-differences (oracle gain on the strip minus its gain on the same course at μ 0.9) | O-mat 15° up: tracking +42.7 %, slip +13.5 %. **O-geo, which sees no material at all: tracking +56.2 %, slip +24.0 %** on the same cell, and +48 % / +9.5 % downhill. The placebo oracle gains more than the material oracle |
+| Gates (17 S0b conditions; S1 trunk: 0 falls) | B0: falls up to 1.6 % (v 0.15, L9), cycle RMSE ≤ 0.025. **O-mat: cycle RMSE 0.0345 at v 0.15 L9 (gate 0.03) — fails**, 0 falls. O-geo: falls up to 0.8 %, RMSE ≤ 0.024. Stride error vs the command-clock reference −10 … −31 % in all three arms: the reference assumes the clock cadence, which no longer exists once the clock is dropped, so this gate does not apply after S2 as written |
+
+**Ablation: does the oracle use its block?** (`eval_headroom.py --ablate_oracle`: the oracle block reads its normaliser
+mean, i.e. z = 0, no information, in distribution; summary `logs/eval/ablation_summary.txt`. A first try held the block at
+zero, which for M* is −6 σ on log k: O-mat stood still — not an information ablation, discarded.)
+
+| Oracle | Cell | Metric: live → uninformed (Δ, 95 % CI) |
+| --- | --- | --- |
+| O-mat | 15° up, μ 0.25 | tracking 0.0116 → 0.0125 (+0.0009 [−0.0004, +0.0020]); slip 0.0311 → 0.0312 (+0.0001 [−0.0010, +0.0012]) |
+| O-mat | 15° down, μ 0.25 | tracking +0.0009 [+0.0004, +0.0015]; slip −0.0001 [−0.0015, +0.0012] |
+| O-mat | flat μ 0.25 | tracking +0.0001, slip 0.0000 (both CIs span 0) |
+| O-geo | bumps L14 | impact −0.009 [−0.073, +0.058]; short swings +0.004 [−0.010, +0.020] |
+| O-geo | stairs up L14 | tracking +0.0048 [+0.0007, +0.0089]; short swings +0.025 [−0.000, +0.049] |
+| O-geo | stairs down L14 | all Δ within noise |
+
+Neither oracle uses its foresight to any measurable extent: removing the information leaves O-mat's slip unchanged to
+the fourth decimal on its own target cell, and O-geo uses H* only marginally on stairs up. The first-layer column norms
+agree (per input: M* 0.04, H* 0.14, against q 1.4–1.6, z_p 0.4–0.6). **Everything O-mat gains over B0 comes from its
+different gait, not from M*** — which is why O-geo, blind to material, gains as much on the material cells.
+
+**Verdict under the pre-registered rules (§2.3.7):**
+- **O-mat: no-go.** The rule's two winning cells exist, but (1) the go rule requires every gate to pass and O-mat fails
+  the tracking gate; (2) the flat negative control differs from B0, which the rule sends to investigation, and the
+  investigation (placebo DiD, ablation) shows the gain is not foresight. The compliance claim rule (D39 step 6) is not
+  met for the same reasons (soft cells: mixed signs, and O-geo "wins" 7 of 9 soft sink cells without seeing material).
+- **O-geo: no-go.** No impact gain on any target cell; short-swing share worse on all 9.
+- **No-go for both → spec §11 first row: stop before N_v.**
+
+**What the pilot does and does not show.** It shows that under the shared reward, in 6,000 iterations from a blind trunk,
+privileged foresight of material or shape is not used by the policy and buys nothing measurable; the arms' differences
+are gait-optimum differences of the order of 20–30 % on several metrics, larger than any foresight effect. It does not
+show that foresight *cannot* help: (a) §2.3.4 / §2.3.11 already showed the reward does not pay for anticipation and the
+blind walker copes reactively almost everywhere — after S2 training B0 even crosses the soft-k 4e2 slopes the trunk
+stalled on (|v̄_x − cmd| 0.014 m/s, 0 falls); (b) one seed per arm; (c) the oracles' extra inputs were introduced at the
+branch into a converged blind policy. Before any reportable claim, the options are a decision for the user (not
+pre-registered): stop the vision arms per spec §11; or redesign the task so that reacting late is expensive (conditions
+where the blind walker fails, a reward term that prices impacts / slips at transitions) and repeat the pilot; or train
+the oracles longer / with the block live from S1. Bench items stay deferred either way.
+
+### 2.3.13 After the no-go: why the oracles ignored their information, and the redesign under discussion (2026-10-04)
+
+**Status: discussion record, nothing decided or run yet.** User position (2026-10-04): the §2.3.12 ablation shows the
+pilot could not test foresight at all (the policies do not read their block), so the result is "the setup gives no
+incentive", not "foresight does not help"; the direction is option 2 of §2.3.12 (redesign reward and evaluation, repeat
+the pilot), with the first no-go reported as is. Landing impact and actuator efficiency are deployment goals in their own
+right (user), which is the justification for pricing them — not the oracle comparison.
+
+**Measured: what the S2 reward pays for.** TensorBoard `Episode_Reward/*` of the three headroom runs, mean of the last
+500 iterations (values are reward per second; total ≈ 35 / s):
+
+| Term | B0 | O-mat | O-geo | Share of total (B0) |
+| --- | --- | --- | --- | --- |
+| track_lin_vel | 22.50 | 22.50 | 22.79 | 64 % |
+| alive | 9.95 | 10.00 | 9.98 | 28 % |
+| track_yaw | 4.86 | 4.79 | 4.94 | 14 % |
+| stance_rigidity_contact | −0.559 | −0.496 | −0.519 | 1.6 % |
+| swing_clearance | +0.478 | +0.431 | +0.437 | 1.4 % |
+| swing_radial / touchdown_reach | −0.527 / −0.806 | −0.586 / −0.752 | −0.539 / −0.845 | 1.5 % / 2.3 % |
+| base_orientation | −0.110 | −0.124 | −0.094 | 0.3 % |
+| ang_vel_xy | −0.078 | −0.065 | −0.076 | 0.2 % |
+| leg_proximity | −0.077 | −0.056 | −0.052 | 0.2 % |
+| joint_torque_excess | −0.0012 | −0.0015 | −0.0013 | 0.003 % |
+
+Reading: 106 % of the net reward is "hold the commanded speed and do not fall", which the blind walker already does
+(§2.3.11). Everything foresight could improve — slip, body rocking, tilt, effort — is together under 2.5 % of the reward,
+and landing impact is not priced at all. The oracles' lower lift (§2.3.12: 1–1.8 cm below B0) cost them only
+≈ 0.045 / s of `swing_clearance`: after the clock terms leave, that floor is too weak to hold the lift.
+
+**Three possible causes of "block not used"** (a reward change addresses only the first): (A) no incentive; (B) the block
+arrived late — zero-initialised columns on a converged blind policy, 6,000 iterations; (C) no physical benefit on this
+robot at 0.05–0.20 m/s. The repeat pilot must be able to tell them apart: first gate = the ablation of §2.3.12 changes the
+oracle's behaviour; only then oracle vs B0.
+
+**Proposals discussed (user) and assessment (agent); numbers above, mechanisms to be checked with
+`scripts/tests/reward_economy.py` before any training:**
+
+| # | Proposal | Assessment |
+| --- | --- | --- |
+| 1 | `swing_clearance` weight looks high | It is 1.4 % of the reward and too weak, not too strong (lift drift above). Needed as the guard against shuffling once an impact term exists |
+| 2 | World-frame straight-line tracking reward | The actor cannot observe its world position or heading, so it cannot correct drift; use path deviation (lateral offset, heading drift vs the integrated command) as an evaluation metric first |
+| 3 | Raise `stance_rigidity_contact` with a ramp | The term is toe slip + 0.1 × stance joint speed; its mean value (≈ 1.1) is far above what the measured slip (0.01–0.04 m/s per foot) can produce, so the joint-speed part appears to dominate (to verify) and a higher weight would tax the propulsion stroke. Split the term, raise the slip part only |
+| 4 | Loosen `leg_proximity` | Not advised: the term is non-zero in all arms, worst gaps are already inside the 2 cm margin (+1.2 … +1.8 cm), self-collision is off in sim, and §2.2.6–2.2.8 showed longer training closes the gaps |
+| 5 | Stronger, tighter `base_orientation` | Gravity-referenced tilt punishes following a 15° slope, and mean pitch differs by ≈ 3° between arms as posture. Price the disturbance instead: tilt about the local terrain plane and the rocking rate |
+| 6 | Raise `ang_vel_xy` | Agreed: the cleanest "gimbal" signal (mean ≈ 0.16 rad/s now, 0.2 % of the reward) |
+| 7 | Raise `joint_torque_excess` | Open: a slipping foot carries less load, so a torque price may reward slipping. Measure first (cost of transport as an evaluation metric), do not reward yet |
+| 8 | Landing-impact term | Agreed. Bounded L1 on toe normal speed at touchdown (rule 3: no squared contact forces); peak-force impact stays the evaluation metric |
+| 9 | Term specific to surface change | Keep the reward terrain-agnostic; put the transitions in the terrain (more, sharper, on slopes) and in the evaluation window |
+
+**Evaluation gaps found:** `eval_headroom.py` records mean pitch only — no roll, no deviation about the mean, no rocking
+rate, no path deviation, no effort. These are the metrics the redesign rests on and must be added before anything is
+compared.
+
+**Guard against tuning until the oracle wins:** the new reward is fixed from the deployment goals and the economy check
+on existing checkpoints, written down with a new go / no-go rule before any oracle is trained under it; it applies to
+every arm from the same stage; §2.3.12 stays in the record as the first outcome.

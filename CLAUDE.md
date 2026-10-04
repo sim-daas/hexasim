@@ -165,9 +165,18 @@ code before relying on any line here.
   hold every gate at 15 ms latency + 2× drop slope; held-out material layout (seed 1) ≡ training layout — frozen evals
   use layout ≠ 0; flat-ground friction is harmless for this robot, so material transitions matter only on slopes/steps;
   **primary behaviour metrics = transition-window tracking/slip/falls + first-contact impact, stride descriptive (D38)**.
-  **Next: blind headroom pilot B0 vs O-mat (M*) vs O-geo (H* height strips, D37)** from seed 43 at 4,096 × 16, spec
-  in §2.3.7 (pre-registered go/no-go). Partly implemented (`Hexapod-S2-v0`, `train.py --branch_from`, `env.clock_live`,
-  `cfg.arm`, `S1PPO` clock anneal/re-burn-in); H* block, trunk widening, smoke test and the headroom eval still to do.
+  **Headroom pilot B0 vs O-mat (M*) vs O-geo (H*, D37)** from seed 43 at 4,096 × 16 (spec §2.3.7, pre-registered go/no-go):
+  run and evaluated 2026-10-03: **no-go for both oracles** (§2.3.12; neither uses its block — `eval_headroom.py
+  --ablate_oracle` — and arm differences are gait differences); next step is the user's decision; task list with status in
+  `research_progress.md` (Phase 2.3). `Hexapod-S2-v0` = S1 + H* (1,269-D, `layout.S2_ACTOR_BLOCKS`; S1 stays 1,125-D) +
+  12-entry material library (soft_soil, wet_clay; S1 keeps 10, D39/D40) + clock dropout; arms via `env.arm=B0|O-mat|O-geo`
+  (`layout.ARM_BLOCK`); `train.py --branch_from <trunk>` widens the checkpoint (`s1_ppo.widen_checkpoint`). Evaluation:
+  `scripts/rsl_rl/eval_headroom.sh b0=… omat=… ogeo=…`. **When a block goes live** (S1PPO `_live_pending`) the critic's
+  statistics for it must be set and its columns zeroed, and the Adam second moment of the new columns seeded — without
+  these the critic sees noise × 100 and the actor is wrecked by sign-steps (§2.3.9); the same applies to the vision
+  blocks. `S1PPO.update` asserts zero-held columns stay zero. At S1b reset the critic's contract-P statistics before
+  changing any DR range (count 5.2e8 is frozen; zero-variance dims enter at gain 100). Kit tests that build two envs
+  (`material_field_test.py`) go out of GPU memory next to a 4,096-env training — run them alone.
 - **S0b (research/phase2-progress §2.1):** `Hexapod-S0b-v0` — twist_cmd (117-D actor), command
   clock, standing mode at zero command (`env.cpg_active`), terrain curriculum (`mdp/terrain.py`, height map gives
   `env.terrain_z` / `terrain_normal`; never use absolute z), full DR incl. per-env foot material (bound on the tibia

@@ -60,7 +60,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 GAMMA = 0.99
 cfg = parse_env_cfg(args.task, num_envs=args.num_envs)
 cfg.seed = 0
-s0b = args.task.startswith(("Hexapod-S0b", "Hexapod-S1"))  # command tasks (S1 = S0b + materials, aux)
+s0b = args.task.startswith(("Hexapod-S0b", "Hexapod-S1", "Hexapod-S2"))  # command tasks (S0b and later)
 if s0b:
     cfg.curriculum = None
     if args.cmd is not None:
@@ -98,8 +98,10 @@ actor = MLPModel(
     {"class_name": "GaussianDistribution", "init_std": 1.0},
 ).to(env.device)
 actor.load_state_dict({k: v.to(env.device) for k, v in state.items()})
-if s0b:
-    env.v0.load_state_dict(ck["v0_state_dict"])
+if s0b:  # V_0 and, from S1, the aux learner, ê gate and dropout state (the trunk does not walk without them)
+    from hexasim.rl.load_policy import load_env_state
+
+    load_env_state(env, ck)
 actor.eval()
 robot, sensor, rm = env.scene["robot"], env.scene["contact_forces"], env.reward_manager
 tibia = [i for i, n in enumerate(robot.data.body_names) if "tibia" in n]

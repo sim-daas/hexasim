@@ -17,10 +17,14 @@ Per behaviour: falls, slip on the strip, v_x on the strip, and per-term reward s
 PPO sees it) for the S1 reward and for the S2 reward (the same minus the four clock-phase terms). Anticipation is
 learnable only if cautious ≥ walk under the reward the arms train on.
 
+Soft strips: ``--k 400 --mu 0.8 --base_mu 0.8`` (stiffness only). Shape terrains (bumps, rough, stairs): ``--start -100
+--length 1000 --mu 0.9`` makes the whole episode the "strip", i.e. cautious = slow for the whole episode.
+
 Usage: python scripts/tests/anticipation_economy.py --headless --ckpt <S1 checkpoint> [--cmd 0.15 --scale 0.73]
 """
 
 import argparse
+import math
 import os
 
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -35,6 +39,11 @@ parser.add_argument("--lead", type=float, default=0.3, help="cautious: m before 
 parser.add_argument("--mu", type=float, default=0.25, help="strip μ_s (μ_d = 0.88 μ_s), rigid")
 parser.add_argument("--terrain", default="flat", help="flat or a mdp.terrain sub-terrain (difficulty 1)")
 parser.add_argument("--start", type=float, default=0.5, help="strip start, m ahead of spawn (slopes begin at 0.5 m)")
+parser.add_argument("--length", type=float, default=0.5, help="strip length, m (1000 with --start -100 = everywhere)")
+parser.add_argument("--k", type=float, default=1e6, help="strip stiffness, N/m (1e6 = rigid; soft ground 4e2–2e3)")
+parser.add_argument(
+    "--base_mu", type=float, default=0.9, help="μ_s off the strip (μ_d = 0.944 μ_s); = --mu for matched"
+)
 parser.add_argument("--num_envs", type=int, default=256)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -55,7 +64,7 @@ from isaaclab.terrains import MeshPlaneTerrainCfg  # noqa: E402
 
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 
-START, LENGTH = args.start, 0.5
+START, LENGTH = args.start, args.length
 CLOCK_TERMS = ("cpg_z_target", "cpg_stance_rigidity", "cpg_force_target", "cpg_coxa_contact")
 N = args.num_envs
 ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
@@ -79,7 +88,13 @@ cfg.events.reset_robot_base.params["pose_range"].update(x=(0.0, 0.0), y=(0.0, 0.
 env = gym.make("Hexapod-S1-v0", cfg=cfg).unwrapped
 pin_terrain_level(env, 0)
 load_env_state(env, ck)
-strip_course(env, START, LENGTH, low=(args.mu, 0.88 * args.mu, 6.0))
+strip_course(
+    env,
+    START,
+    LENGTH,
+    low=(args.mu, 0.88 * args.mu, math.log10(args.k)),
+    high=(args.base_mu, 0.944 * args.base_mu, 6.0),
+)
 dim = env.observation_manager.group_obs_dim["policy"][0]
 pol = MLPModel(
     TensorDict({"policy": torch.zeros(1, dim)}, [1]),
@@ -132,8 +147,8 @@ def run(behaviour):
     s1 = per_term.sum().item()
     s2 = s1 - per_term[clock_idx].sum().item()
     print(
-        f"ANTICIP {behaviour:8s} {args.terrain} mu {args.mu:.2f} cmd {args.cmd:.2f} scale {args.scale:.2f}:"
-        f" fall {fell.float().mean():.3f} |"
+        f"ANTICIP {behaviour:8s} {args.terrain} mu {args.mu:.2f} k {args.k:.0f} cmd {args.cmd:.2f}"
+        f" scale {args.scale:.2f}: fall {fell.float().mean():.3f} |"
         f" on strip v_x {vx_on / max(n_on, 1):.3f} slip {slip / max(n_on, 1):.3f} m/s | episode reward S1 {s1:+.3f}"
         f" S2 {s2:+.3f}"
     )

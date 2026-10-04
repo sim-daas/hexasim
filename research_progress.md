@@ -59,8 +59,8 @@ verbatim per-run logs and milestone tables: `research/phase2-run-logs.md`. Secti
 | S1 seeds at W 50 (5 trunks, D31) | **Done: all 5 seeds (42–46) evaluated — every gate passes, 0 falls in 21,760 episodes, small seed spread** (§2.2.11) | `…/hexapod_s1/2026-09-2{8,9}_*_s1_w50_seed4{3,4,5,6}` |
 | S1-K (B1-K's own trunk, ×5) | Not started, deferred by design (B1-K is first in the cut order) | — |
 | S1 review response (2.3) | Done: spec drift fixed, W = 50 as deviation, latency / held-out layout / compliance / probe-skill evals, anticipation economy | §2.3 |
-| O vs B0 headroom pilot (B0, O-mat, O-geo; seed 43, 4,096 × 16) | **Designed, partly implemented, not run** (§2.3.7) | — |
-| Soft-ground compliance (5–10 mm sink, D39) | Planned, not implemented: solver check → two soft entries → pilot conditions | Phase 2.3 section |
+| O vs B0 headroom pilot (B0, O-mat, O-geo; seed 43, 4,096 × 16) | **Run and evaluated 2026-10-03: no-go for both oracles** (§2.3.12) — neither uses its foresight (ablation); arm differences are gait differences. Next step is the user's decision | `logs/rsl_rl/hexapod_s2/*_s2_headroom_*_seed43`, `logs/eval/headroom_summary.txt` |
+| Soft-ground compliance (5–10 mm sink, D39) | Solver check passed at k 4e2 (§2.3.8); `soft_soil`, `wet_clay` in the S2 library; V passes its tests on them | `logs/eval/soft_solver_check.txt`, `logs/eval/pre/` |
 | N_v benchmark, S1b, S2, S3 | Not started (after the headroom pilot) | — |
 
 Headline: π_S0 passes every spec §4.2 S0b gate with **0 falls in 17,408 evaluation episodes**, all 108
@@ -69,7 +69,10 @@ every S0b gate on the spatial-material terrain with the deployment velocity inpu
 V_0), a velocity estimator ≈ 2.5 × more accurate than V_0, and a physically safe, coordinated gait. Across all five S1
 seeds (42–46) every S0b gate passes on every seed with **0 falls in 21,760 evaluation episodes**, and the seed spread of
 every task, estimator and gait metric is small next to its gate margin: the S1 result is a property of the
-configuration, not of one lucky seed.
+configuration, not of one lucky seed. **The blind O vs B0 headroom pilot (2026-10-03) is a no-go for both oracles:**
+privileged foresight of material (O-mat) or shape (O-geo) is not used by the policy under the shared reward and buys
+nothing measurable; the arms' differences are gait differences (§2.3.12). Per spec §11 the vision runs stop before N_v
+unless the task is redesigned — the user's decision.
 
 ---
 
@@ -570,11 +573,25 @@ blind on soft ground" is the hypothesis the pilot tests, not an assumption — o
 7. **Bench, with the deferred servo bench (D34):** static and walking sink per leg on real dirt / clay under known load;
    fit k and μ; apply the keep/rerun rule (keep iff the fitted values lie inside the randomised ranges).
 
-**Next (order):** soft-ground solver check → remaining headroom pieces (H* block, trunk widening, the two soft entries,
-branch smoke test, headroom evaluation incl. soft-ground conditions) → run B0 / O-mat / O-geo from seed 43 → go/no-go
-(phase2-progress §2.3.7) → only then N_v → S1b (latency 5–15 ms, soft entries) → S2.
+#### Task list up to the N_v benchmark (order fixed 2026-10-02; details in phase2-progress §2.3.8–2.3.12)
 
-### Deviations from the specs (D1–D39, reasons in `research/phase2-progress.md`)
+| # | Task | Status (2026-10-02) | Result |
+| --- | --- | --- | --- |
+| 1 | Soft-ground solver check at nominal k 4e2 N/m | **Done, passed** (§2.3.8) | Stable down to k 4e2, 0 falls; stance sink walking 8.5 mm (k 4e2) … 2.3 mm (k 2e3), standing 5.0 … 1.1 mm; ground acts ≈ 3 × stiffer than nominal |
+| 2 | H* block (144-D, O-geo) | **Done** (§2.3.9) | S2 layout 1,269-D; S1 stays 1,125-D |
+| 3 | Trunk widening at the branch, every arm | **Done** | Actor + critic match the seed-43 trunk to 2.3e-12 over 10,000 observations |
+| 4 | Two soft library entries for every arm from the branch | **Done** (D39, D40) | `soft_soil` k 4e2–1e3, μ 0.4–0.7; `wet_clay` k 6e2–2e3, μ 0.25–0.5 (S2 uses 12 entries, S1 keeps 10) |
+| 5 | Pre-training checks: reward economy, V on soft ground, material field, merge tests | **Done, all pass** (§2.3.10) | Walk 0.897 > stand 0.302 > fall −0.10 per step without the clock terms; V error 0.020 → 0.034 m/s at k 4e2, both v7 §4.3 tests pass |
+| 6 | 20–40-iteration branch smoke test per arm | **Done** — found and fixed two branch bugs (§2.3.9) | Critic saw a newly live block as noise × 100; Adam sign-steps on new columns wrecked O-mat. After the fixes the three arms are identical while frozen and train alike |
+| 7 | Headroom evaluation scripts (window + impact metrics, soft conditions, verdict) | **Done, not yet run on arms** | `eval_headroom.py` / `.sh`; reaction lead time left out (not in the go rule) |
+| 7b | Blind-trunk economy on soft strips, bumps, rough, stairs (walk vs scripted slow-down, as §2.3.4 did for friction) | **Done** (§2.3.11) | Only soft k 4e2 on a 15° slope breaks the trunk (stalls at ≈ 0.05–0.06 of 0.15 m/s, slip × 6); flat soft, bumps, rough, stairs: speed held, 0 falls, slowing costs 83–113 reward. Cliff lies between k 4e2 and 1e3 |
+| 8 | Stop for the user's OK | Done (OK 2026-10-02, soft range kept as is) | — |
+| 9 | Runs B0 → O-mat → O-geo, 6,000 iterations each from seed 43, milestone reviews | **Done** (§2.3.12), ≈ 7.3 h each | Same reward, three gaits: O-mat lifts every leg 1–1.8 cm lower than B0, O-geo its front legs 1.5 cm lower; gaps fine; reward 350 / 351 / 355 |
+| 10 | Evaluation (50 cells + 17 gates per arm, held-out levels 15–20 added by the user) + pre-registered go / no-go | **Done: no-go for both** (§2.3.12) | O-mat "wins" slope-up μ 0.25 (+14 % tracking, +19 % slip) but fails the tracking gate and its flat negative control; the placebo O-geo gains more on the same cell; with M* uninformed its slip is unchanged. O-geo: no impact gain, 20–33 % more short swings. Spec §11 first row: stop before N_v |
+| 11 | **User decision:** stop the vision arms (spec §11), or redesign the task so late reaction is costly and repeat the pilot, or train the oracles longer / live from S1 | **← here** | — |
+| — | After the verdict: N_v benchmark → S1b (latency 5–15 ms, soft entries; reset the critic's contract-P statistics, §2.3.9) → S2 | Out of this list | — |
+
+### Deviations from the specs (D1–D40, reasons in `research/phase2-progress.md`)
 
 | # | Deviation | § |
 | --- | --- | --- |
@@ -616,7 +633,8 @@ branch smoke test, headroom evaluation incl. soft-ground conditions) → run B0 
 | D36 | Latency DR 5–15 ms from S1b, every arm | 2.3.5 |
 | D37 | Second oracle O-geo (height strips) beside O-mat | 2.3.6 |
 | D38 | Primary metrics: transition-window tracking / slip / falls + first-contact impact; stride descriptive | 2.3.4, 2.3.6 |
-| D39 | Planned: soft-ground entries `soft_soil`, `wet_clay` (k 4e2–2e3 N/m, 5–10 mm sink) for every arm from the headroom pilot / S1b; elastic only, mud and gravel out of scope | Phase 2.3 summary above |
+| D39 | Soft-ground entries `soft_soil`, `wet_clay` (k 4e2–2e3 N/m; measured walking sink 2.3–8.5 mm) for every arm from the headroom pilot / S1b; elastic only, mud and gravel out of scope | Phase 2.3 summary above, 2.3.8 |
+| D40 | S2 layout = S1 layout ⊕ H* (1,269-D) with the trunks widened at the branch; S2 library has 12 entries, so its material layout seed 0 is a new layout, not the trunks' | 2.3.9 |
 
 ### Lessons from Phase 2 (checklist for S2/S3)
 
@@ -689,6 +707,15 @@ scripts/rsl_rl/run_s1_sweep_and_seeds.sh sweep
 nohup scripts/rsl_rl/run_s1_sweep_and_seeds.sh seeds 50 > logs/s1_seeds_w50_driver.log 2>&1 &
 # per-run evaluation: eval_s0b_gates.sh (TASK=Hexapod-S1-v0, 256), gait_by_material.py, milestone_review.sh <run> 7999
 python scripts/rsl_rl/summarize_s1_runs.py s42=<run>:<tag> s43=… --seeds s42,s43,…
+
+# Headroom pilot (phase2-progress §2.3.7–2.3.10), from the S1 seed-43 trunk
+python scripts/tests/gait_by_material.py --headless --split compliance --k {400,600,1000,2000} --cmd {0,0.15} s43=<trunk>
+python scripts/tests/test_s1.py
+python scripts/tests/reward_economy.py --headless --task Hexapod-S1-v0 --ckpt <trunk> --cmd 0.15 0 0
+python scripts/tests/material_field_test.py --headless --task Hexapod-S2-v0      # alone on the GPU
+python scripts/rsl_rl/train.py --task Hexapod-S2-v0 --headless --num_envs 4096 --seed 43 --max_iterations 6000 \
+  --branch_from <trunk> env.arm=<B0|O-mat|O-geo> --run_name s2_headroom_<arm>_seed43
+scripts/rsl_rl/eval_headroom.sh b0=<ckpt> omat=<ckpt> ogeo=<ckpt>
 ```
 
 Every run directory holds `params/env.yaml`, `params/agent.yaml` and `git/` (commit + diff). All numbers are

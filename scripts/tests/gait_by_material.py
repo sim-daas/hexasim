@@ -7,8 +7,9 @@
 
 Hexapod-S1-v0, flat tiles, fixed walking command, deterministic actions. Every env's palette is overwritten after the
 reset: even envs all-slippery (μ_s 0.25, μ_d 0.22), odd envs all-grippy (μ_s 0.9, μ_d 0.85), all rigid (k 1e6), so the
-only difference between the groups is friction. ``--split compliance``: even envs rigid (k 1e6), odd envs foam
-(k 3.2e3, the library's foam range 2e3–8e3), both μ_s 0.8 / μ_d 0.75 — the only difference is stiffness.
+only difference between the groups is friction. ``--split compliance``: even envs rigid (k 1e6), odd envs soft
+(``--k``, default 3.2e3 inside the library's foam range 2e3–8e3; the soft-ground solver check sweeps it down to 4e2),
+both μ_s 0.8 / μ_d 0.75 — the only difference is stiffness.
 Per policy and group, over T steps after a settle:
   lift      mean peak toe height above the terrain per swing (≥ 5 airborne steps), front / middle / back legs, cm
   coxa      coxa angle range (max − min over the window), front / middle / back, deg
@@ -18,12 +19,15 @@ Per policy and group, over T steps after a settle:
   v_x       mean base forward speed, m/s
   sink      mean toe height above the terrain of feet in contact, cm (compliance lowers it)
   err       mean |q_cmd − q| of femur + tibia of feet in contact, deg (stance-load sag, v_kin's stance cue)
+  solver    deepest toe sink of any foot in contact, cm; mean |q̇| of femur + tibia of feet in contact, rad/s (contact
+            jitter shows here and in a standing run's v_x); share of envs that terminated (fell)
 
 Usage: python scripts/tests/gait_by_material.py --headless --cmd 0.15 pi_s0=<ckpt> s1=<ckpt> [--num_envs 512]
        [--split compliance]
 """
 
 import argparse
+import math
 import os
 
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -35,6 +39,7 @@ parser.add_argument("policies", nargs="+", help="tag=checkpoint")
 parser.add_argument("--cmd", type=float, default=0.15)
 parser.add_argument("--num_envs", type=int, default=512)
 parser.add_argument("--split", choices=["friction", "compliance"], default="friction")
+parser.add_argument("--k", type=float, default=3.2e3, help="compliance split: soft-group stiffness, N/m")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
@@ -61,7 +66,7 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg  # noqa: E402
 N, SETTLE, T = args.num_envs, 100, 400
 GROUPS = {  # (μ_s, μ_d, log10 k); the first group is the even envs
     "friction": {"slippery": (0.25, 0.22, 6.0), "grippy": (0.9, 0.85, 6.0)},
-    "compliance": {"rigid": (0.8, 0.75, 6.0), "foam": (0.8, 0.75, 3.5)},
+    "compliance": {"rigid": (0.8, 0.75, 6.0), "soft": (0.8, 0.75, math.log10(args.k))},
 }[args.split]
 LEG_TYPES = {"front": [0, 3], "middle": [1, 4], "back": [2, 5]}
 
@@ -110,22 +115,26 @@ def run(tag, path):
     sink_sum = torch.zeros(N, device=env.device)
     err_sum = torch.zeros(N, device=env.device)
     n_contact = torch.zeros(N, device=env.device)
+    sink_max = torch.zeros(N, device=env.device)
+    qd_sum = torch.zeros(N, device=env.device)
+    fell = torch.zeros(N, dtype=torch.bool, device=env.device)
     clip_j = torch.zeros(N, 18, device=env.device)  # per-joint |requested − clipped| (rad), summed over the window
     act_term = env.action_manager.get_term("joint_pos")
     rm = env.reward_manager
-    terms = torch.zeros(len(rm.active_terms), device=env.device)
+    terms = torch.zeros(N, len(rm.active_terms), device=env.device)
     land_r_sum = torch.zeros(N, 6, device=env.device)
     prev_toe = None
     with torch.inference_mode():
         for t in range(SETTLE + T):
-            obs, *_ = env.step(pol(TensorDict({"policy": obs["policy"]}, [N])))
+            obs, _, term, *_ = env.step(pol(TensorDict({"policy": obs["policy"]}, [N])))
+            fell |= term
             toe = toe_pos_w(robot, env._tibia_body_ids)
             h = toe[..., 2] - env.terrain_z(toe[..., :2])
             contact = sensor.data.net_forces_w.torch.norm(dim=-1) > 1.0
             if t >= SETTLE:
                 landed = contact & (air >= 5)
                 land_r_sum += torch.where(landed, coxa_leg_geometry(env)[1][..., :2].norm(dim=-1), 0.0)
-                terms += rm._step_reward.mean(0)
+                terms += rm._step_reward
                 lift_sum += torch.where(landed, peak, 0.0)
                 lift_n += landed.float()
                 q = robot.data.joint_pos.torch[:, coxa]
@@ -141,6 +150,9 @@ def run(tag, path):
                 sink_sum += (h * contact).sum(1)
                 err_sum += ((e[:, 6:12] + e[:, 12:18]) * contact).sum(1)
                 n_contact += contact.sum(1)
+                sink_max = torch.maximum(sink_max, (-h * contact).amax(1))
+                qd = robot.data.joint_vel.torch.abs()
+                qd_sum += ((qd[:, 6:12] + qd[:, 12:18]) * contact).sum(1)
             peak = torch.where(contact, 0.0, torch.maximum(peak, h))
             air = torch.where(contact, 0.0, air + 1)
             prev_toe = toe
@@ -159,6 +171,12 @@ def run(tag, path):
             f" {(g < 0.02).float().mean() * 100:.1f}% | clip {clip[:, m].mean():.4f} | slip {slip[:, m].mean():.3f}"
             f" | v_x {vx[:, m].mean():.3f} | sink {sink[m].mean() * 100:.2f} cm | err {err[m].mean():.2f} deg"
         )
+        qd_m = (qd_sum / n_contact.clamp(min=1))[m].mean()
+        print(
+            f"MATGAIT {tag:8s} v{args.cmd:.2f} {name:8s} solver: max sink {sink_max[m].max() * 100:.2f} cm (mean of"
+            f" env maxima {sink_max[m].mean() * 100:.2f}) | stance |qd| {qd_m:.3f} rad/s |"
+            f" fell {fell[m].float().mean() * 100:.1f} %"
+        )
     cj = clip_j.mean(0) / T  # (18,) joint order [coxa × 6, femur × 6, tibia × 6], legs RF RM RB LF LM LB
     parts = []
     for jn, jt in enumerate(("coxa", "femur", "tibia")):
@@ -168,10 +186,17 @@ def run(tag, path):
     land_r = land_r_sum / lift_n.clamp(min=1)
     lr = " ".join(f"{land_r[:, i].mean() * 100:4.1f}" for i in LEG_TYPES.values())
     print(f"MATGAIT {tag:8s} landing |r| f/m/b {lr} cm (rest reach {env.coxa_rest_reach[0] * 100:.1f} cm)")
-    print(
-        f"MATGAIT {tag:8s} terms (weighted, per s): "
-        + " ".join(f"{n}={v / T:.3f}" for n, v in zip(rm.active_terms, terms.tolist()) if abs(v / T) > 1e-3)
-    )
+    # Per-term reward per second by group; "S2" = without the four clock-phase terms (they leave with the clock).
+    clock = [
+        n in ("cpg_z_target", "cpg_stance_rigidity", "cpg_force_target", "cpg_coxa_contact") for n in rm.active_terms
+    ]
+    clock = torch.tensor(clock, device=env.device)
+    for name, m in zip(GROUPS, (even, ~even)):
+        v = terms[m].mean(0) / T
+        print(
+            f"MATGAIT {tag:8s} v{args.cmd:.2f} {name:8s} reward/s S1 {v.sum():.3f} S2 {v[~clock].sum():.3f} | "
+            + " ".join(f"{n}={x:.3f}" for n, x in zip(rm.active_terms, v.tolist()) if abs(x) > 1e-3)
+        )
     env.close()
 
 

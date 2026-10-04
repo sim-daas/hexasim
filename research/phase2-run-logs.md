@@ -1676,3 +1676,74 @@ Across 5 seeds (s42, s43, s44, s45, s46): mean ± sd [min, max]
   front coxa range (°)                  59.7400 ± 0.9915  [58.4000, 60.9000]
   coxa clip term                         0.0202 ± 0.0035  [0.0182, 0.0264]
 ```
+
+## Phase 2.3 — headroom pilot (2026-10-02)
+
+### 2.3.8 Soft-ground solver check — verbatim (`logs/eval/soft_solver_check.txt`, soft group and rigid reference)
+
+```
+k400 MATGAIT s43      v0.00 rigid    solver: max sink 0.04 cm (mean of env maxima 0.00) | stance |qd| 0.057 rad/s | fell 0.0 %
+k400 MATGAIT s43      v0.00 soft     solver: max sink 0.81 cm (mean of env maxima 0.64) | stance |qd| 0.073 rad/s | fell 0.0 %
+k400 MATGAIT s43      v0.15 rigid    lift f/m/b 4.31 4.90 4.24 cm | coxa range f/m/b  60.8  64.5  61.2 deg | gap min +0.8 p1 +2.1 cm <2cm 0.8% | clip 0.0195 | slip 0.011 | v_x 0.149 | sink 0.01 cm | err 6.78 deg
+k400 MATGAIT s43      v0.15 rigid    solver: max sink 0.07 cm (mean of env maxima 0.06) | stance |qd| 1.198 rad/s | fell 0.0 %
+k400 MATGAIT s43      v0.15 soft     lift f/m/b 2.99 4.13 3.63 cm | coxa range f/m/b  59.2  63.8  59.7 deg | gap min +0.3 p1 +1.7 cm <2cm 2.1% | clip 0.0189 | slip 0.020 | v_x 0.153 | sink -0.85 cm | err 10.12 deg
+k400 MATGAIT s43      v0.15 soft     solver: max sink 1.75 cm (mean of env maxima 1.45) | stance |qd| 1.645 rad/s | fell 0.0 %
+k600 MATGAIT s43      v0.00 rigid    solver: max sink 0.05 cm (mean of env maxima 0.00) | stance |qd| 0.061 rad/s | fell 0.0 %
+k600 MATGAIT s43      v0.00 soft     solver: max sink 0.57 cm (mean of env maxima 0.48) | stance |qd| 0.071 rad/s | fell 0.0 %
+k600 MATGAIT s43      v0.15 rigid    lift f/m/b 4.30 4.88 4.21 cm | coxa range f/m/b  60.3  64.0  60.6 deg | gap min +1.0 p1 +2.0 cm <2cm 0.9% | clip 0.0194 | slip 0.010 | v_x 0.148 | sink 0.01 cm | err 7.11 deg
+k600 MATGAIT s43      v0.15 rigid    solver: max sink 0.07 cm (mean of env maxima 0.06) | stance |qd| 1.180 rad/s | fell 0.0 %
+k600 MATGAIT s43      v0.15 soft     lift f/m/b 3.42 4.46 3.82 cm | coxa range f/m/b  60.8  62.2  60.8 deg | gap min +0.9 p1 +2.0 cm <2cm 1.1% | clip 0.0186 | slip 0.018 | v_x 0.151 | sink -0.62 cm | err 9.15 deg
+k600 MATGAIT s43      v0.15 soft     solver: max sink 1.27 cm (mean of env maxima 1.01) | stance |qd| 1.563 rad/s | fell 0.0 %
+k1000 MATGAIT s43      v0.00 rigid    solver: max sink 0.04 cm (mean of env maxima 0.00) | stance |qd| 0.057 rad/s | fell 0.0 %
+k1000 MATGAIT s43      v0.00 soft     solver: max sink 0.40 cm (mean of env maxima 0.34) | stance |qd| 0.072 rad/s | fell 0.0 %
+k1000 MATGAIT s43      v0.15 rigid    lift f/m/b 4.31 4.89 4.23 cm | coxa range f/m/b  60.4  64.4  61.1 deg | gap min +0.8 p1 +2.1 cm <2cm 0.8% | clip 0.0191 | slip 0.011 | v_x 0.147 | sink 0.01 cm | err 6.87 deg
+k1000 MATGAIT s43      v0.15 rigid    solver: max sink 0.07 cm (mean of env maxima 0.06) | stance |qd| 1.190 rad/s | fell 0.0 %
+k1000 MATGAIT s43      v0.15 soft     lift f/m/b 3.74 4.54 3.93 cm | coxa range f/m/b  61.0  62.0  60.4 deg | gap min +1.1 p1 +2.2 cm <2cm 0.4% | clip 0.0187 | slip 0.015 | v_x 0.147 | sink -0.41 cm | err 8.49 deg
+k1000 MATGAIT s43      v0.15 soft     solver: max sink 0.83 cm (mean of env maxima 0.69) | stance |qd| 1.441 rad/s | fell 0.0 %
+k2000 MATGAIT s43      v0.00 rigid    solver: max sink 0.04 cm (mean of env maxima 0.00) | stance |qd| 0.057 rad/s | fell 0.0 %
+k2000 MATGAIT s43      v0.00 soft     solver: max sink 0.27 cm (mean of env maxima 0.20) | stance |qd| 0.073 rad/s | fell 0.0 %
+k2000 MATGAIT s43      v0.15 rigid    lift f/m/b 4.30 4.89 4.22 cm | coxa range f/m/b  60.6  64.1  60.7 deg | gap min +1.0 p1 +2.0 cm <2cm 0.9% | clip 0.0189 | slip 0.011 | v_x 0.149 | sink 0.01 cm | err 7.03 deg
+k2000 MATGAIT s43      v0.15 rigid    solver: max sink 0.07 cm (mean of env maxima 0.06) | stance |qd| 1.188 rad/s | fell 0.0 %
+k2000 MATGAIT s43      v0.15 soft     lift f/m/b 4.01 4.80 4.12 cm | coxa range f/m/b  62.0  63.7  60.9 deg | gap min +1.1 p1 +2.3 cm <2cm 0.3% | clip 0.0204 | slip 0.013 | v_x 0.147 | sink -0.23 cm | err 7.77 deg
+k2000 MATGAIT s43      v0.15 soft     solver: max sink 0.52 cm (mean of env maxima 0.44) | stance |qd| 1.382 rad/s | fell 0.0 %
+```
+
+### 2.3.10 Branch smoke tests — mean reward and critic explained variance per iteration
+
+```
+smoke_B0 reward: 0.79 6.30 15.28 22.64 32.30 42.71 51.78 64.41 80.55 88.91 101.75 108.73 125.80 138.04 145.31 155.30 163.46 180.39 196.95 199.86
+smoke_B0 EV:     -11.5887 0.8236 0.8384 0.8996 0.9502 0.9708 0.9800 0.9841 0.9856 0.9867 0.9872 0.9881 0.9885 0.9891 0.9885 0.9569 0.9860 0.9865 0.9882 0.9876
+smoke2_O-mat reward: 0.79 6.30 15.28 22.64 32.30 42.71 39.02 32.87 22.40 12.68 1.00 -2.32 -6.95 -26.87 -41.76 -32.77 -47.21 -64.79 -64.13 -61.91
+smoke2_O-mat EV:     -12.7836 0.7915 0.8276 0.8904 0.9553 0.9703 0.6369 0.8515 0.9057 0.9360 0.9044 0.9453 0.9341 0.9556 0.9395 0.9560 0.9614 0.9705 0.9729 0.9724
+smoke3_O-mat reward: 0.79 6.30 15.28 22.64 32.30 42.71 51.85 65.20 80.03 88.61 102.07 109.57 124.15 135.58 145.90 153.59 164.16 178.09 194.72 197.02 205.51 218.71 226.32 256.96 260.90 276.19 281.89 299.89 305.50 322.03 312.94 361.76 354.72 346.86 346.33 338.26 354.22 349.84 346.64 354.90
+smoke3_O-mat EV:     -12.7836 0.7889 0.7943 0.8577 0.9434 0.9661 0.9774 0.9806 0.9853 0.9853 0.9872 0.9870 0.9848 0.9893 0.9896 0.9579 0.9854 0.9874 0.9864 0.9854 0.9876 0.9889 0.9860 0.9898 0.9852 0.9850 0.9880 0.9902 0.9871 0.9873 0.9894 0.9865 0.9870 0.9886 0.9875 0.9857 0.9886 0.9870 0.9877 0.9871
+smoke3_O-geo reward: 0.79 6.30 15.28 22.64 32.30 42.71 51.81 64.38 79.74 88.49 101.63 109.33 125.36 136.48 146.51 155.35 165.52 179.35 193.75 198.79 209.48 226.61 232.82 263.78 271.75 284.15 295.79 312.83 322.99 337.59 326.00 384.78 379.53 366.36 374.52 369.03 384.40 383.74 381.84 400.59
+smoke3_O-geo EV:     -11.5887 0.8235 0.8385 0.9009 0.9530 0.9715 0.9789 0.9826 0.9867 0.9847 0.9858 0.9872 0.9867 0.9879 0.9887 0.9526 0.9865 0.9836 0.9856 0.9846 0.9869 0.9864 0.9858 0.9869 0.9860 0.9866 0.9844 0.9857 0.9825 0.9857 0.9853 0.9875 0.9860 0.9840 0.9859 0.9872 0.9826 0.9888 0.9823 0.9876
+```
+`smoke2_O-mat` = after the critic fix, before the Adam second-moment seeding (phase2-progress §2.3.9 bug 2);
+`smoke3_*` = both fixes.
+
+### 2.3.12 Headroom pilot runs — milestone tables (`logs/milestones/<run>/it<iter>_*`)
+
+| Arm | Iteration | Reward (last 500) | Δ per 2,000 | Terrain level | Worst gap (cm) | Lift R f/m/b (cm) | Lift L f/m/b (cm) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B0 | 10,000 | 338.2 | +212 % | 9.20 | +1.8 | 3.66 / 4.90 / 4.70 | 3.65 / 4.89 / 4.61 |
+| B0 | 12,000 | 349.1 | +3.2 % | 9.27 | +1.5 | 3.75 / 4.80 / 4.70 | 3.70 / 4.82 / 4.59 |
+| B0 | 13,998 | 349.9 | +0.4 % | 9.24 | +1.7 | 3.89 / 5.00 / 4.52 | 3.87 / 5.09 / 4.52 |
+| O-mat | 10,000 | 327.8 | +254 % | 9.11 | +1.4 | 3.68 / 3.90 / 3.57 | 3.06 / 4.23 / 3.18 |
+| O-mat | 12,000 | 345.9 | +5.5 % | 9.21 | +1.1 | 3.63 / 4.44 / 2.96 | 3.11 / 3.94 / 3.65 |
+| O-mat | 13,998 | 351.4 | +1.8 % | 9.21 | +1.2 | 2.92 / 3.74 / 3.17 | 2.76 / 3.80 / 2.74 |
+| O-geo | 10,000 | 343.7 | +234 % | 9.29 | +0.8 | 3.32 / 5.03 / 4.69 | 3.41 / 4.94 / 4.84 |
+| O-geo | 12,000 | 351.4 | +2.2 % | 9.26 | +1.3 | 3.21 / 4.54 / 4.69 | 3.29 / 4.66 / 4.56 |
+| O-geo | 13,998 | 355.0 | +1.1 % | 9.27 | +1.8 | 2.40 / 5.15 / 4.49 | 2.35 / 4.98 / 4.67 |
+
+Falls (%) on the shape courses, B0 / O-mat / O-geo, 256 episodes per cell (levels 15–20 held out):
+
+```
+bumps        L9:0.0/0.0/0.0 L14:0.0/0.0/0.0 L15:0.0/0.0/0.0 L16:0.0/0.0/0.0 L17:0.8/0.0/0.4 L18:0.0/0.0/0.0 L19:0.4/0.0/0.0 L20:1.2/0.0/0.8
+rough        L9:0.0/0.0/0.0 L14:0.0/0.0/0.0 L15:0.0/0.0/0.0 L16:0.0/0.0/0.0 L17:0.4/0.0/0.0 L18:0.0/0.0/0.0 L19:0.0/0.0/0.0 L20:0.4/0.0/0.4
+stairs_up    L9:0.0/0.0/0.0 L14:0.4/0.0/0.8 L15:0.0/0.0/0.0 L16:0.0/0.0/0.4 L17:0.4/0.0/0.4 L18:0.0/0.0/0.4 L19:0.4/0.0/0.0 L20:1.2/0.0/0.4
+stairs_down  L9:0.0/0.0/0.0 L14:0.0/0.0/0.0 L15:0.0/0.0/0.0 L16:0.0/0.0/0.4 L17:0.4/0.0/0.8 L18:0.0/0.0/0.0 L19:0.0/0.0/0.0 L20:0.8/0.0/0.8
+```
+
+Full per-cell table and oracle − B0 comparisons: `logs/eval/headroom_summary.txt`; ablation: `logs/eval/ablation_summary.txt`.

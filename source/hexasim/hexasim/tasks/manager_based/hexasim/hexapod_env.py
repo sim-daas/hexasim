@@ -298,7 +298,10 @@ class HexapodS1Env(HexapodS0bEnv):
 
         # Everything the observation terms read must exist before the managers are built (they probe the terms).
         robot = self.scene["robot"]
-        self.palette = Palette(self.num_envs, self.device)
+        self.palette = Palette(self.num_envs, self.device, self.cfg.material_entries)
+        self._layout = layout.offsets(layout.BLOCKS_BY_DIM[self.cfg.actor_dim])
+        self._arm_block = layout.ARM_BLOCK[self.cfg.arm]  # KeyError = unknown arm
+        assert self._arm_block is None or self._arm_block in self._layout, (self.cfg.arm, self.cfg.actor_dim)
         self.drop_k_scale = torch.ones(self.num_envs, 1, device=self.device)
         self.e_gate = 0.0
         self.v0_drop_p = 0.0
@@ -319,7 +322,7 @@ class HexapodS1Env(HexapodS0bEnv):
         self._prev_contact = torch.zeros(self.num_envs, 6, dtype=torch.bool, device=self.device)
         self._prev_toe = torch.zeros(self.num_envs, 6, 3, device=self.device)
         self._actor_zero = torch.zeros(
-            self.num_envs, layout.ACTOR_DIM - layout.ACTOR["m_star"].start, device=self.device
+            self.num_envs, self.cfg.actor_dim - layout.ACTOR["m_star"].start, device=self.device
         )
         self._base_idx = robot.find_bodies(".*base_link.*")[0][0]
         super().load_managers()
@@ -354,7 +357,7 @@ class HexapodS1Env(HexapodS0bEnv):
             return
         fresh = self._fresh.clone()
         super().refresh_proprio()
-        from .mdp.layout import ACTOR, CONTRACT_P, CONTRACT_P_DIM
+        from .mdp.layout import CONTRACT_P, CONTRACT_P_DIM
         from .mdp.observations import s0a_privileged_obs
         from .mdp.rewards import foot_forces_nt
         from .mdp.symmetry import mirror_frame
@@ -425,9 +428,12 @@ class HexapodS1Env(HexapodS0bEnv):
             dim=-1,
         )
         assert self.s1_contract_p.shape[1] == CONTRACT_P_DIM
-        if self.cfg.arm == "O":  # M* = contract P's material strips (same values, nominal foothold; spec §2.2)
-            m = self.s1_contract_p[:, CONTRACT_P["strips"]]
-            self.s1_actor_obs[:, ACTOR["m_star"]] = m
+        # Oracle blocks, both at the nominal-foothold strip points (action-independent; spec §2.2, D37).
+        if self._arm_block == "m_star":  # M* = contract P's material strips, same values
+            self.s1_actor_obs[:, self._layout["m_star"]] = self.s1_contract_p[:, CONTRACT_P["strips"]]
+        elif self._arm_block == "h_star":  # H* = terrain height at the strip points − height at the nominal foothold
+            h = self.terrain_z(strip_xy) - self.terrain_z(anchor_w)[..., None]
+            self.s1_actor_obs[:, self._layout["h_star"]] = h.flatten(1)
 
     def step(self, action: torch.Tensor):
         ret = super().step(action)

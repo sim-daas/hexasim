@@ -122,8 +122,8 @@ def _mirror_block(kind: str, x: torch.Tensor) -> torch.Tensor:
     if kind.startswith("front:"):
         k = int(kind.split(":")[1])
         return torch.cat([x[..., k:], x[..., :k]], dim=-1)
-    if kind == "strip":
-        y = x.view(*x.shape[:-1], 6, *_STRIP_PTS, 4)[..., LEG_SWAP, :, :, :].flip(-2)
+    if kind.startswith("strip:"):
+        y = x.view(*x.shape[:-1], 6, *_STRIP_PTS, int(kind.split(":")[1]))[..., LEG_SWAP, :, :, :].flip(-2)
         return y.reshape(x.shape)
     if kind == "scan":
         return x.view(*x.shape[:-1], *_SCAN).flip(-1).reshape(x.shape)
@@ -160,15 +160,17 @@ def mirror_frame(o_p: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def mirror_augmentation_s1(env, obs: TensorDict | None = None, actions: torch.Tensor | None = None):
-    """rsl_rl ``data_augmentation_func`` for S1: groups policy (1,125), contract (683), mirror (latents)."""
-    from .layout import ACTOR_BLOCKS, CONTRACT_P_BLOCKS
+    """rsl_rl ``data_augmentation_func`` for S1 / S2: groups policy (1,125 or 1,269 with H*), contract (683), mirror
+    (latents)."""
+    from .layout import BLOCKS_BY_DIM, CONTRACT_P_BLOCKS
 
     obs_aug = None
     if obs is not None:
         obs_aug = obs.repeat(2)
         n = obs.batch_size[0]
-        own = obs["policy"][:, [i for b in ACTOR_BLOCKS if b.mirror == "latent" and b.live_s1 for i in _cols(b)]]
-        obs_aug["policy"][n:] = mirror_layout(obs["policy"], ACTOR_BLOCKS, obs["mirror"])
+        blocks = BLOCKS_BY_DIM[obs["policy"].shape[1]]
+        own = obs["policy"][:, [i for b in blocks if b.mirror == "latent" and b.live_s1 for i in _cols(b)]]
+        obs_aug["policy"][n:] = mirror_layout(obs["policy"], blocks, obs["mirror"])
         obs_aug["contract"][n:] = mirror_layout(obs["contract"], CONTRACT_P_BLOCKS)
         obs_aug["mirror"][n:] = own  # mirror of the mirrored sample = the original latents
     actions_aug = None if actions is None else torch.cat([actions, mirror_actions(actions)], dim=0)
@@ -205,6 +207,14 @@ if __name__ == "__main__":
     m = mirror_layout(x, ACTOR_BLOCKS, lat)
     assert torch.equal(mirror_layout(m, ACTOR_BLOCKS, own), x)
     assert torch.equal(m[:, :117], mirror_policy_obs(x[:, :117]))
+    # S2 layout: H* (one height per strip point) mirrors like the material strips, and stays an involution.
+    from .layout import S2_ACTOR, S2_ACTOR_BLOCKS
+
+    x2 = torch.cat([x, torch.randn(64, 144)], dim=-1)
+    m2 = mirror_layout(x2, S2_ACTOR_BLOCKS, lat)
+    assert torch.equal(mirror_layout(m2, S2_ACTOR_BLOCKS, own), x2) and torch.equal(m2[:, :ACTOR_DIM], m)
+    h, hm = x2[:, S2_ACTOR["h_star"]].view(64, 6, 8, 3), m2[:, S2_ACTOR["h_star"]].view(64, 6, 8, 3)
+    assert torch.equal(hm[:, 3, :, 0], h[:, 0, :, 2])  # LF's left-most column = RF's right-most
     pc = torch.randn(64, CONTRACT_P_DIM)
     assert torch.equal(mirror_layout(mirror_layout(pc, CONTRACT_P_BLOCKS), CONTRACT_P_BLOCKS), pc)
     print("symmetry self-check OK")

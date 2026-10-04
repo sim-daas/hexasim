@@ -18,6 +18,8 @@
   quantum while that foot is low or in contact (write cost ≈ 55 µs per env; spike T4).
 
 Library values are provisional until the bench (v7 §5.3); approved by the user 2026-09-24. "Rigid" = k 1e6.
+The last two entries (soft ground, research D39) were added after S1: a task uses the first ``cfg.material_entries``
+entries (S1: 10, S2: 12), so the S1 field and palette stay reproducible.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from dataclasses import dataclass
 import torch
 
 RIGID_K = 1.0e6
+SOFT_SOIL_K = (4e2, 1e3)  # N/m nominal; PhysX applies k per contact point (effective ≈ 2.5 × nominal)
+WET_CLAY_K = (6e2, 2e3)
 
 
 @dataclass(frozen=True)
@@ -49,9 +53,16 @@ LIBRARY: tuple[Entry, ...] = (
     Entry("wet_rubber", (0.6, 0.8), (1e4, 3e4), True),
     Entry("glossy_grit", (0.9, 1.1), None, True),
     Entry("polished_coating", (0.8, 1.0), None, True),
+    # Soft ground (D39): elastic only, no permanent sinkage. k ranges from the solver check (phase2-progress §2.3.8).
+    Entry("soft_soil", (0.4, 0.7), SOFT_SOIL_K, False),
+    Entry("wet_clay", (0.25, 0.5), WET_CLAY_K, True),
 )
-NUM_ENTRIES = len(LIBRARY)
+S1_ENTRIES = 10
 MU_D_RATIO = (0.8, 1.0)
+# Visual-only override for the per-entry submeshes, keyed by entry name: the demo scripts put one MDL per
+# entry here (``hexasim.tasks.manager_based.hexasim.demo_look``). None everywhere else, so training and eval
+# runs keep the two flat greys below and are unaffected.
+VISUAL_OVERRIDE: dict | None = None
 CELL = 4.0
 MAX_WIDTH = 0.8
 LAYOUT_P = (0.25, 0.35, 0.15, 0.25)  # uniform, boundary, stripes, mosaic
@@ -60,8 +71,10 @@ LAYOUT_P = (0.25, 0.35, 0.15, 0.25)  # uniform, boundary, stripes, mosaic
 class MaterialField:
     """(id_a, id_b, weight_b) on a regular grid; ``lookup(xy)`` → nearest-cell values at world xy (..., 2)."""
 
-    def __init__(self, x0: float, y0: float, x1: float, y1: float, res: float, device, seed: int = 0):
-        self.x0, self.y0, self.res, self.device = x0, y0, res, device
+    def __init__(
+        self, x0: float, y0: float, x1: float, y1: float, res: float, device, seed: int = 0, entries: int = S1_ENTRIES
+    ):
+        self.x0, self.y0, self.res, self.device, self.entries = x0, y0, res, device, entries
         self.nx = int((x1 - x0) / res) + 1
         self.ny = int((y1 - y0) / res) + 1
         g = torch.Generator().manual_seed(seed)
@@ -96,9 +109,9 @@ class MaterialField:
                     pts = [c + (rnd(2) - 0.5) * CELL for _ in range(n)]
                 ent = []
                 for _ in pts:  # neighbouring sites of one cell never share an entry (a transition must exist)
-                    e = int(torch.randint(0, NUM_ENTRIES, (1,), generator=g))
-                    while ent and e == ent[-1]:
-                        e = int(torch.randint(0, NUM_ENTRIES, (1,), generator=g))
+                    e = int(torch.randint(0, self.entries, (1,), generator=g))
+                    while self.entries > 1 and ent and e == ent[-1]:  # entries == 1: no other entry to pick
+                        e = int(torch.randint(0, self.entries, (1,), generator=g))
                     ent.append(e)
                 sites += pts
                 entry += ent
@@ -165,18 +178,20 @@ class MaterialField:
 class Palette:
     """Per-env, per-entry physics values (μ_s, μ_d, log10 k), redrawn at reset inside each entry's range."""
 
-    def __init__(self, num_envs: int, device):
-        self.v = torch.zeros(num_envs, NUM_ENTRIES, 3, device=device)
-        lo = torch.tensor([[e.mu_s[0], math.log10(e.k[0]) if e.k else math.log10(RIGID_K)] for e in LIBRARY])
-        hi = torch.tensor([[e.mu_s[1], math.log10(e.k[1]) if e.k else math.log10(RIGID_K)] for e in LIBRARY])
+    def __init__(self, num_envs: int, device, entries: int = S1_ENTRIES):
+        lib = LIBRARY[:entries]
+        self.v = torch.zeros(num_envs, entries, 3, device=device)
+        lo = torch.tensor([[e.mu_s[0], math.log10(e.k[0]) if e.k else math.log10(RIGID_K)] for e in lib])
+        hi = torch.tensor([[e.mu_s[1], math.log10(e.k[1]) if e.k else math.log10(RIGID_K)] for e in lib])
         self.lo, self.hi = lo.to(device), hi.to(device)
         self.redraw(torch.arange(num_envs, device=device))
 
     def redraw(self, env_ids: torch.Tensor):
         n = len(env_ids)
-        u = torch.rand(n, NUM_ENTRIES, 2, device=self.v.device)
+        e = self.v.shape[1]
+        u = torch.rand(n, e, 2, device=self.v.device)
         x = self.lo + u * (self.hi - self.lo)
-        ratio = MU_D_RATIO[0] + torch.rand(n, NUM_ENTRIES, device=self.v.device) * (MU_D_RATIO[1] - MU_D_RATIO[0])
+        ratio = MU_D_RATIO[0] + torch.rand(n, e, device=self.v.device) * (MU_D_RATIO[1] - MU_D_RATIO[0])
         self.v[env_ids] = torch.stack((x[..., 0], x[..., 0] * ratio, x[..., 1]), dim=-1)
 
     def at(self, field: MaterialField, xy: torch.Tensor) -> torch.Tensor:
@@ -260,7 +275,7 @@ def strip_course(env, start: float = 0.5, length: float = 0.5, low=(0.25, 0.22, 
     env.palette.at = at
 
 
-def build_terrain_materials(mesh_path: str, device, seed: int, res: float = 0.02):
+def build_terrain_materials(mesh_path: str, device, seed: int, entries: int = S1_ENTRIES, res: float = 0.02):
     """Build the field over the terrain mesh's extent (same origin as ``HeightMap``) and add one visual submesh per
     library entry (dominant entry at each triangle's centroid, semantic label = entry). The source mesh stays the only
     collider (uniform rigid ground, μ 1, multiply: per-material physics lives on the feet) and is hidden. One collider:
@@ -282,12 +297,12 @@ def build_terrain_materials(mesh_path: str, device, seed: int, res: float = 0.02
     pts_w = (np.c_[pts, np.ones(len(pts))] @ xform.T)[:, :3]
     faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int64).reshape(-1, 3)
     lo, hi = pts_w.min(axis=0), pts_w.max(axis=0)
-    field = MaterialField(float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1]), res, device, seed)
+    field = MaterialField(float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1]), res, device, seed, entries)
     cen = torch.tensor(pts_w[faces].mean(axis=1)[:, :2], dtype=torch.float32, device=field.device)
     dom = field.dominant(cen).cpu().numpy()
     parent = mesh_path.rsplit("/", 2)[0]
     assigned = 0
-    for e, entry in enumerate(LIBRARY):
+    for e, entry in enumerate(LIBRARY[:entries]):
         sel = faces[dom == e]
         assigned += len(sel)
         path = f"{parent}/materials/{entry.name}"
@@ -296,11 +311,8 @@ def build_terrain_materials(mesh_path: str, device, seed: int, res: float = 0.02
         sub = trimesh.Trimesh(vertices=pts_w, faces=sel, process=False)
         sub.remove_unreferenced_vertices()
         color = (0.25, 0.25, 0.3) if entry.shiny else (0.45, 0.42, 0.38)
-        create_prim_from_mesh(
-            path,
-            sub,
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),  # S3 replaces with MDL
-        )
+        vis = (VISUAL_OVERRIDE or {}).get(entry.name) or sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+        create_prim_from_mesh(path, sub, visual_material=vis)
         UsdPhysics.CollisionAPI(stage.GetPrimAtPath(f"{path}/mesh")).CreateCollisionEnabledAttr(False)  # visual only
         sim_utils.add_labels(stage.GetPrimAtPath(f"{path}/mesh"), labels=[entry.name], instance_name="class")
     assert assigned == len(faces), (assigned, len(faces))
@@ -322,5 +334,9 @@ if __name__ == "__main__":
     pal = Palette(4, "cpu")
     v = pal.at(f, xy)
     assert (v[..., 1] <= v[..., 0] + 1e-6).all() and v[..., 0].min() >= 0.2 - 1e-6 and v[..., 0].max() <= 1.1 + 1e-6
+    # The soft entries only exist in a 12-entry field; the default (S1) field never draws them.
+    assert f.site_entry.max() < S1_ENTRIES
+    f12 = MaterialField(0.0, 0.0, 40.0, 40.0, 0.1, "cpu", seed=1, entries=len(LIBRARY))
+    assert f12.site_entry.max() == len(LIBRARY) - 1 and Palette(4, "cpu", len(LIBRARY)).v.shape[1] == len(LIBRARY)
     blended = (w > 0.05).float().mean().item()
     print(f"materials self-check OK: {len(f.sites)} sites, blended-cell share {blended:.3f}")

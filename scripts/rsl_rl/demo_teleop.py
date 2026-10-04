@@ -19,9 +19,13 @@ Keys (the Isaac Sim window must have focus):
 
 Dynamics randomisation, sensor noise and dropped reads stay exactly as in training.
 
+``--pretty`` switches the showcase renderer on (``demo_look``): HDRI sky, raking sun + rim light, one MDL per
+terrain material and RTX quality settings. It is visual only — the policy and the physics are unchanged.
+
 Usage:
   python scripts/rsl_rl/demo_teleop.py --ckpt <π_S0.pt> --level 9
   python scripts/rsl_rl/demo_teleop.py --ckpt <π_S0.pt> --level 18   # held-out difficulty
+  python scripts/rsl_rl/demo_teleop.py --ckpt <π_S0.pt> --level 9 --pretty --res 1920x1080 --take_seconds 15
 """
 
 import argparse
@@ -36,6 +40,26 @@ parser.add_argument("--no_video", action="store_true", help="skip the recorder (
 parser.add_argument(
     "--selftest", type=int, default=0, help="headless check: run N steps on a scripted command, no keyboard, then exit"
 )
+parser.add_argument("--pretty", action="store_true", help="showcase rendering (hexasim...demo_look): sky, MDLs, RTX")
+parser.add_argument("--sky", default="noon_grass", help="--pretty: HDRI key, see demo_look.SKIES")
+parser.add_argument("--quality", default="high", choices=["high", "mid"], help="--pretty: RT2 path tracing, or RT1")
+parser.add_argument("--res", default="1280x720", help="--pretty: recorded resolution, e.g. 1920x1080")
+parser.add_argument("--fps", type=float, default=0.0, help="video frame rate; 0 = native 50. 25 = 2x slow motion")
+parser.add_argument("--take_seconds", type=float, default=0.0, help="stop a take automatically after N s; 0 = manual")
+parser.add_argument(
+    "--robot_mdl", default="", help="--pretty: re-skin the robot (grey, light_grey, abs, …); '' = its own flat black"
+)
+parser.add_argument(
+    "--terrain_mdl", default="granite", help="--pretty: one ground material (demo_look.GROUND_MDL), or 'multi'"
+)
+parser.add_argument("--sky_tilt", type=float, default=270.0, help="--pretty: sky rotation about +X; 270 = upright")
+parser.add_argument("--light_gain", type=float, default=1.0, help="--pretty: scales sun, sky and rim together")
+parser.add_argument(
+    "--backdrop", type=float, default=400.0, help="--pretty: visual-only ground slab, metres; 0 = off"
+)
+parser.add_argument(
+    "--backdrop_z", type=float, default=-0.05, help="--pretty: slab top height; must clear the terrain's lowest point"
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = not args.no_video  # the recorder needs a render product
@@ -45,6 +69,7 @@ import gymnasium as gym  # noqa: E402
 import hexasim.tasks  # noqa: E402, F401
 import torch  # noqa: E402
 from hexasim.rl.load_policy import configure, eval_physx_buffers, load_env_state, task_for  # noqa: E402
+from hexasim.tasks.manager_based.hexasim import demo_look  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp import pin_command  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp.terrain import LEVELS_DESIGNED, S0B_TERRAIN_CFG  # noqa: E402
 from rsl_rl.models import MLPModel  # noqa: E402
@@ -79,11 +104,30 @@ cfg.viewer.origin_type = "asset_root"
 cfg.viewer.asset_name = "robot"
 cfg.viewer.eye = (1.6, 1.6, 0.8)
 cfg.viewer.lookat = (0.0, 0.0, 0.15)
+if args.pretty:
+    w, h = (int(v) for v in args.res.lower().split("x"))
+    demo_look.apply(
+        cfg,
+        sky=args.sky,
+        sky_tilt=args.sky_tilt,
+        light_gain=args.light_gain,
+        quality=args.quality,
+        res=(w, h),
+        robot_mdl=args.robot_mdl or None,
+        terrain_mdl=args.terrain_mdl,
+        backdrop=args.backdrop,
+        backdrop_z=args.backdrop_z,
+    )
 env = gym.make(play_task, cfg=cfg, render_mode=None if args.no_video else "rgb_array")
 recorder = None
 if not args.no_video:
     recorder = gym.wrappers.RecordVideo(
-        env, video_folder=args.video_dir, step_trigger=lambda _: False, video_length=0, name_prefix="s0_demo"
+        env,
+        video_folder=args.video_dir,
+        step_trigger=lambda _: False,
+        video_length=0,
+        name_prefix="s0_demo",
+        fps=args.fps or None,  # None → the env's native 1/step_dt = 50 Hz
     )
     env = recorder
 base = env.unwrapped
@@ -110,7 +154,7 @@ keyboard = (
     if args.selftest
     else Se2Keyboard(Se2KeyboardCfg(v_x_sensitivity=V_X_MAX, v_y_sensitivity=V_Y_MAX, omega_z_sensitivity=YAW_MAX))
 )
-state = {"recording": False, "reset": False, "take": 0}
+state = {"recording": False, "reset": False, "take": 0, "started": 0}
 
 
 def toggle_record():
@@ -121,6 +165,7 @@ def toggle_record():
         print(f"[demo] take {state['take']} written to {args.video_dir}")
     else:
         state["take"] += 1
+        state["started"] = step
         recorder.start_recording(f"s0_demo_L{args.level}_take{state['take']}")
         print(f"[demo] recording take {state['take']} …")
     state["recording"] = not state["recording"]
@@ -135,6 +180,7 @@ print("[demo] arrows = walk, Z/X = turn, no key = stand, R = record, N = reset")
 
 cmd_term = base.cmd_term
 step = 0
+take_steps = int(args.take_seconds / base.step_dt)
 while app.is_running() and (not args.selftest or step < args.selftest):
     step += 1
     with torch.inference_mode():
@@ -147,6 +193,8 @@ while app.is_running() and (not args.selftest or step < args.selftest):
         if state["reset"]:
             obs, _ = env.reset()
             state["reset"] = False
+        if take_steps and state["recording"] and step - state["started"] >= take_steps:
+            toggle_record()
 
 if args.selftest:
     toggle_record()  # start a take

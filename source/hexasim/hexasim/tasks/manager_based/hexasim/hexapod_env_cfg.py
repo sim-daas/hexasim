@@ -1027,8 +1027,13 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
     drop_k_scale_range: tuple[float, float] = (0.5, 2.0)
     # Material field seed: fixed so every arm and seed sees one terrain material layout.
     material_field_seed: int = 0
-    # Arm (paradigm spec §2): the S1 trunk is B0-layout; "O" makes M* live from S2 (contract P's material strips).
+    # Arm (paradigm spec §2, ``mdp.layout.ARM_BLOCK``): the S1 trunk is B0-layout; from S2 "O-mat" reads M* (contract
+    # P's material strips) and "O-geo" reads H* (terrain height at the same points, D37).
     arm: str = "B0"
+    # Actor layout width (``mdp.layout``): 1,125 in S1; S2 appends H* (1,269).
+    actor_dim: int = 1125
+    # Leading ``mdp.materials.LIBRARY`` entries in use: S1 trained on the first 10; S2 adds the soft-ground pair (D39).
+    material_entries: int = 10
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -1058,9 +1063,12 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
 
 @configclass
 class HexapodS2EnvCfg(HexapodS1EnvCfg):
-    """S2 blind arms O / B0 (headroom pilot, phase2-progress §2.3): S1 + per-episode clock dropout driven by the
-    algorithm (``S1PPO.clock_anneal_iters``); ``arm`` = "O" or "B0" (Hydra ``env.arm=O``). Rewards = S1: the
-    clock-phase terms leave with the clock (``env.clock_live``)."""
+    """S2 blind arms B0 / O-mat / O-geo (headroom pilot, phase2-progress §2.3): S1 + per-episode clock dropout driven
+    by the algorithm (``S1PPO.clock_anneal_iters``), the 1,269-D layout (H* appended) and the soft-ground library
+    entries; Hydra ``env.arm=O-mat``. Rewards = S1: the clock-phase terms leave with the clock (``env.clock_live``)."""
+
+    actor_dim: int = 1269
+    material_entries: int = 12
 
 
 @configclass

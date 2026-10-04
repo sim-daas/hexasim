@@ -89,4 +89,6 @@ def terrain_materials(env: ManagerBasedEnv, env_ids: torch.Tensor | None, seed: 
     per-entry submeshes. Prestartup; the field seed is fixed across runs so every arm and seed sees one terrain."""
     from .materials import build_terrain_materials  # noqa: PLC0415
 
-    env.material_field = build_terrain_materials(env.scene.terrain.cfg.prim_path + "/terrain/mesh", env.device, seed)
+    env.material_field = build_terrain_materials(
+        env.scene.terrain.cfg.prim_path + "/terrain/mesh", env.device, seed, env.cfg.material_entries
+    )

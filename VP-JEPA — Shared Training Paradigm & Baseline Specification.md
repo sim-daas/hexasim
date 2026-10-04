@@ -625,7 +625,7 @@ At the end of S2, evaluate F and B2 on step-up and step-down transitions, sharp 
 | E\_v | KiVi height heads (B1-K/M); L\_probe via fusion; L\_jepa (F); reconstruction (B3) | PPO, value loss |
 | FAH | L\_fah only | Downstream losses: stop-gradient on p̂ into sampling |
 | Sampling pixel residual | Downstream losses | — |
-| Φ / P | L\_probe touchdown; L\_jepa, L\_inv (F); reconstruction, L\_inv (B3) | PPO, value loss |
+| Φ / P | L\_probe touchdown; L\_jepa (F); reconstruction, L\_inv (B3) | PPO, value loss; in F also L\_inv, which reads (z\_p^t, z̄\_p^{t+k}) per v7 §4.11 and trains E\_p only (decided 2026-10-04) |
 | EMA target (F) | None | — |
 
 **FAH stop-gradient.** Bilinear sampling is differentiable. Without it, the probe and JEPA losses teach FAH to predict where the image is informative rather than where the foot lands — silently corrupting p̂, which is also a hardware-validation quantity.

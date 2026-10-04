@@ -12,7 +12,13 @@ aux window); ``load_env_state`` loads what the env owns (V_0, S1 aux, ê gate, V
 
 from __future__ import annotations
 
-TASK_BY_DIM = {75: "Hexapod-Flat-v0", 114: "Hexapod-S0a-v0", 117: "Hexapod-S0b-v0", 1125: "Hexapod-S1-v0"}
+TASK_BY_DIM = {
+    75: "Hexapod-Flat-v0",
+    114: "Hexapod-S0a-v0",
+    117: "Hexapod-S0b-v0",
+    1125: "Hexapod-S1-v0",
+    1269: "Hexapod-S2-v0",
+}
 
 
 def task_for(ck: dict) -> str:

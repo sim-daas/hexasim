@@ -15,12 +15,16 @@
 7. β-NLL mean gradient ∝ −(y − μ)/σ (β = 0.5), not /σ².
 8. Sequence buffer: history never crosses an episode boundary; touchdown targets are the first touchdown strictly
    after t, within the episode; Δt^TD = (s − t)·dt.
-9. Layout mirror (``mdp.symmetry`` self-check): involution on the 1,125-D, 683-D and latent groups.
+9. Layout mirror (``mdp.symmetry`` self-check): involution on the 1,125-D, 1,269-D (H*), 683-D and latent groups.
+10. Normaliser block writes after inference-mode updates.
+11. S2 branch widening 1,125 → 1,269 (H*): the widened actor and critic of an S1 trunk equal the trunk's over 10,000
+    random observations with random values in H*, max |Δ| < 1e-6 (float64); Adam moments and the frozen set follow.
 
-Usage: python scripts/tests/test_s1.py [--s0_ckpt <π_S0.pt>]
+Usage: python scripts/tests/test_s1.py [--s0_ckpt <π_S0.pt>] [--s1_ckpt <S1 trunk.pt>]
 """
 
 import argparse
+import copy
 
 import torch
 from hexasim.rl.s0_ppo import widen_actor_state
@@ -37,6 +41,7 @@ parser.add_argument(
     "--s0_ckpt",
     default="logs/rsl_rl/hexapod_s0b/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/model_12200.pt",
 )
+parser.add_argument("--s1_ckpt", default="logs/rsl_rl/hexapod_s1/2026-09-28_13-48-22_s1_w50_seed43/model_7999.pt")
 args = parser.parse_args()
 torch.manual_seed(0)
 N = 10_000
@@ -156,8 +161,43 @@ with torch.inference_mode():
 set_block_stats(norm, layout.ACTOR["e_hat"], torch.full((15,), 2.0), torch.full((15,), 4.0))
 assert torch.equal(norm._std[0, layout.ACTOR["e_hat"]], torch.full((15,), 2.0))
 
+# 11. S2 branch widening
+from hexasim.rl.s1_ppo import widen_checkpoint  # noqa: E402
+
+A2 = layout.S2_ACTOR_DIM
+
+
+def critic(dim):
+    o = TensorDict({"policy": torch.zeros(1, dim), "contract": torch.zeros(1, P)}, batch_size=[1])
+    groups = {"actor": ["policy"], "critic": ["policy", "contract"]}
+    return MLPModel(o, groups, "critic", 1, [512, 256, 128], "elu", True)
+
+
+trunk = torch.load(args.s1_ckpt, map_location="cpu", weights_only=False)
+wide = widen_checkpoint(copy.deepcopy(trunk), A2)
+ta = trunk["actor_state_dict"]
+x = (ta["obs_normalizer._mean"] + 3 * ta["obs_normalizer._std"] * torch.randn(N, A)).double()
+x2 = torch.cat([x, 5 * torch.randn(N, A2 - A, dtype=torch.float64)], dim=1)
+pc = 3 * torch.randn(N, P, dtype=torch.float64)
+d11 = 0.0
+for make, key in ((actor, "actor_state_dict"), (critic, "critic_state_dict")):
+    m_old, m_new = make(A).double(), make(A2).double()
+    m_old.load_state_dict(trunk[key])
+    m_new.load_state_dict(wide[key])
+    with torch.no_grad():
+        y_old = m_old(TensorDict({"policy": x, "contract": pc}, [N]))
+        y_new = m_new(TensorDict({"policy": x2, "contract": pc}, [N]))
+    d11 = max(d11, (y_old - y_new).abs().max().item())
+assert d11 < 1e-6, d11
+assert wide["s1_state"]["frozen"][-(A2 - A) :].tolist() == list(range(A, A2))
+shapes = [tuple(st["exp_avg"].shape) for st in wide["optimizer_state_dict"]["state"].values()]
+assert (256, A2) in shapes and (512, A2 + P) in shapes, shapes
+
 # 9. mirror self-check
 import runpy  # noqa: E402
 
 runpy.run_module("hexasim.tasks.manager_based.hexasim.mdp.symmetry", run_name="__main__")
-print(f"S1 checks OK: widening max|Δ| = {d1:.2e} (float64); routing, TCN RF, β-NLL, buffer, mirror")
+print(
+    f"S1 checks OK: widening max|Δ| = {d1:.2e}, S2 branch widening {d11:.2e} (float64); routing, TCN RF, β-NLL,"
+    " buffer, mirror"
+)
