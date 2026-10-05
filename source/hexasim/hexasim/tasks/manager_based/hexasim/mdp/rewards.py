@@ -738,6 +738,76 @@ class touchdown_reach(ManagerTermBase):
         return ((reach - target).abs() * landing).sum(dim=1) * env.cpg_active
 
 
+def toe_vel_w(env: ManagerBasedRLEnv) -> tuple[torch.Tensor, torch.Tensor]:
+    """Toe points (N, 6, 3) and their world velocities, from the tibia link pose and twist."""
+    robot: Articulation = env.scene["robot"]
+    ids = env._tibia_body_ids
+    quat = robot.data.body_quat_w.torch[:, ids]
+    arm = quat_apply(quat, torch.tensor(TOE_OFFSET_TIBIA, device=env.device).expand(*quat.shape[:-1], 3))
+    v = robot.data.body_link_lin_vel_w.torch[:, ids] + torch.cross(
+        robot.data.body_link_ang_vel_w.torch[:, ids], arm, dim=-1
+    )
+    return robot.data.body_pos_w.torch[:, ids] + arm, v
+
+
+def stance_slip_penalty(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Loaded foot slip (phase2-progress §2.3.14): Σ over feet of toe speed along the terrain surface (m/s) × the
+    foot's load share min(|F| / static tripod leg load, 1). A barely loaded foot at lift-off or touchdown hardly
+    counts; a loaded foot losing grip counts fully. L1 on the speed, the force enters clipped (rule 3). The joint-speed
+    part of ``stance_rigidity_contact`` is not repeated here: it taxes the propulsion stroke.
+    """
+    toe, v = toe_vel_w(env)
+    n = env.terrain_normal(toe[..., :2])
+    v_t = torch.norm(v - (v * n).sum(-1, keepdim=True) * n, dim=-1)
+    load = (torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) / env.tripod_leg_load).clamp(max=1.0)
+    return (v_t * load).sum(dim=1)
+
+
+def ground_plane_normal(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """(N, 3) unit normal of the least-squares plane through the terrain at the six nominal footholds. Smooth across
+    stairs, rough ground and the flat → slope edge (0.03–0.15° per step, against 0.4–0.9° for the terrain normal under
+    the base, phase2-progress §2.3.14)."""
+    root = env.scene["robot"].data.root_pos_w.torch
+    xy = root[:, None, :2] + env._yaw_offsets_w(env.nominal_toe_b[:, :2])  # (N, 6, 2)
+    z = env.terrain_z(xy)
+    ab = torch.linalg.lstsq(xy - xy.mean(1, keepdim=True), (z - z.mean(1, keepdim=True))[..., None]).solution
+    return torch.nn.functional.normalize(torch.cat((-ab[:, :, 0], torch.ones_like(z[:, :1])), dim=1), dim=1)
+
+
+def tilt_ground_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Angle (rad) between the body z axis and the ground plane under the footprint (``ground_plane_normal``). L1.
+    Replaces the gravity-referenced ``base_orientation`` in the redesign: following a slope is free, leaning on it
+    is not."""
+    quat = env.scene["robot"].data.root_quat_w.torch
+    zb = quat_apply(quat, torch.tensor([0.0, 0.0, 1.0], device=env.device).expand(quat.shape[0], 3))
+    return torch.acos((ground_plane_normal(env) * zb).sum(-1).clamp(-1.0, 1.0))
+
+
+class touchdown_speed(ManagerTermBase):
+    """Σ over legs touching down this step of the toe speed into the ground (m/s, along the terrain normal) on the
+    step before contact, clipped at ``max_speed``. Bounded L1 on a kinematic quantity instead of the contact-force
+    peak (rule 3). π_S1 lands at 0.26–0.31 m/s on every surface (phase2-progress §2.3.14). Standing envs score 0.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.prev_vn = torch.zeros(env.num_envs, 6, device=env.device)
+        self.prev = torch.ones(env.num_envs, 6, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids=None):
+        ids = slice(None) if env_ids is None else env_ids
+        self.prev[ids] = True
+        self.prev_vn[ids] = 0.0
+
+    def __call__(self, env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, max_speed: float) -> torch.Tensor:
+        toe, v = toe_vel_w(env)
+        vn = (-(v * env.terrain_normal(toe[..., :2])).sum(-1)).clamp(0.0, max_speed)
+        contact = torch.norm(env.scene[sensor_cfg.name].data.net_forces_w.torch, dim=-1) > 1.0
+        score = (self.prev_vn * (contact & ~self.prev)).sum(dim=1)
+        self.prev, self.prev_vn = contact, vn
+        return score * env.cpg_active
+
+
 def leg_proximity_penalty(env: ManagerBasedRLEnv, margin: float) -> torch.Tensor:
     """Σ over same-side neighbouring leg pairs of max(0, margin − surface gap) (m). Self-collision is off in sim, so
     without this the legs pass through each other; the margin covers real-robot backlash and tracking error

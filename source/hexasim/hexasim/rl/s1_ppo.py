@@ -95,6 +95,9 @@ class S1PPO(S0PPO):
         v0_retire_iters: int = 1000,
         clock_anneal_iters: int = 0,
         reburn_iters: int = 50,
+        ramp_terms: tuple[str, ...] = (),
+        ramp_iters: int = 0,
+        ramp_to: float = 2.0,
         **kwargs,
     ):
         super().__init__(actor, critic, storage, **kwargs)
@@ -102,6 +105,8 @@ class S1PPO(S0PPO):
         self.slip_ratio_max, self.imu_zero_min = slip_ratio_max, imu_zero_min
         self.v0_retire_delay, self.v0_retire_iters = v0_retire_delay, v0_retire_iters
         self.clock_anneal_iters, self.reburn_iters = clock_anneal_iters, reburn_iters
+        self.ramp_terms, self.ramp_iters, self.ramp_to = tuple(ramp_terms), ramp_iters, ramp_to
+        self._ramp_base: dict[str, float] = {}
         self.s2_start = -1  # iteration the S2 branch started (−1 = S1)
         self._live_pending: list[slice] = []
         self.passes = 0
@@ -123,8 +128,26 @@ class S1PPO(S0PPO):
             for k, v in self._frozen_stats.items():
                 getattr(norm, k)[:, self._frozen] = v
 
+    def _ramp(self) -> float:
+        """Redesign reward ramp (phase2-progress §2.3.15): the weights of ``ramp_terms`` go from their configured value
+        to ``ramp_to`` × it over ``ramp_iters`` iterations. Keyed to the iteration, so a resume continues it."""
+        rm = self.env.reward_manager
+        if not self._ramp_base:
+            self._ramp_base = {n: rm.get_term_cfg(n).weight for n in self.ramp_terms}
+        f = 1.0 + (self.ramp_to - 1.0) * min(self.iteration / self.ramp_iters, 1.0)
+        for n, w in self._ramp_base.items():
+            rm.get_term_cfg(n).weight = w * f
+        return f
+
     def process_env_step(self, obs, rewards, dones, extras) -> None:
         if self._frozen_stats is None:
+            # Fresh S1-stage start with an oracle arm (redesign: the block is live from π_S0 on): its statistics are
+            # estimated by the normaliser burn-in like every live block, so it must not be in the frozen set. Nothing
+            # else is needed here — the critic and the optimiser are new (no stale statistics or Adam moments, §2.3.9).
+            block = layout.ARM_BLOCK[self.env.cfg.arm]
+            if block and self.iteration == 0:
+                cols = layout.S2_ACTOR[block]
+                self._frozen = self._frozen[(self._frozen < cols.start) | (self._frozen >= cols.stop)]
             self._snapshot()
         for cols in self._live_pending:  # blocks going live at the branch: statistics from this batch
             x = obs["policy"][:, cols]
@@ -188,6 +211,8 @@ class S1PPO(S0PPO):
         if layout.ARM_BLOCK[env.cfg.arm]:
             held[layout.S2_ACTOR[layout.ARM_BLOCK[env.cfg.arm]]] = False
         assert self.actor.mlp[0].weight[:, held].abs().max() == 0.0, f"arm {env.cfg.arm}: a zero-held block got weight"
+        if self.ramp_iters > 0:
+            loss["reward_ramp"] = self._ramp()
         if self.s2_start >= 0:
             env.clock_drop_p = min((self.iteration - self.s2_start) / self.clock_anneal_iters, 1.0)
             loss["clock_drop_p"] = env.clock_drop_p
@@ -209,6 +234,7 @@ class S1PPO(S0PPO):
             "s2_start": self.s2_start,
             "clock_drop_p": self.env.clock_drop_p,
             "arm": self.env.cfg.arm,
+            "redesign": self.env.cfg.redesign,
         }
         return saved
 
@@ -227,6 +253,8 @@ class S1PPO(S0PPO):
         env.v0_drop_p = s["v0_drop_p"]
         self.s2_start = s.get("s2_start", -1)  # S1 checkpoints predate the S2 fields
         env.clock_drop_p = s.get("clock_drop_p", 0.0)
+        if self.ramp_iters > 0:
+            self._ramp()
         if self.clock_anneal_iters > 0 and self.s2_start < 0:  # branching from an S1 trunk
             assert s.get("arm", "B0") == "B0", "branch from an S1 trunk, not from another S2 arm"
             self.s2_start = self.iteration

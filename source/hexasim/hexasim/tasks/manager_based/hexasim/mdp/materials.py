@@ -72,15 +72,27 @@ class MaterialField:
     """(id_a, id_b, weight_b) on a regular grid; ``lookup(xy)`` → nearest-cell values at world xy (..., 2)."""
 
     def __init__(
-        self, x0: float, y0: float, x1: float, y1: float, res: float, device, seed: int = 0, entries: int = S1_ENTRIES
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        res: float,
+        device,
+        seed: int = 0,
+        entries: int = S1_ENTRIES,
+        cell: float = CELL,
     ):
         self.x0, self.y0, self.res, self.device, self.entries = x0, y0, res, device, entries
+        # Cell size (m). Every length of the layout scales with it, so ``cell`` = CELL is the S1 / S2 field unchanged
+        # and a smaller cell is the same pattern with denser boundaries (phase2-progress §2.3.14, D42).
+        self.cell, self.k = cell, cell / CELL
         self.nx = int((x1 - x0) / res) + 1
         self.ny = int((y1 - y0) / res) + 1
         g = torch.Generator().manual_seed(seed)
-        cx, cy = math.ceil((x1 - x0) / CELL), math.ceil((y1 - y0) / CELL)
+        cx, cy = math.ceil((x1 - x0) / cell), math.ceil((y1 - y0) / cell)
         self.sites, self.site_entry, self.site_cell = self._sites(cx, cy, g)
-        self.cell_width = torch.rand(cx * cy, generator=g) * MAX_WIDTH
+        self.cell_width = torch.rand(cx * cy, generator=g) * MAX_WIDTH * self.k
         self.cx, self.cy = cx, cy
         self.id_a = torch.empty(self.nx, self.ny, dtype=torch.uint8, device=device)
         self.id_b = torch.empty_like(self.id_a)
@@ -93,20 +105,20 @@ class MaterialField:
         rnd = lambda *s: torch.rand(*s, generator=g)  # noqa: E731
         for i in range(cx):
             for j in range(cy):
-                c = torch.tensor([self.x0 + (i + 0.5) * CELL, self.y0 + (j + 0.5) * CELL])
+                c = torch.tensor([self.x0 + (i + 0.5) * self.cell, self.y0 + (j + 0.5) * self.cell])
                 kind = int(torch.multinomial(torch.tensor(LAYOUT_P), 1, generator=g))
                 d = torch.tensor([math.cos(a := 2 * math.pi * rnd(1).item()), math.sin(a)])
                 if kind == 0:
-                    pts = [c + (rnd(2) - 0.5)]
+                    pts = [c + (rnd(2) - 0.5) * self.k]
                 elif kind == 1:  # straight boundary: bisector through a point within ±1 m of the centre
-                    m = c + (rnd(2) - 0.5) * 2.0
-                    pts = [m - 0.75 * d, m + 0.75 * d]
+                    m = c + (rnd(2) - 0.5) * 2.0 * self.k
+                    pts = [m - 0.75 * self.k * d, m + 0.75 * self.k * d]
                 elif kind == 2:  # stripes: 3 collinear sites 1–1.5 m apart
-                    s = 1.0 + 0.5 * rnd(1).item()
+                    s = (1.0 + 0.5 * rnd(1).item()) * self.k
                     pts = [c - s * d, c, c + s * d]
                 else:
                     n = 4 + int(torch.randint(0, 5, (1,), generator=g))
-                    pts = [c + (rnd(2) - 0.5) * CELL for _ in range(n)]
+                    pts = [c + (rnd(2) - 0.5) * self.cell for _ in range(n)]
                 ent = []
                 for _ in pts:  # neighbouring sites of one cell never share an entry (a transition must exist)
                     e = int(torch.randint(0, self.entries, (1,), generator=g))
@@ -141,8 +153,8 @@ class MaterialField:
             x = xs[i0 : i0 + 256]
             ys = self.y0 + self.res * torch.arange(self.ny, device=dev)
             p = torch.stack(torch.meshgrid(x, ys, indexing="ij"), dim=-1)  # (r, ny, 2)
-            ci = ((p[..., 0] - self.x0) / CELL).long().clamp(0, self.cx - 1)
-            cj = ((p[..., 1] - self.y0) / CELL).long().clamp(0, self.cy - 1)
+            ci = ((p[..., 0] - self.x0) / self.cell).long().clamp(0, self.cx - 1)
+            cj = ((p[..., 1] - self.y0) / self.cell).long().clamp(0, self.cy - 1)
             cell = ci * self.cy + cj
             c = cand_t[cell]  # (r, ny, k)
             s = sites[c.clamp(min=0)]
@@ -275,7 +287,9 @@ def strip_course(env, start: float = 0.5, length: float = 0.5, low=(0.25, 0.22, 
     env.palette.at = at
 
 
-def build_terrain_materials(mesh_path: str, device, seed: int, entries: int = S1_ENTRIES, res: float = 0.02):
+def build_terrain_materials(
+    mesh_path: str, device, seed: int, entries: int = S1_ENTRIES, res: float = 0.02, cell: float = CELL
+):
     """Build the field over the terrain mesh's extent (same origin as ``HeightMap``) and add one visual submesh per
     library entry (dominant entry at each triangle's centroid, semantic label = entry). The source mesh stays the only
     collider (uniform rigid ground, μ 1, multiply: per-material physics lives on the feet) and is hidden. One collider:
@@ -297,7 +311,7 @@ def build_terrain_materials(mesh_path: str, device, seed: int, entries: int = S1
     pts_w = (np.c_[pts, np.ones(len(pts))] @ xform.T)[:, :3]
     faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int64).reshape(-1, 3)
     lo, hi = pts_w.min(axis=0), pts_w.max(axis=0)
-    field = MaterialField(float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1]), res, device, seed, entries)
+    field = MaterialField(float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1]), res, device, seed, entries, cell)
     cen = torch.tensor(pts_w[faces].mean(axis=1)[:, :2], dtype=torch.float32, device=field.device)
     dom = field.dominant(cen).cpu().numpy()
     parent = mesh_path.rsplit("/", 2)[0]

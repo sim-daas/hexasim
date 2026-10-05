@@ -58,5 +58,8 @@ from .rewards import (  # noqa: E402, F401
     touchdown_reach,
     track_ang_vel_z,
     track_lin_vel_xy,
+    stance_slip_penalty,
+    tilt_ground_penalty,
+    touchdown_speed,
 )
 from .terrain import S0B_TERRAIN_CFG, HeightMap, pin_terrain_level, terrain_levels_cmd  # noqa: E402, F401

@@ -90,5 +90,9 @@ def terrain_materials(env: ManagerBasedEnv, env_ids: torch.Tensor | None, seed: 
     from .materials import build_terrain_materials  # noqa: PLC0415
 
     env.material_field = build_terrain_materials(
-        env.scene.terrain.cfg.prim_path + "/terrain/mesh", env.device, seed, env.cfg.material_entries
+        env.scene.terrain.cfg.prim_path + "/terrain/mesh",
+        env.device,
+        seed,
+        env.cfg.material_entries,
+        cell=env.cfg.material_cell,
     )

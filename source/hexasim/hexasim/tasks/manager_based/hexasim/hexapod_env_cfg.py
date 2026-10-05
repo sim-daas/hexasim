@@ -1034,6 +1034,10 @@ class HexapodS1EnvCfg(HexapodS0bEnvCfg):
     actor_dim: int = 1125
     # Leading ``mdp.materials.LIBRARY`` entries in use: S1 trained on the first 10; S2 adds the soft-ground pair (D39).
     material_entries: int = 10
+    # Material field cell size, m (``mdp.materials.MaterialField``): 4 m in S1 / S2; the redesign tasks use 1 m.
+    material_cell: float = 4.0
+    # Redesign reward (phase2-progress §2.3.14–15); saved with the checkpoint so evaluation rebuilds the same task.
+    redesign: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -1069,6 +1073,34 @@ class HexapodS2EnvCfg(HexapodS1EnvCfg):
 
     actor_dim: int = 1269
     material_entries: int = 12
+
+
+@configclass
+class HexapodS1REnvCfg(HexapodS2EnvCfg):
+    """Headroom redesign (phase2-progress §2.3.13–15): the S1 stage on the 1,269-D layout with the arm's block live
+    from the start (``env.arm``, from π_S0), 1 m material cells, and a reward that prices what foresight can improve —
+    loaded foot slip, landing speed, body rocking and tilt against the ground — next to a stronger lift floor.
+    Identical for every arm. The weights below are the start of the ramp (≈ 3–5 % of the reward each at π_S1's
+    behaviour, §2.3.15); ``S1PPO`` ramps them to 2 × (``PPORunnerCfg_S1R``). The clock stays on, as in S1."""
+
+    material_cell: float = 1.0
+    redesign: bool = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        r = self.rewards
+        contact = SceneEntityCfg("contact_forces")
+        # Sizes from reward_economy.py on the S1 seed-43 trunk at level 9 (§2.3.15): each penalty ≈ 3.5 % of the
+        # walking reward at the start of the ramp; the lift floor ≈ 4.7 %, above the landing term, so that not lifting
+        # (which would zero the landing term) always loses more than it saves.
+        r.swing_clearance.weight = 20.0
+        r.ang_vel_xy.weight = -10.0
+        r.base_orientation = None  # gravity-referenced: punishes following a slope; replaced by tilt_ground
+        r.tilt_ground = RewTerm(func=hex_mdp.tilt_ground_penalty, weight=-35.0)
+        r.stance_slip = RewTerm(func=hex_mdp.stance_slip_penalty, weight=-26.0, params={"sensor_cfg": contact})
+        r.touchdown_speed = RewTerm(
+            func=hex_mdp.touchdown_speed, weight=-47.0, params={"sensor_cfg": contact, "max_speed": 0.5}
+        )
 
 
 @configclass

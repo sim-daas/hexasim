@@ -167,8 +167,20 @@ code before relying on any line here.
   **primary behaviour metrics = transition-window tracking/slip/falls + first-contact impact, stride descriptive (D38)**.
   **Headroom pilot B0 vs O-mat (M*) vs O-geo (H*, D37)** from seed 43 at 4,096 × 16 (spec §2.3.7, pre-registered go/no-go):
   run and evaluated 2026-10-03: **no-go for both oracles** (§2.3.12; neither uses its block — `eval_headroom.py
-  --ablate_oracle` — and arm differences are gait differences); next step is the user's decision; task list with status in
-  `research_progress.md` (Phase 2.3). `Hexapod-S2-v0` = S1 + H* (1,269-D, `layout.S2_ACTOR_BLOCKS`; S1 stays 1,125-D) +
+  --ablate_oracle` — and arm differences are gait differences). **User decision 2026-10-04: redesign** (§2.3.13–15): `Hexapod-S1R-v0` = S2 layout,
+  clock on, 1 m material cells, redesign reward (`stance_slip`, `touchdown_speed`, `tilt_ground`, `ang_vel_xy` −10,
+  `swing_clearance` 20; ramped to 2 × by `S1PPO.ramp_*`), arms start from π_S0 with their block live (`--warmstart`,
+  `env.arm=…`); two pre-registered gates (1: hiding the block changes behaviour; 2: terrain excess ≥ 20 % below B0).
+  **Heading bug (§2.3.16, fixed 2026-10-05):** `_yaw_offsets_w` used a (w, x, y, z) yaw formula on Isaac Lab's
+  (x, y, z, w) quaternions, so strips / scan / footprint never turned with the robot — M*, H*, contract P and the probe
+  height grids of every run before the fix were misplaced (§2.3.12's no-go and the first S1R O-geo run included; the
+  blind trunks' behaviour is unaffected, kept by user decision). Never hand-write quaternion maths: use
+  `isaaclab.utils.math`. Pre-fix oracle checkpoints must not be evaluated as oracles with the fixed code. **Fixed-code result (§2.3.16–17):** O-geo
+  (`…/hexapod_s1r/2026-10-05_00-07-06_s1r_O-geo_seed43_yawfix`) passes gate 1 (relies on H* on rough / stairs / slopes); vs B0
+  (`…/2026-10-05_10-31-40_s1r_B0_seed43`) gate 2 is **not passed**: moderate advantage on rough ground and slopes only, +14–28 %
+  energy per metre, one seed per arm; the terrain-excess statistic is fragile when flat baselines differ — report absolute
+  paired differences beside the flat control. Next step is the user's decision. Baseline / economy drivers and
+  outputs in `logs/eval/redesign/`. Task list with status in `research_progress.md` (Phase 2.3). `Hexapod-S2-v0` = S1 + H* (1,269-D, `layout.S2_ACTOR_BLOCKS`; S1 stays 1,125-D) +
   12-entry material library (soft_soil, wet_clay; S1 keeps 10, D39/D40) + clock dropout; arms via `env.arm=B0|O-mat|O-geo`
   (`layout.ARM_BLOCK`); `train.py --branch_from <trunk>` widens the checkpoint (`s1_ppo.widen_checkpoint`). Evaluation:
   `scripts/rsl_rl/eval_headroom.sh b0=… omat=… ogeo=…`. **When a block goes live** (S1PPO `_live_pending`) the critic's

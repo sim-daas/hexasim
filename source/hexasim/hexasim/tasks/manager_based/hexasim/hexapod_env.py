@@ -11,6 +11,7 @@ from rsl_rl.modules.normalization import EmpiricalNormalization
 
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import quat_apply
 
 from .mdp.proprio import ProprioReader
 from .mdp.rewards import COXA_BACKWARD_SIGN, LEG_NAMES, coxa_leg_geometry, coxa_stroke_weight, toe_pos_w
@@ -333,8 +334,12 @@ class HexapodS1Env(HexapodS0bEnv):
     # ------------------------------------------------------------------ helpers
     def _yaw_offsets_w(self, off_b: torch.Tensor) -> torch.Tensor:
         """Body-frame horizontal offsets (..., K, 2) rotated by base yaw → world xy offsets (N, ..., K, 2)."""
+        # Heading of the body x axis, through the library's own quaternion routine. A hand-written (w, x, y, z)
+        # formula stood here until 2026-10-05; Isaac Lab stores (x, y, z, w), so it returned ± π for every heading and
+        # the strips, the scan and the footprint never turned with the robot (phase2-progress §2.3.16).
         q = self.scene["robot"].data.root_quat_w.torch
-        yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        fwd = quat_apply(q, torch.tensor([1.0, 0.0, 0.0], device=q.device).expand(q.shape[0], 3))
+        yaw = torch.atan2(fwd[:, 1], fwd[:, 0])
         c, s = torch.cos(yaw), torch.sin(yaw)
         shape = (-1,) + (1,) * (off_b.dim() - 1)
         c, s = c.view(shape), s.view(shape)

@@ -103,6 +103,8 @@ if s0b:  # V_0 and, from S1, the aux learner, ê gate and dropout state (the tru
 
     load_env_state(env, ck)
 actor.eval()
+# twist_cmd is the last block of the S0b layout (117-D) and stays at 114:117 in the wider S1 / S2 layouts.
+cmd_cols = slice(114, 117) if dim > 117 else slice(-3, None)
 robot, sensor, rm = env.scene["robot"], env.scene["contact_forces"], env.reward_manager
 tibia = [i for i, n in enumerate(robot.data.body_names) if "tibia" in n]
 N, T, dt = env.num_envs, int(env.max_episode_length), env.step_dt
@@ -124,7 +126,7 @@ def run(behaviour):
         for t in range(T):
             o = obs["policy"].clone()
             if args.obs_cmd is not None:
-                o[:, -3:] = torch.tensor(args.obs_cmd, device=env.device)
+                o[:, cmd_cols] = torch.tensor(args.obs_cmd, device=env.device)
             a = (
                 actor(TensorDict({"policy": o}, [N]))
                 if behaviour.startswith("walk")

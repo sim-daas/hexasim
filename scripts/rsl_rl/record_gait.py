@@ -31,34 +31,68 @@ import math
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--ckpt", required=True)
-parser.add_argument("--tag", required=True, help="name for the video file and the printed row")
-parser.add_argument("--cmd", type=float, default=0.15, help="forward speed command, S0b tasks only")
-parser.add_argument("--yaw_cmd", type=float, default=0.0, help="yaw speed command, S0b tasks only")
+parser = argparse.ArgumentParser(
+    description="Record one policy's gait on flat or rough terrain and print its leg geometry."
+)
+parser.add_argument("--ckpt", default=None, help="path to model_*.pt checkpoint (required)")
+parser.add_argument("--tag", default=None, help="name for the video file and the printed row (required)")
+parser.add_argument("--cmd", type=float, default=0.15, help="forward speed command in m/s, S0b tasks only (default: 0.15)")
+parser.add_argument("--yaw_cmd", type=float, default=0.0, help="yaw speed command in rad/s, S0b tasks only (default: 0.0)")
 parser.add_argument(
     "--terrain_type",
     default=None,
-    help="S0b/S1: one generated terrain type (mdp.terrain.EVAL_TERRAIN_TYPES), e.g. rough; default flat",
+    choices=["flat", "rough", "slope_down", "slope_up", "bumps", "stairs_down", "stairs_up"],
+    help="S0b/S1: one generated terrain type (default: flat). Choices: flat, rough, slope_down, slope_up, bumps, stairs_down, stairs_up",
 )
-parser.add_argument("--terrain_level", type=int, default=0, help="terrain level 0-20 for --terrain_type")
-parser.add_argument("--seconds", type=float, default=10.0)
 parser.add_argument(
-    "--seed", type=int, default=42, help="env seed; without one the DR/noise draws differ between runs"
+    "--terrain_level",
+    type=int,
+    default=0,
+    help="terrain difficulty level 0-20 for --terrain_type (0-9: training curriculum rows, 10-14: training cap, 15-20: held-out eval suite; default: 0)",
 )
-parser.add_argument("--video_dir", default="logs/videos/gait")
-parser.add_argument("--view", default="side", choices=["side", "front", "diag", "hero", "orbit"])
+parser.add_argument("--seconds", type=float, default=10.0, help="duration of the recording in seconds (default: 10.0)")
+parser.add_argument(
+    "--seed", type=int, default=42, help="env seed; without one the DR/noise draws differ between runs (default: 42)"
+)
+parser.add_argument("--video_dir", default="logs/videos/gait", help="directory to save output video (default: logs/videos/gait)")
+parser.add_argument(
+    "--view",
+    default="side",
+    choices=["side", "front", "diag", "hero", "orbit"],
+    help="camera perspective. side: right flank; front: head-on; diag: 3/4 isometric; hero: low/close silhouetting toes; orbit: continuous rotation (default: side)",
+)
 parser.add_argument("--pretty", action="store_true", help="showcase rendering (hexasim...demo_look): sky, MDLs, RTX")
-parser.add_argument("--sky", default="noon_grass", help="--pretty: HDRI key, see demo_look.SKIES")
-parser.add_argument("--quality", default="high", choices=["high", "mid"], help="--pretty: RT2 path tracing, or RT1")
-parser.add_argument("--res", default="1280x720", help="--pretty: recorded resolution, e.g. 1920x1080")
+parser.add_argument(
+    "--sky",
+    default="noon_grass",
+    choices=[
+        "noon_grass",
+        "partly_cloudy",
+        "evening",
+        "studio",
+        "table_mountain",
+        "lakeside",
+        "qwantani",
+        "sunflowers",
+        "night",
+        "warehouse",
+    ],
+    help="--pretty: HDRI sky dome key (demo_look.SKIES). Choices: noon_grass, partly_cloudy, evening, studio, table_mountain, lakeside, qwantani, sunflowers, night, warehouse (default: noon_grass)",
+)
+parser.add_argument(
+    "--quality",
+    default="high",
+    choices=["high", "mid"],
+    help="--pretty: RTX rendering mode. 'high' = RT2 path tracing (DLAA, GI 3 bounces); 'mid' = RT1 balanced (DLSS, lighter VRAM) (default: high)",
+)
+parser.add_argument("--res", default="1280x720", help="--pretty: recorded resolution, e.g. 1920x1080 (default: 1280x720)")
 parser.add_argument(
     "--fps",
     type=float,
     default=0.0,
-    help="video frame rate; 0 = native 50 (real time). 25 = clean 2x slow motion. Does not change the simulation.",
+    help="video frame rate; 0 = native 50 (real time). 25 = clean 2x slow motion. Does not change the simulation. (default: 0.0)",
 )
-parser.add_argument("--smooth", type=float, default=0.92, help="chase-camera EMA on the body position, 0 = off")
+parser.add_argument("--smooth", type=float, default=0.92, help="chase-camera EMA on the body position, 0 = off (default: 0.92)")
 parser.add_argument(
     "--uniform_friction",
     action="store_true",
@@ -66,22 +100,30 @@ parser.add_argument(
     "does not cross low-friction patches. Not the trained condition — never use such a run as evidence.",
 )
 parser.add_argument(
-    "--robot_mdl", default="", help="--pretty: re-skin the robot (grey, light_grey, abs, …); '' = its own flat black"
+    "--robot_mdl",
+    default="",
+    choices=["", "gunmetal", "dark_grey", "grey", "light_grey", "steel", "abs", "rubber", "anodized"],
+    help="--pretty: re-skin the robot. '' = its own flat black; surface presets: gunmetal, dark_grey, grey, light_grey, steel; textured MDLs: abs, rubber, anodized (default: '')",
 )
 parser.add_argument(
-    "--terrain_mdl", default="granite", help="--pretty: one ground material (demo_look.GROUND_MDL), or 'multi'"
+    "--terrain_mdl",
+    default="granite",
+    choices=["granite", "concrete", "dirt", "sand", "gravel", "grass", "terrazzo", "plywood", "multi"],
+    help="--pretty: ground material (demo_look.GROUND_MDL), or 'multi' for per-entry patchwork. Choices: granite, concrete, dirt, sand, gravel, grass, terrazzo, plywood, multi (default: granite)",
 )
-parser.add_argument("--sky_tilt", type=float, default=270.0, help="--pretty: sky rotation about +X; 270 = upright")
-parser.add_argument("--light_gain", type=float, default=1.0, help="--pretty: scales sun, sky and rim together")
+parser.add_argument("--sky_tilt", type=float, default=270.0, help="--pretty: sky rotation about +X; 270 = upright (default: 270.0)")
+parser.add_argument("--light_gain", type=float, default=1.0, help="--pretty: scales sun, sky and rim together (default: 1.0)")
 parser.add_argument(
-    "--backdrop", type=float, default=400.0, help="--pretty: visual-only ground slab, metres; 0 = off"
+    "--backdrop", type=float, default=400.0, help="--pretty: visual-only ground slab, metres; 0 = off (default: 400.0)"
 )
 parser.add_argument(
-    "--backdrop_z", type=float, default=-0.05, help="--pretty: slab top height; must clear the terrain's lowest point"
+    "--backdrop_z", type=float, default=-0.05, help="--pretty: slab top height; must clear the terrain's lowest point (default: -0.05; use -0.7 for stairs/slopes)"
 )
-parser.add_argument("--orbit_turns", type=float, default=0.5, help="--view orbit: revolutions over the whole take")
+parser.add_argument("--orbit_turns", type=float, default=0.5, help="--view orbit: revolutions over the whole take (default: 0.5)")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+if args.ckpt is None or args.tag is None:
+    parser.error("the following arguments are required: --ckpt, --tag")
 args.enable_cameras = True
 app = AppLauncher(args).app
 
@@ -112,6 +154,14 @@ cfg = parse_env_cfg(task, num_envs=1)
 configure(cfg, torch.load(args.ckpt, map_location="cpu", weights_only=False))
 eval_physx_buffers(cfg)
 cfg.curriculum = None
+# Reset spawns at a full random yaw (hexapod_env_cfg.py: "critical for training"). For this script that is a bug,
+# not a feature: terrain rows run along world +X (TerrainGenerator._add_sub_terrain), the fixed camera offsets
+# (_FIXED below) assume the robot walks along world +X too, and twist_cmd is body-frame, so a random heading sends
+# the robot off in an arbitrary world direction — across columns (no harder), diagonally into the outer border, or
+# straight at/away from the camera instead of across it. Pin yaw to 0 so --cmd walks down the rows and every fixed
+# view is the view it claims to be; x/y offset (column position) stays randomised, it is within one column either way.
+if hasattr(cfg, "events") and getattr(cfg.events, "reset_robot_base", None) is not None:
+    cfg.events.reset_robot_base.params["pose_range"]["yaw"] = (0.0, 0.0)
 s0b = hasattr(cfg, "commands") and cfg.commands is not None  # S0b and later
 if s0b:
     pin_command(cfg, args.cmd, 0.0, args.yaw_cmd)
@@ -130,10 +180,13 @@ if hasattr(cfg, "v0_ramp_steps"):
 # Chase camera, aimed at the robot every step below: headless runs create no viewport camera controller, so
 # ``cfg.viewer.origin_type = "asset_root"`` is ignored, and ``sim.set_camera_view`` does not move the recorder's
 # camera either — only ViewportManager on the Kit perspective camera does.
+# Same eye positions as before (so framing/zoom is unchanged) — only the look-at point drops below the robot (near
+# its feet) instead of at its root, tilting the view down until the horizon/sky clear the top of frame. ``hero``
+# keeps its sky-silhouette look on purpose (module docstring) and is untouched.
 _FIXED = {
-    "side": ((0.0, 1.3, 0.35), (0.0, 0.0, 0.0)),
-    "front": ((1.4, 0.0, 0.35), (0.0, 0.0, 0.0)),
-    "diag": ((1.1, 1.1, 0.5), (0.0, 0.0, 0.0)),
+    "side": ((0.0, 1.3, 0.35), (0.0, 0.0, -0.2)),
+    "front": ((1.4, 0.0, 0.35), (0.0, 0.0, -0.2)),
+    "diag": ((1.1, 1.1, 0.5), (0.0, 0.0, -0.2)),
     "hero": ((0.75, 0.75, 0.06), (0.0, 0.0, 0.14)),  # low and close: legs and toes against the sky
 }
 
@@ -144,7 +197,7 @@ def camera(t: int, steps: int) -> tuple[tuple, tuple]:
     if args.view != "orbit":
         return _FIXED[args.view]
     a = 2.0 * math.pi * args.orbit_turns * t / max(steps, 1)
-    return (1.2 * math.cos(a), 1.2 * math.sin(a), 0.45), (0.0, 0.0, 0.12)
+    return (1.2 * math.cos(a), 1.2 * math.sin(a), 0.45), (0.0, 0.0, -0.15)
 
 
 if args.pretty:

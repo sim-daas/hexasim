@@ -22,6 +22,8 @@ TASK_BY_DIM = {
 
 
 def task_for(ck: dict) -> str:
+    if ck.get("s1_state", {}).get("redesign", False):  # same width as S2, different materials and reward
+        return "Hexapod-S1R-v0"
     return TASK_BY_DIM[ck["actor_state_dict"]["mlp.0.weight"].shape[1]]
 
 

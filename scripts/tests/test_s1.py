@@ -68,6 +68,14 @@ with torch.no_grad():
 assert d1 < 1e-6, d1
 assert torch.equal(new.distribution.std_param, old.distribution.std_param.clamp(min=0.05))
 new.float()
+# 1b. the redesign start (phase2-progress §2.3.15): π_S0 117 → 1,269 directly, H* and every other new block random.
+wide_r = actor(layout.S2_ACTOR_DIM)
+wide_r.load_state_dict(widen_actor_state(s0, layout.S2_ACTOR_DIM, 0.05))
+wide_r.double()
+x_r = torch.cat([x, 5 * torch.randn(N, layout.S2_ACTOR_DIM - layout.OLD_ACTOR_DIM, dtype=torch.float64)], dim=1)
+with torch.no_grad():
+    d1b = (old(TensorDict({"policy": x}, [N])) - wide_r(TensorDict({"policy": x_r}, [N]))).abs().max().item()
+assert d1b < 1e-6, d1b
 
 # 2–5. gradient routing
 B = 32

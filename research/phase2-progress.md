@@ -2739,3 +2739,484 @@ compared.
 **Guard against tuning until the oracle wins:** the new reward is fixed from the deployment goals and the economy check
 on existing checkpoints, written down with a new go / no-go rule before any oracle is trained under it; it applies to
 every arm from the same stage; §2.3.12 stays in the record as the first outcome.
+
+### 2.3.14 Redesign, step 1: missing metrics added, baseline on the three headroom checkpoints, agreed plan (2026-10-04)
+
+**User decisions (2026-10-04).** Redesign (option 2 of §2.3.12). Order of corrections: (1) reward, (2) the oracle
+information present from the start of training — each arm starts from π_S0, where the S1 trunks started
+(`--warmstart …/model_12200.pt`), not from a converged S1 trunk, (3) a wider speed range only if (1) + (2) still give a
+no-go. Per proposal of §2.3.13: 1 raise `swing_clearance`; 2 path deviation as an evaluation metric now, a world-frame
+tracking reward stays open (needs a position input the spec does not give the actor); 3 raise only the foot-slip part of
+the stance term; 4 `leg_proximity` unchanged; 5 tilt against the local ground, after checking the reference; 6 raise
+`ang_vel_xy`; 7 torque: measure first; 8 landing term; 9 no transition-specific reward — denser material transitions.
+
+**Code.** `scripts/rsl_rl/eval_headroom.py` gained per-episode metrics (docstring): `roll`, `pitch_sd`, `roll_sd`
+(wobble about the window mean), `rock` (roll + pitch rate), `tilt_fp` / `tilt_pt` (body z axis against the plane through
+the terrain at the six nominal footholds / against the terrain normal under the base) with `ref_jump_*` (how much each
+reference moves per step), `lat`, `yaw_drift` (path), `torque`, `cot` (Σ|τ·q̇|·dt ÷ weight × distance), `st_slip`,
+`st_joint` (the two parts of `stance_rigidity_contact`), `td_vn` (toe speed into the ground before touchdown). Existing
+metrics unchanged. Not linted (no ruff / pre-commit in `env_isaaclab`).
+
+**Run.** `logs/eval/redesign/run_baseline.sh` (tmux 0:3; B0, O-mat, O-geo `model_13998.pt` of §2.3.12; 256 deterministic
+episodes per cell, 0.15 m/s, eval seed 0, layout seed 1, clock dropped; 30 cells in 25 min = 51 s per cell). JSON
+`logs/eval/redesign/base_<arm>_<cell>.json`.
+
+Blind walker (B0); angles in degrees:
+
+| Cell | wobble pitch / roll | rock (°/s) | tilt vs footprint plane / point normal | path: lateral (cm) / heading (°) | mean torque (N·m) | energy per metre (cot) | stance term: slip / joint part | landing speed (m/s) | impact |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| flat | 0.9 / 1.1 | 14.9 | 1.8 / 1.8 | 2.8 / 1.7 | 0.359 | 2.44 | 0.038 / 1.17 | 0.256 | 2.28 |
+| 15° up, μ 0.9 | (4.1) / 1.2 | 15.8 | 2.2 / 2.9 | 3.2 / 2.4 | 0.374 | 2.57 | 0.051 / 1.19 | 0.310 | 2.55 |
+| 15° up, μ 0.25 strip | (4.2) / 1.2 | 15.6 | 2.6 / 3.0 | 3.1 / 2.8 | 0.374 | 2.87 | 0.112 / 1.23 | 0.309 | 2.51 |
+| 15° down, μ 0.25 strip | (3.6) / 1.7 | 16.1 | 2.2 / 3.2 | 3.1 / 1.9 | 0.351 | 2.36 | 0.082 / 1.18 | 0.274 | 2.32 |
+| bumps L14 | 1.7 / 1.8 | 18.0 | 2.3 / 3.5 | 4.0 / 3.5 | 0.350 | 2.55 | 0.087 / 1.25 | 0.272 | 2.10 |
+| stairs up L14 | 3.0 / 2.2 | 19.8 | 3.3 / 7.0 | 5.2 / 4.0 | 0.370 | 2.77 | 0.115 / 1.28 | 0.295 | 2.23 |
+| stairs down L14 | 2.7 / 2.3 | 19.7 | 2.6 / 7.7 | 5.2 / 3.9 | 0.358 | 2.60 | 0.109 / 1.26 | 0.271 | 2.06 |
+| rough L14 | 2.4 / 2.4 | 20.8 | 3.4 / 11.8 | 6.2 / 5.1 | 0.368 | 2.74 | 0.129 / 1.29 | 0.284 | 2.13 |
+| stairs up L20 (held out) | 4.2 / 3.3 | 24.5 | 5.2 / 9.8 | 6.1 / 6.2 | 0.415 | 3.96 | 0.159 / 1.36 | 0.283 | 2.06 |
+| rough L20 (held out) | 3.3 / 3.3 | 24.6 | 4.7 / 15.7 | 5.8 / 5.9 | 0.397 | 3.33 | 0.131 / 1.36 | 0.279 | 1.99 |
+
+(Pitch wobble on the slope cells includes the flat → slope change of posture inside the window.) O-mat and O-geo lie
+within ≈ ± 10 % of B0 on every column, with the sign following each arm's gait (e.g. flat cot 2.19 / 2.61 vs 2.44) —
+one-seed gait spread, the yardstick any later arm difference must clear.
+
+Reading:
+
+1. **Stance term (proposal 3) confirmed:** 88–97 % of `stance_rigidity_contact` is the joint-speed part (1.0–1.4 against
+   0.04–0.16 of slip). Raising the term as it is would tax the propulsion stroke. Split it; raise only the slip part
+   (slip = toe speed along the ground surface while the sim contact sensor reads > 1 N on that foot; reward only).
+2. **Tilt reference (proposal 5) settled:** the single-point terrain normal is unusable (reads 7–16° on stairs / rough
+   and moves 0.4–0.9° per step); the plane through the six nominal footholds is smooth (0.03–0.15° per step, incl. the
+   flat → slope edge at 0.04°) and reads 2–5°. Use the footprint plane.
+3. **Body stability (the user's "gimbal" criterion): room exists but most rocking is the gait itself.** Flat ground
+   already gives 15°/s and ≈ 1° wobble; hard terrain adds 30–65 % (20–25°/s, 2.4–4.2°). The part foresight can remove is
+   that terrain excess, so the comparison should be read as *excess over the same arm's flat value*.
+4. **Path deviation doubles on terrain** (2.8 → 5–6 cm, 1.7 → 4–6° over ≈ 1.5 m): a usable evaluation metric.
+5. **Torque (proposal 7) answered:** mean torque does not see slip (0.374 with and without the μ 0.25 strip) — a torque
+   price would not favour a well-placed foot. Energy per metre does (2.57 → 2.87 on the strip, 2.4 → 3.3–4.0 on held-out
+   terrain). Keep torque out of the reward; report cot.
+6. **Landing (proposal 8): the feet do not decelerate at all** — 0.26–0.31 m/s into the ground and 2.0–2.5 × leg load
+   on every surface, flat included. Impact is a property of the gait, not of the terrain, which is why no oracle could
+   differ on it. Hypothesis for the redesign: once a soft landing is paid for, a walker must slow the foot just above
+   the ground, which requires knowing where the ground is — the blind one must guess on uneven terrain, the shape
+   oracle need not. Testable only after the term exists.
+7. **Material transitions:** the field uses 4 m cells and an episode covers ≤ 2 m, so many episodes cross no boundary.
+   Denser transitions = a smaller cell, not a longer episode (a longer episode does not speed up learning — the rollout
+   is 16 steps either way — and would shift the distance-based terrain curriculum).
+
+**Plan before the three-arm training (in order; nothing below is implemented):**
+
+1. Done: metrics + baseline (this section).
+2. Reward, identical for every arm: `swing_clearance` up; stance term split, slip part up; `ang_vel_xy` up; gravity
+   tilt replaced by tilt against the footprint plane; new landing term (bounded L1 on toe speed into the ground at
+   touchdown). Starting sizes, to be set from the measurements above so that each is ≈ 3–5 % of the reward at B0's
+   present behaviour, not final: rock ×−5, slip ×−10, landing ×−25.
+3. `reward_economy.py` on a trunk: walk > stand > fall, and the three cheap answers — shuffling (no lift), crouching,
+   walking slowly — each cost more than they save.
+4. Material cell 4 m → ≈ 1 m (every arm); `material_field_test.py` rerun.
+5. Reduced evaluation set (≈ 20 cells, ≈ 17 min per arm) and the new go / no-go rule, both written here before any
+   oracle is trained: gate 1 = hiding the block changes the oracle's behaviour; gate 2 = oracle better than B0 on the
+   terrain excess of rock / wobble, landing speed, slip, path, cot, by more than the one-seed gait spread.
+6. One oracle first (shape) from π_S0 with its block live and the new reward; gate 1 at each milestone.
+7. If gate 1 passes: B0 and the material oracle under the same recipe; gate 2.
+8. If still no-go: widen the commanded speed range (clock, command distribution and spec §1 change for every arm).
+
+**Slip, measured properly (user concern, 2026-10-04).** `eval_headroom.py` gained `slip_loaded` (toe speed along the
+surface weighted by the foot's load share, min(|F| / static leg load, 1)), `slip_dist` (distance slid per stance),
+`slip_events` (share of stances that slide > 1 cm), `slip_per_m` (distance slid by all feet per metre travelled);
+`run_baseline.sh` rerun on the same three checkpoints (30 cells). Blind walker (B0):
+
+| Cell | old `slip` (m/s) | load-weighted (m/s) | slid per stance (cm) | stances sliding > 1 cm | slid per metre travelled |
+| --- | --- | --- | --- | --- | --- |
+| flat | 0.013 | 0.010 | 0.62 | 12 % | 0.26 |
+| 15° up, μ 0.9 | 0.018 | 0.016 | 0.70 | 15 % | 0.34 |
+| 15° up, μ 0.25 strip | 0.039 | 0.038 | 1.55 | 44 % | 0.83 |
+| 15° down, μ 0.25 strip | 0.028 | 0.025 | 1.27 | 36 % | 0.54 |
+| bumps L14 | 0.029 | 0.024 | 1.29 | 40 % | 0.65 |
+| stairs up / down L14 | 0.037 / 0.036 | 0.034 / 0.031 | 1.52 / 1.61 | 45 % / 51 % | 0.88 / 0.77 |
+| rough L14 | 0.042 | 0.040 | 1.86 | 56 % | 0.94 |
+| stairs up / rough L20 | 0.046 / 0.041 | 0.043 / 0.036 | 1.81 / 1.76 | 45 % / 49 % | 1.97 / 1.23 |
+
+Reading: the old average was not inflated by unloaded feet (load-weighting changes it by ≤ 20 %) — the slides are loaded
+feet. What it hid is the size of the effect: on hard terrain **every second stance slides more than 1 cm** (12 % on flat),
+3–5 × the flat value, the largest terrain excess of any metric measured here (rocking 1.3–1.65 ×, wobble 2–4 ×, energy
+per metre 1.1–1.6 ×). Slip is the strongest candidate for a foresight effect; the reward term uses the load-weighted
+form. The three arms again lie within the gait spread (e.g. rough L14 stances sliding: 56 / 57 / 58 %).
+
+### 2.3.15 Redesign, steps 2–5: reward, economy check, denser materials, pre-registered rule (2026-10-04)
+
+**Code (S1 / S2 tasks untouched; `scripts/tests/test_s1.py` passes, incl. new check 1b: π_S0 117 → 1,269 widening
+0.0).**
+- `mdp/rewards.py`: `stance_slip_penalty` (Σ feet toe speed along the terrain surface × load share; L1, force clipped),
+  `tilt_ground_penalty` (angle between body z and the least-squares plane through the terrain at the six nominal
+  footholds, `ground_plane_normal`), `touchdown_speed` (toe speed into the ground on the step before touchdown, clipped
+  at 0.5 m/s, L1), helper `toe_vel_w`.
+- `Hexapod-S1R-v0` = `HexapodS1REnvCfg` (the S2 layout, 1,269-D, 12 material entries, clock on, `redesign=True`,
+  `material_cell=1.0`) + `PPORunnerCfg_S1R` (`hexapod_s1r`; S1 schedule + the reward ramp).
+- `S1PPO`: `ramp_terms` / `ramp_iters` / `ramp_to` — the listed terms' weights go 1 → 2 × over 2,400 iterations (30 % of
+  8,000), keyed to the iteration (resume-safe), logged as `reward_ramp`. A fresh start with an oracle arm takes the arm's
+  block out of the frozen normaliser set at the first step, so the 50-iteration burn-in estimates its statistics like any
+  live block (critic and optimiser are new, so the two §2.3.9 fixes do not apply). `redesign` is saved in `s1_state`;
+  `load_policy.task_for` routes such checkpoints to `Hexapod-S1R-v0`.
+- `mdp/materials.py`: `MaterialField(cell=…)`; every layout length scales with it (cell 4 m = the S1 / S2 field, same
+  draws). `reward_economy.py --obs_cmd` fixed for the S1+ layouts (it overwrote the last three inputs, which are H*
+  there, not twist_cmd).
+- **D41** redesign reward for every arm; **D42** material cell 1 m; **D43** arms start from π_S0 with the block live.
+
+**Reward (start of ramp → end), identical for every arm; everything else = S1:**
+
+| Term | S1 | S1R start | S1R end (2 ×) |
+| --- | --- | --- | --- |
+| `swing_clearance` | 5 | 20 | 40 |
+| `ang_vel_xy` | −0.5 | −10 | −20 |
+| `base_orientation` (gravity tilt) | −5 | removed | |
+| `tilt_ground` (new) | — | −35 | −70 |
+| `stance_slip` (new, load-weighted) | — | −26 | −52 |
+| `touchdown_speed` (new) | — | −47 | −94 |
+| `stance_rigidity_contact`, `leg_proximity`, `joint_torque_excess`, all others | unchanged | | |
+
+**Economy** (`logs/eval/redesign/run_economy.sh`: `reward_economy.py --task Hexapod-S1R-v0`, S1 seed-43 trunk, 0.15 m/s,
+256 × 10 s; reward per step, "no clock" = minus the four clock-phase terms; first pass with smaller weights in
+`logs/eval/redesign/econ_v1/`):
+
+| Level | ramp | walk (no clock) | stand (no clock) | rock / tilt / slip / landing share of walk | lift floor share |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 1 × | 0.886 (0.776) | 0.254 (0.294) | 3.0 / 3.1 / 2.6 / 3.3 % | 4.3 % |
+| 9 | 1 × | 0.815 (0.722) | 0.232 (0.277) | 3.6 / 3.6 / 3.6 / 3.6 % | 4.7 % |
+| 14 | 1 × | 0.708 (0.630) | 0.232 (0.276) | 6.1 / 5.5 / 5.0 / 4.1 % | 5.3 % |
+| 0 | 2 × | 0.818 (0.707) | 0.247 (0.288) | 6.6 / 6.7 / 5.7 / 7.1 % | 9.3 % |
+| 9 | 2 × | 0.735 (0.643) | 0.212 (0.257) | 8.0 / 8.1 / 8.0 / 8.0 % | 10.4 % |
+| 14 | 2 × | 0.599 (0.521) | 0.210 (0.254) | 14.4 / 13.1 / 11.8 / 9.8 % | 12.6 % |
+
+Fall on step 0: −0.10. **Walk > stand > fall at both ends of the ramp on every level** (smallest margin: level 14,
+2 ×, no clock: 0.521 vs 0.254). The cheap answers, level 9:
+
+| Shortcut | How measured | 1 × | 2 × |
+| --- | --- | --- | --- |
+| Walk slower (actor sees 0.11, walks 0.108) | `--obs_cmd 0.11 0 0` | −0.188 / step (tracking −0.228, penalties +0.026) | −0.168 (penalties +0.047) |
+| Lower lift | O-geo S2 checkpoint (front lift 2.4 cm) vs B0 S2 | — | lift floor −0.0124, landing +0.0036: loses |
+| No lift (shuffle) | bound from the trunk's terms | lift floor −0.038 vs landing +0.029 | −0.077 vs +0.059, before any extra slip |
+| Stand under a walk command | zero action | −0.58 | −0.52 |
+
+The first weights (12.5 / −4 / −25 / −15 / −35) gave only 1.4–2.8 % per term at level 9 and a lift floor barely above
+the landing term (0.048 vs 0.044 at 2 ×, i.e. shuffling would have been almost free); resized to the table above.
+
+**Material cell** (CPU check on an 80 m field, 20,000 random straight paths): share of paths crossing ≥ 1 boundary and
+mean number of changes — 4 m cell: 24 % / 0.27 over 0.5 m, 63 % / 0.81 over 1.5 m; 1 m cell: 78 % / 1.10 over 0.5 m,
+100 % / 3.3 over 1.5 m. (Correction to §2.3.14 reading 7: with 4 m cells most 1.5 m episodes already crossed one
+boundary; slow-command episodes mostly did not.) Blended share unchanged (0.27 → 0.26); max transition width 0.8 →
+0.2 m. `material_field_test.py --task Hexapod-S1R-v0`: PASS (read-back 1.2e-7, 11 / 11 low-μ envs slide, 100 / 100
+hold at 20°, soft footing settles); log `logs/eval/redesign/material_field_s1r.log`.
+
+**Pre-registered rule for the repeat pilot (written before any oracle is trained under this reward).**
+- Evaluation set, 20 cells per arm, 256 deterministic episodes each, 0.15 m/s, eval seed 0, layout seed 1: flat control;
+  15° up / down × μ 0.25 strip and μ 0.9 control (4); soft_soil strip on flat, 15° up, 15° down (3); bumps, stairs up,
+  stairs down, rough at levels 9, 14, 17 (12).
+- Target metrics: stances sliding > 1 cm, load-weighted slip, landing speed, rocking rate, roll / pitch wobble, path
+  drift (lateral, heading), energy per metre. Each read as **terrain excess**: the cell's value minus the same arm's
+  value on the flat control.
+- **Gate 1 — the oracle uses its information:** on the shape cells, replacing the block by its normaliser mean
+  (`--ablate_oracle`) changes at least one target metric, episode-bootstrap 95 % CI excluding 0, in the direction
+  "worse without the information". Checked at each 2,000-iteration milestone on six cells (bumps, stairs up, stairs
+  down, rough at level 14; flat; 15° up μ 0.25). No pass by 8,000 iterations → no further arms; next lever is the
+  commanded speed range (separate user decision).
+- **Gate 2 — better than blind (only after gate 1):** the oracle's terrain excess is ≥ 20 % below B0's on at least one
+  target metric of its own cells (twice the ± 10 % one-seed gait spread of §2.3.14), CI excluding 0, no target metric
+  worse by the same margin, 0-fall and tracking gates held. One seed per arm stays a go / no-go, not a reportable result.
+- §2.3.12 stands as the first outcome whatever follows.
+
+**Step 6 started (2026-10-04 14:36).** Smoke test (30 iterations, `…/hexapod_s1r/2026-10-04_14-32-31_s1r_smoke_O-geo`,
+log `logs/eval/redesign/smoke_s1r_ogeo.log`): no error, `reward_ramp` 1.000 → 1.0125, EV 0.89 at iteration 29, actor
+frozen, H* out of the frozen set (947 dims frozen, 0 of them in H*), zero-held assertion holds. Run:
+
+```
+python scripts/rsl_rl/train.py --task Hexapod-S1R-v0 --headless --num_envs 4096 --seed 43 --max_iterations 8000 \
+  --warmstart logs/rsl_rl/hexapod_s0b/2026-09-24_00-35-51_s0_coordlift_prox_fromscratch_seed42/model_12200.pt \
+  env.arm=O-geo --run_name s1r_O-geo_seed43        # tmux 0:2, log logs/s1r_O-geo_seed43.log, ≈ 4.3 s / iteration
+```
+
+Run dir `logs/rsl_rl/hexapod_s1r/2026-10-04_14-36-36_s1r_O-geo_seed43`. To check as it runs: H* statistics after the
+iteration-50 fold; H* first-layer weights leaving zero after the actor is released (≥ 300 iterations and EV ≥ 0.8);
+gait watch and gate 1 at 2,000 / 4,000 / 6,000 / 8,000.
+
+*Actor-release check (iteration 454, 2026-10-04):* actor released at iteration 300 (EV 0.98). H* first-layer weights
+0 → max 0.019 / mean 0.0030 by iteration 450 (trained q columns: mean 0.056) — the block is being read. H* normaliser
+std (median) 0.001 at the iteration-50 fold (terrain level ≈ 2), 0.005 at 450 and still rising with the curriculum
+(level 11.4); with ε 0.01 the normalised inputs stay O(1). Mean reward 330 → 260 between iterations 300 and 454 while
+the curriculum climbed 8.6 → 11.4 and the ramp went 1.13 → 1.19: tracking 22.3 → 20.4 / s, rocking −2.0 → −2.6, slip
+−1.7 → −2.2, tilt −1.8 → −2.2 (spike to −3.4 at 350, recovering), 0 falls. No collapse; trend to be judged at 2,000.
+
+**Milestone 2,000 (2026-10-04).** Training stable, 0 falls throughout; curriculum level ≈ 9.5; ramp 1.82 ×. H* first-layer
+weights mean 0.0069 / max 0.051 (q columns 0.058). Behaviour since iteration 300, penalties divided by the ramp factor:
+rocking −21 %, tilt against the ground −18 %, landing speed −8 %, slip +7 % (terrain level 8.0 → 9.5), lift floor +3 %;
+tracking reward 22.8 → 19.7 / s (error 0.025 → 0.034 m/s) — some tracking is being traded for a steadier body.
+
+Gate 1 at `model_2000.pt` (`logs/eval/redesign/run_gate1.sh <ckpt> it2000`, then `gate1_summary.py it2000`; 256 episodes
+per cell, same seed live and hidden so the difference is paired by env; hidden = H* at its normaliser mean; * = 95 %
+bootstrap CI excludes 0):
+
+| Cell | Speed error | Stances sliding > 1 cm | Loaded slip | Roll wobble | Tilt vs ground | Energy per metre | Landing speed | Short swings |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| flat (control) | −4 % * (0.0042 → 0.0040) | −3 % | 0 % | +1 % * | 0 % * | 0 % * | 0 % | 0 % |
+| 15° up, μ 0.25 strip | **+154 % *** (0.018 → 0.045) | **+24 % *** | **+30 % *** | **+34 % *** | **+35 % *** | **+14 % *** | −13 % * | **+29 % *** |
+| bumps L14 | +2 % | −2 % | +1 % | +4 % | +7 % | −2 % | 0 % | +1 % |
+| stairs up L14 | +6 % | 0 % | 0 % | −1 % | +32 % (CI spans 0) | −3 % | −1 % * | 0 % |
+| stairs down L14 | −27 % * | 0 % | 0 % | +5 % | +32 % (CI spans 0) | +5 % | +2 % * | −5 % |
+| rough L14 | −7 % * | 0 % | −3 % * | +2 % | 0 % | −4 % * | 0 % | 0 % |
+
+Reading: **the oracle now reads its block** — the first pilot's O-geo showed nothing anywhere (§2.3.12). On the slope,
+hiding H* costs tracking (× 2.5), slip (+24–30 %), roll wobble, tilt, energy and stumbles, all with CIs excluding 0; the
+flat control is unchanged (the significant flat entries are ≤ 0.0002 in absolute terms). What it reads so far is the
+**slope** of the ground ahead, not individual bumps or steps: on bumps, stairs and rough ground nothing moves beyond
+noise. The letter of gate 1 ("a target metric on the shape cells, worse without the information") is met only by the
+landing speed on stairs down (+2 %, 0.239 → 0.245 m/s); that is not counted as a pass — it is far below any effect of
+interest. **Gate 1 status at 2,000: passed on slopes, not yet on bumps / stairs / rough.** Run continues; next check 4,000.
+
+**Milestone 4,000 (2026-10-04).** Ramp complete (2 ×) since 2,400; 0 falls; level ≈ 9.5; mean reward 268 → 282 since
+2,000 with tracking 19.8 → 20.6 / s (error 0.034 → 0.031 m/s), rocking −10 %, slip and landing flat, V_0 fully retired.
+H* weights mean 0.0084 / max 0.076 (q 0.062). Gate 1 at `model_4000.pt` (same cells and procedure, tag `it4000`):
+
+| Cell | Speed error | Stances sliding > 1 cm | Loaded slip | Roll wobble | Tilt vs ground | Energy per metre | Landing speed | Short swings |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| flat (control) | −1 % * | −1 % | +1 % * | +2 % * | +1 % * | 0 % * | 0 % | −1 % |
+| 15° up, μ 0.25 strip | **+120 % *** (0.018 → 0.039) | **+49 % *** (0.30 → 0.44) | **+51 % *** | **+25 % *** | **+35 % *** | **+8 % *** | −12 % * | **+33 % *** |
+| bumps L14 | −9 % | −5 % * | −5 % | +5 % | −16 % | −3 % | 0 % | −3 % |
+| stairs up L14 | +4 % | +2 % | 0 % | −1 % | 0 % | −3 % | −2 % * | +1 % |
+| stairs down L14 | −25 % * | −4 % * | −2 % | +3 % | −5 % | 0 % | 0 % | +2 % |
+| rough L14 | −11 % | −1 % | 0 % | +4 % | +13 % | 0 % | 0 % | +1 % |
+
+Reading: unchanged pattern, sharper on the slope (slip + 49–51 % without H*, was + 24–30 %). On bumps, stairs and rough
+the few CIs that exclude 0 point the other way (slightly *better* without H*). The live policy itself improved on those
+cells since 2,000 (stances sliding > 1 cm: bumps 0.40 → 0.31, stairs up 0.55 → 0.45, rough 0.61 → 0.58; rocking on rough
+0.274 → 0.249 rad/s) — that is the new reward shaping the gait, which a blind arm would get too, not foresight.
+**Gate 1 status at 4,000: passed on slopes, not on bumps / stairs / rough.**
+
+### 2.3.16 Bug found: the strip / scan / footprint points do not turn with the robot (2026-10-04, not fixed yet)
+
+**Observed.** Gate 1 at 2,000 and 4,000: O-geo reads H* for slopes only, nothing on bumps, stairs or rough (§2.3.15).
+Asked why (user), a probe on the iteration-4,700 checkpoint (256 episodes each on bumps, stairs up, rough at level 14;
+scripts `landing_probe.py`, `landing_probe_fixed.py` in the session scratchpad, not in the repo) found that only 18 % of
+footfalls land inside their own leg's H* patch, the landing point is spread ≈ ± 20 cm around the patch origin, and the
+patch at lift-off predicts the height the foot lands on with R² 0.01.
+
+**Root cause.** `HexapodS1Env._yaw_offsets_w` (`hexapod_env.py`) computes the base yaw as
+`atan2(2 (q0 q3 + q1 q2), 1 − 2 (q2² + q3²))`, the formula for quaternions stored (w, x, y, z). The installed Isaac Lab
+stores (x, y, z, w) (`isaaclab.utils.math.yaw_quat`: `atan2(2 (qw qz + qx qy), 1 − 2 (qy² + qz²))` with qw = q[3]). With
+a near-upright base (x ≈ y ≈ 0, z² + w² ≈ 1) the env's expression is atan2(≈ 0, −1) = ± π for every heading: the
+"body-frame" offsets are applied at a fixed world orientation (the rest footprint flipped through the base), whatever the
+robot's heading. Checked against the library formula for headings −2 … +3 rad. With the yaw computed correctly the same
+probe gives 97–100 % of landings inside the patch, 2.6–5.6 cm ahead of its origin, ± 2 cm.
+
+**Why slopes still worked.** A slope tilts every point of every patch together, wherever the patch sits, so its
+steepness is readable from misplaced patches; where one foot will land on a bump or a step is not.
+
+**What it touches** (everything sampled through `_yaw_offsets_w`):
+- H* and M* of both pilots — so **§2.3.12's "the oracles do not use their block" was obtained with misplaced blocks**
+  and says nothing about correctly placed foresight; the running S1R O-geo run (§2.3.15) has the same defect.
+- Contract P of the critic (material strips at the nominal footholds, the 77-point scan) in all five S1 trunks; the
+  actor of the trunks reads none of these, so their behaviour gates are unaffected, their critic was simply less
+  informed than specified.
+- The probe labels' height grid around each toe (centred correctly, rotated wrongly) and the mirror augmentation of
+  those blocks (it assumes body-frame patches).
+- `tilt_ground` and the evaluation's `tilt_fp` (plane through six points around the base at the wrong orientation —
+  expected to stay close to the intended plane; not measured).
+- Evaluation courses spawn with yaw 0 on the strip cells: there the patches are off by exactly 180°; the shape cells use
+  random training spawns.
+
+**Not fixed in this entry.** The fix is one line (use the library convention), but it changes contract P and the probe
+labels of the S1 task the five trunks were trained on, and the queued 6,000 / 8,000 hide tests of the running O-geo run
+must be evaluated with the code the run was trained with. Decision pending (user): stop the run, fix, and restart the
+shape oracle; and whether the S1 trunks' critics / probes need a rerun before they are used as pairing units.
+CLAUDE.md rule 6 (check tensor conventions against the installed Isaac Lab) applies — to add: an assertion at env build
+that `_yaw_offsets_w` reproduces `quat_apply(yaw_quat(q), offset)` on a random heading.
+
+**Milestone 6,000 and stop (2026-10-04 / 05).** Gate 1 at `model_6000.pt` (tag `it6000`): same split — 15° up μ 0.25
+strip without H*: speed error 0.011 → 0.039 m/s (CI excl. 0), stances sliding > 1 cm 0.24 → 0.40 (+67 %), loaded slip
++59 %, rocking +13 %; bumps, stairs up / down, rough at level 14: nothing beyond noise (the CIs that exclude 0 are ≤ 4 %
+and favour the hidden block, stairs-up rocking −10 %). The run was stopped by the user's decision at iteration ≈ 7,450
+(last checkpoint `model_7400.pt`, mean reward 300, 0 falls) once §2.3.16 showed it could not answer the bumps / stairs
+question; the queued final hide test was cancelled. **What this run establishes:** under the redesign reward, with the
+block live from π_S0, the policy does read privileged ground information (slope) and gains from it on a slippery slope —
+with the patches misplaced (§2.3.16). It says nothing about per-foot foresight.
+
+**§2.3.16 fixed (2026-10-05).** `_yaw_offsets_w` now takes the heading from the body x axis through the library's
+`quat_apply` (no hand-written quaternion formula left in `source/` or `scripts/`; grep). Verification — the landing
+probe on `model_7400.pt` (trained with the misplaced patches), 256 episodes, level 14, before → after the fix:
+
+| Terrain | Footfalls inside their leg's H* patch | Landing point vs patch origin, forward / lateral (cm) | Linear R² of the patch at lift-off for the height the foot lands on |
+| --- | --- | --- | --- |
+| stairs up | 14 % → 91 % | +3.7 ± 20.6 / −0.1 ± 18.8 → +3.4 ± 2.4 / 0.0 ± 1.8 | 0.01 → 0.61 |
+| bumps | 15 % → 96 % | +2.7 ± 20.4 / −0.2 ± 18.7 → +2.3 ± 1.9 / 0.0 ± 1.3 | 0.03 → 0.38 |
+
+`scripts/tests/test_s1.py` passes. Consequences recorded, not acted on (user decision 2026-10-05: the five blind S1
+trunks are kept — their actor never read these points): contract P and the probe height grids of the trunks were
+computed with the misplaced points; any future S1b / S2 stage built on them starts with a critic whose contract-P input
+changes meaning at the branch and needs the re-burn-in. Checkpoints trained before the fix (both pilots' oracles,
+`…s1r_O-geo_seed43`) must not be evaluated as oracles with the fixed code: their block now shows different content.
+
+**Discussion (user, 2026-10-05): clock and input dimension.** User's reading: the clock was never annealed in this run
+and the 144-D height block may be too high-dimensional for the policy to use efficiently; proposal to record "the
+privileged information is used" and move to a clock-annealed run with a lower-dimensional shape input. Assessment:
+(1) the dimension was not the obstacle — the misplacement was: a plain linear read of the corrected patch already
+predicts the landing height at R² 0.4–0.6, and the patch covers 91–96 % of landings in a ± 2 cm spot, so a first layer
+can use it without an encoder; (2) the clock is a plausible second factor (`cpg_z_target` prescribes the swing height
+curve, so an informed leg has little freedom to change its lift or timing for a step) and its removal is already the
+next stage of the plan, so it is tested there rather than changed together with the fix; (3) a low-dimensional variant
+(per leg: ground height at the expected landing spot, and the highest ground along the swing path — 12 numbers) is the
+follow-up if the corrected 144-D block still fails gate 1 on bumps / stairs; it would be a new arm definition
+(deviation from D37), not a silent replacement. One change at a time: the fixed run repeats the stopped recipe exactly.
+
+**Rerun with the fix started 2026-10-05 00:07:** same command as §2.3.15 step 6, `--run_name s1r_O-geo_seed43_yawfix`;
+run dir `logs/rsl_rl/hexapod_s1r/2026-10-05_00-07-06_s1r_O-geo_seed43_yawfix`, log `logs/s1r_O-geo_seed43_yawfix.log`.
+Gate 1 at 2,000 (tag `fix2000`) decides whether the clock / low-dimensional follow-ups are needed.
+
+**Fixed run, milestone 2,000 (2026-10-05).** 0 falls, level ≈ 9.6, mean reward 270 (pre-fix run: 268); H* first-layer
+weights mean 0.0094 / max 0.080 (pre-fix run at 2,000: 0.0069 / 0.051). Gate 1 at `model_2000.pt` (tag `fix2000`;
+hidden − live, * = 95 % CI excludes 0):
+
+| Cell | Speed error | Stances sliding > 1 cm | Loaded slip | Rocking | Roll wobble | Tilt vs ground | Energy per metre | Short swings | Landing speed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| flat (control) | 0 % | −1 % | 0 % | 0 % | 0 % | 0 % | 0 % | +1 % | 0 % |
+| 15° up, μ 0.25 strip | +101 % * | +16 % * | +18 % * | +5 % * | +24 % * | +31 % * | +17 % * | +41 % * | −10 % * |
+| bumps L14 | +7 % | 0 % | +3 % | +2 % | +2 % | +14 % | +7 % | +3 % | 0 % |
+| stairs up L14 | **+63 % *** (0.024 → 0.039) | −5 % * | −3 % | −1 % | +1 % | −1 % | +9 % | +4 % | −5 % * |
+| stairs down L14 | −53 % * (0.019 → 0.009) | **+12 % *** | **+10 % *** | **+7 % *** | +7 % | 0 % | −2 % | +3 % | +1 % * |
+| rough L14 | **+14 % *** | +2 % | **+9 % *** | **+6 % *** | **+9 % *** | **+12 % *** | **+5 % *** | **+16 % *** | −3 % * |
+
+Reading: with the patches under the right legs, hiding H* now degrades the walker on the shape cells — rough ground on
+seven target metrics at once (5–16 %), stairs down on slip and rocking (7–12 %, plus lateral drift + 42 % *), stairs up on
+speed error (+ 63 %). The pre-fix run showed none of this at 2,000, 4,000 or 6,000. Not uniform: bumps show nothing clear
+yet; on stairs down the speed error is *better* without H*, and landing speed / impact are slightly lower without it on
+three cells (the informed policy does not land softer — the §2.3.14 landing hypothesis is not supported so far).
+**Gate 1 (pre-registered): passed at 2,000** — a target metric on the shape cells is worse without the information, CI
+excluding 0, on rough and stairs down. Effect sizes are modest (5–16 %) against the ≥ 20 % terrain-excess margin gate 2
+asks for against B0; whether they grow is read at 4,000 / 6,000 / 8,000. Per the plan (step 7) the blind arm B0 follows
+under the same recipe once this run ends.
+
+**Fixed run complete (8,000 iterations, 10.2 h; `…_yawfix/model_7999.pt`).** 0 falls in training throughout; level ≈ 9.5;
+mean reward 275 → 299 (2,000 → 8,000), tracking 20.1 → 21.3 / s, rocking penalty −12 %, landing −6 %, slip flat, lift
+floor +12 %, leg proximity −0.22 / s. Milestone videos / gait probes (`milestone_review.sh`) were **not** run for this
+run — only TensorBoard terms and gate 1; the leg-gap and lift probes are owed before the checkpoint is used further.
+
+Gate 1 over training (hidden − live, % of the live value; * = 95 % CI excludes 0; 256 paired episodes per cell; 0 falls in
+every cell, live and hidden; tags `fix2000` … `fix7999`):
+
+| Cell | Metric | 2,000 | 4,000 | 6,000 | 7,999 |
+| --- | --- | --- | --- | --- | --- |
+| flat (control) | every metric | ≤ 1 % | ≤ 4 % | ≤ 3 % | ≤ 2 % |
+| 15° up, μ 0.25 strip | stances sliding > 1 cm / loaded slip | +16 * / +18 * | +20 * / +15 * | +39 * / +46 * | +78 * / +74 * |
+| | rocking / roll wobble / tilt | +5 * / +24 * / +31 * | +16 * / +34 * / +37 * | +33 * / +60 * / +75 * | +36 * / +58 * / +76 * |
+| rough L14 | loaded slip / rocking / roll wobble | +9 * / +6 * / +9 * | +11 * / +11 * / +15 * | +13 * / +17 * / +22 * | +21 * / +20 * / +19 * |
+| | tilt / short swings / speed error | +12 * / +16 * / +14 * | +18 * / +20 * / +34 * | +25 * / +23 * / +40 * | +27 * / +36 * / +54 * |
+| stairs down L14 | loaded slip / rocking / roll wobble | +10 * / +7 * / +7 | +9 * / +11 * / +5 | +10 * / +16 * / +11 * | +15 * / +22 * / +23 * |
+| | tilt / lateral drift / speed error | 0 / +42 * / −53 * | −7 / +13 * / −17 * | +20 * / +23 * / −41 * | +76 * / +26 * / −10 |
+| stairs up L14 | speed error / energy per metre / short swings | +63 * / +9 / +4 | +101 * / +6 / +7 * | +98 * / +17 * / +11 * | +69 * / +5 * / +7 * |
+| | stances sliding > 1 cm | −5 * | −15 * | −10 * | 0 |
+| bumps L14 | speed error / rocking / short swings | +7 / +2 / +3 | +9 / +4 / +4 | +7 / +3 / +2 | +21 * / +6 * / +8 * |
+| all shape cells | landing speed | −5 … +1 | −6 … +2 | −7 … +2 | −3 … +2 |
+
+Reading:
+1. **Gate 1 passed, and the dependence on H* grows with training** — on rough ground and stairs down to ≈ 20 % on slip,
+   rocking and wobble by the end, on bumps it appears only at the last milestone, the flat control never moves. With the
+   patches misplaced (pre-fix run) none of the shape cells moved at any milestone: the §2.3.16 bug was the cause.
+2. The 144-D block is used through the plain first layer, with the clock on. Neither an encoder nor a low-dimensional
+   variant nor the clock anneal was needed to get it used.
+3. **The landing hypothesis (§2.3.14 reading 6) is not supported:** landing speed and impact do not depend on H*
+   (≤ 3 % at the end, mostly the other way). The informed policy places and times its feet differently; it does not land
+   softer.
+4. **Gate 1 is not headroom.** "Worse when the information is removed" shows reliance, not advantage: a blind policy
+   trained under the same reward may reach the same numbers by other means. Gate 2 needs B0 trained with this recipe
+   and the fixed code. Live values of the oracle at 7,999 for that comparison (level 14): stances sliding > 1 cm — bumps
+   0.23, stairs up 0.38, stairs down 0.42, rough 0.46; rocking 0.163 / 0.213 / 0.190 / 0.200 rad/s; flat 0.02 / 0.093.
+
+**Step 7 started 2026-10-05 10:31:** blind arm, same command with `env.arm=B0 --run_name s1r_B0_seed43` (fixed code);
+run dir `logs/rsl_rl/hexapod_s1r/2026-10-05_10-31-40_s1r_B0_seed43`, log `logs/s1r_B0_seed43.log`, ≈ 10 h.
+
+**Preliminary B0 vs O-geo at iteration 4,000 (user request, 2026-10-05; not the gate-2 verdict).** B0
+`…s1r_B0_seed43/model_4000.pt` (run still training) against O-geo `…_yawfix/model_4000.pt`, the six gate-1 cells, 256
+episodes, same eval seed (`logs/eval/redesign/run_cells6.sh <ckpt> b0_4000`; oracle JSONs = `gate1_fix4000_*_live`;
+`excess_summary.py b0_4000 fix4000`). 0 falls except B0 stairs down 1 / 256.
+
+Raw values, oracle relative to B0 (* = paired CI excludes 0): speed error −22 … −42 % * on every cell, rocking −10 …
+−16 % * on four of five terrain cells — **but the flat control differs just as much** (speed error −30 % *, rocking
+−15 % *, wobble −11 … −13 % *, short swings +113 % *, lateral / heading drift +34 … +37 % *). With H* identically zero
+on flat ground, that is the two runs' gait difference, not foresight; raw differences are therefore not readable.
+
+Terrain excess (cell − the same arm's flat value), oracle vs B0, % of B0's excess:
+
+| Cell | Speed error | Stances sliding > 1 cm | Loaded slip | Rocking | Roll wobble | Tilt vs ground | Energy per metre |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 15° up, μ 0.25 strip | **−49 *** | −19 * | −8 * | −19 * | **−26 *** | **−28 *** | −27 |
+| bumps L14 | **−36 *** | −5 | −12 | −6 | −7 | −55 | −33 |
+| rough L14 | **−46 *** | −2 | −10 * | −5 | −9 * | −12 * | −44 |
+| stairs down L14 | −13 | −8 | −8 | −4 | −5 | +8 | −18 |
+| stairs up L14 | −18 | +9 | +9 | +8 | +2 | −6 | +42 |
+
+Reading (one seed per arm, half-trained, six cells): the oracle holds the commanded speed clearly better where the
+ground changes under it (excess −36 … −49 % on bumps, rough and the slope) and is steadier on the slope (−19 … −28 %);
+on rough ground the slip / wobble / tilt gains are real but small (−9 … −12 %); on stairs nothing is clear and stairs up
+leans the other way. Slip — the metric expected to separate the arms — does so only on the slope. The short-swing
+excess (−40 … −58 % *) is not counted: the oracle stumbles twice as often as B0 on flat ground (0.111 vs 0.052), which
+inflates its flat baseline; absolute values on terrain are equal (0.18 vs 0.19). Landing-speed excess on the slope is
+higher for the oracle (+0.049 vs +0.002 m/s *). The oracle's reliance on H* roughly doubled between 4,000 and 8,000
+(gate 1 table above), so the end-of-run comparison may differ in either direction.
+
+### 2.3.17 Gate 2: shape oracle vs blind arm under the redesign recipe (2026-10-05)
+
+**Runs.** B0 `logs/rsl_rl/hexapod_s1r/2026-10-05_10-31-40_s1r_B0_seed43/model_7999.pt` (8,000 iterations, 10.0 h, no
+error) and O-geo `…/2026-10-05_00-07-06_s1r_O-geo_seed43_yawfix/model_7999.pt`; same command except `env.arm`, fixed
+code, seed 43, clock on (S1 stage). **Evaluation:** `logs/eval/redesign/run_gate2.sh b0=<ckpt> ogeo=<ckpt>` — the 20
+pre-registered cells, 256 deterministic episodes, 0.15 m/s, eval seed 0, layout seed 1; JSON
+`logs/eval/redesign/gate2_<arm>_<cell>.json`; `gate2_summary.py` (terrain excess with CI). **0 falls in all 40 cells.**
+The 17 walking gates (`eval_s0b_gates.sh`) were not run on these checkpoints.
+
+**Flat control (B0 / O-geo):** stances sliding > 1 cm 0.036 / 0.018, speed error 0.005 / 0.007 m/s, rocking 0.093 /
+0.093 rad/s, short swings 0.084 / 0.119, landing speed 0.178 / 0.189 m/s, impact 1.79 / 2.02, **energy per metre 1.93 /
+2.47 (+28 %)**. H* is zero here, so these are gait differences between two single-seed runs.
+
+**Absolute values on terrain, O-geo relative to B0** (paired by env; * = 95 % CI excludes 0; − = oracle better):
+
+| Cell | Stances sliding > 1 cm | Loaded slip | Rocking | Roll wobble | Tilt vs ground | Speed error | Short swings | Energy per metre |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rough L9 / L14 / L17 | −14 * / −9 * / −6 * | −6 * / −15 * / −9 * | −6 * / −13 * / −10 * | −3 / −14 * / −10 * | +6 / −34 * / −16 * | +6 / −10 / −8 * | −8 * / −18 * / −18 * | +20 * / +14 * / +14 * |
+| stairs down L9 / L14 / L17 | +6 * / 0 / −1 | −1 / −2 / +1 | −5 * / −5 * / −6 * | −1 / −8 * / −8 * | +11 / +9 / −14 * | −15 * / +8 / +29 * | −9 * / −7 * / −7 * | +7 / +18 * / +19 * |
+| stairs up L9 / L14 / L17 | +2 / −2 / +2 | +11 * / +5 / +10 | +5 * / +1 / +3 | +5 / −2 / +4 | +6 / −13 / +45 | +27 * / +11 / +10 | −2 / −7 * / −6 * | +26 * / +25 * / +22 * |
+| bumps L9 / L14 / L17 | −10 * / −3 / −7 * | −5 / +5 / −4 | −1 / +3 / −2 | 0 / +5 / −5 | −1 / +7 / +6 | +2 / +11 / 0 | −5 / −3 / −15 * | +24 * / +24 * / +22 * |
+| 15° up, μ 0.9 / μ 0.25 | −12 * / −18 * | +4 * / −3 * | +4 * / +1 * | −12 * / −15 * | −7 * / −17 * | −44 * / −43 * | +19 * / +15 * | +19 * / +16 * |
+| 15° down, μ 0.9 / μ 0.25 | −26 * / −10 * | −6 * / +3 * | −15 * / −12 * | −30 * / −25 * | −21 * / −25 * | +260 * (0.003 → 0.010) / −28 * | 0 / +1 | +28 * / +27 * |
+| soft flat / up / down | +32 * / +3 / −12 * | +1 * / +27 * / −6 | +8 * / +11 * / −1 | +1 * / +12 / +5 | −5 * / +12 / −7 | +11 * / +8 / +62 * | +41 * / +47 * / +11 * | +21 * / +25 * / +21 * |
+
+Clear differences over the 19 terrain cells (oracle better / worse): tilt 8 / 0, roll wobble 8 / 1, stances sliding
+10 / 2, rocking 8 / 5, short swings 9 / 5, landing speed 9 / 4 (all ≤ 5 % except the up-slopes, +19–20 %), speed error
+5 / 5, loaded slip 5 / 5, lateral drift 2 / 6, **impact 0 / 13, energy per metre 0 / 18**.
+
+**Terrain excess (the pre-registered form).** 35 cell × metric entries have the oracle's excess ≥ 20 % below B0's with
+the CI excluding 0, 18 have it ≥ 20 % above. Most of both lists does not survive a look at the absolute values: the
+landing-speed "wins" on every shape cell (−23 … −55 %) and the energy "wins" come from the oracle's *worse flat baseline*
+(landing speed on terrain is equal within 5 %; energy is higher on every cell), and the heading-drift "losses" (+100 …
++375 %) are ratios on a near-zero excess. The excess form is fragile when the flat baselines differ; it was meant to
+remove the gait offset and instead imports it with the opposite sign.
+
+**Verdict under the pre-registered rule: gate 2 not passed.** The rule needs a ≥ 20 % win with no target metric worse by
+the same margin; wins exist on the oracle's own cells (rough: speed-error excess −39 … −61 % *, rocking excess −21 % * at
+L14), but so do losses (stairs up L9 loaded-slip excess +24 % *, heading-drift excess on rough L9 and stairs up), and the
+walking gates were not run.
+
+**What the comparison does show (one seed per arm):**
+1. **Rough ground: a consistent, moderate advantage** — 6–18 % fewer slides, less slip, rocking and wobble, 16–34 % less
+   tilt at L14 / L17, 18 % fewer short swings, the same sign at all three levels and on the cells where gate 1 showed
+   the largest reliance on H*. The size is at the level of the ± 10 % one-seed gait spread (§2.3.14), so it needs seeds.
+2. **Slopes: steadier** (roll wobble −12 … −30 %, tilt −7 … −25 %, slides −10 … −26 %), better speed tracking uphill,
+   worse downhill on the high-friction slope.
+3. **Stairs and bumps: no advantage.** Stairs down: 5–8 % less rocking / wobble; stairs up: nothing, slightly worse
+   slip and speed error at L9; bumps: nothing.
+4. **Soft ground: the oracle is worse** (it sees shape only; this is its gait on a surface it has no information on).
+5. **Cost: the oracle spends 14–28 % more energy per metre on every cell and hits the ground 5–13 % harder on 13 of
+   19.** Whether that is this seed's gait or the price of the steadier body is not separable with one seed.
+6. Gate 1 showed strong reliance on H* (hiding it costs ≈ 20 % on rough, 74–78 % slip on the slope); gate 2 shows much of
+   that reliance is not advantage — the blind arm reaches nearly the same numbers by other means.
+
+**Open (user decision):** seeds for both arms (the rough / slope advantage is within one-seed noise); the clock-removal
+stage; the material oracle; a per-leg landing-spot input for stairs and bumps; whether energy per metre enters the
+reward. The excess statistic should be replaced before any of these is judged (absolute paired differences with the
+flat control reported beside them, or seed-level statistics).

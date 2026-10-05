@@ -123,6 +123,9 @@ class S1PpoAlgorithmCfg(S0PpoAlgorithmCfg):
     v0_retire_iters: int = 1000
     clock_anneal_iters: int = 0  # S2 only: per-episode clock dropout 0 → 1 over this many iterations
     reburn_iters: int = 50  # S2 only: actor frozen after the branch
+    ramp_terms: list = []  # redesign: reward terms whose weight ramps 1 → ``ramp_to`` × over ``ramp_iters`` iterations
+    ramp_iters: int = 0
+    ramp_to: float = 2.0
 
 
 @configclass
@@ -153,6 +156,19 @@ class PPORunnerCfg_S1(PPORunnerCfg_S0b):
             use_data_augmentation=True, use_mirror_loss=False, data_augmentation_func=mirror_augmentation_s1
         )
 
+
+
+@configclass
+class PPORunnerCfg_S1R(PPORunnerCfg_S1):
+    """Headroom redesign, S1 stage (phase2-progress §2.3.15): as S1, plus the redesign terms ramped 1 → 2 × over the
+    first 30 % of the 8,000-iteration run."""
+
+    experiment_name = "hexapod_s1r"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.algorithm.ramp_terms = ["swing_clearance", "ang_vel_xy", "tilt_ground", "stance_slip", "touchdown_speed"]
+        self.algorithm.ramp_iters = 2400
 
 
 @configclass
