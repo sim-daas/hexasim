@@ -3220,3 +3220,102 @@ walking gates were not run.
 stage; the material oracle; a per-leg landing-spot input for stairs and bumps; whether energy per metre enters the
 reward. The excess statistic should be replaced before any of these is judged (absolute paired differences with the
 flat control reported beside them, or seed-level statistics).
+
+### 2.3.18 After gate 2: 0.3 m/s check, and the per-leg height oracle prepared (2026-10-05)
+
+**User decisions.** No extra seeds (time / compute); no clock-removal stage; energy per metre stays out of the reward for
+the headroom tests; try a short evaluation above the trained speed range; prepare an oracle with a per-leg height input.
+**No long run is started without discussing the plan first** (user, 2026-10-05).
+
+**0.3 m/s evaluation (trained range 0.05–0.20 m/s).** `logs/eval/redesign/run_speed.sh 0.3 <tag> <ckpt> [abl]` on the two
+§2.3.17 checkpoints, the six gate-1 cells, 256 episodes, eval seed 0; JSON `gate1_{b0,ogeo}_v03_*`.
+
+| Cell | B0 / O-geo: speed error (m/s) | stances sliding > 1 cm | rocking (rad/s) | landing speed (m/s) | energy per metre | O-geo with H* hidden: clear changes |
+| --- | --- | --- | --- | --- | --- | --- |
+| flat | 0.054 / 0.054 | 0.48 / 0.61 (+26 % *) | 0.46 / 0.38 (−18 % *) | 0.37 / 0.33 (−11 % *) | 2.56 / 2.54 | none |
+| 15° up, μ 0.25 | 0.118 / 0.100 (−15 % *) | 0.73 / 0.78 | 0.46 / 0.35 (−24 % *) | 0.33 / 0.34 | 3.47 / 3.09 (−11 % *) | speed error × 2, energy × 2, stride halves |
+| bumps L14 | 0.078 / 0.078 | 0.77 / 0.84 (+9 % *) | 0.55 / 0.47 (−15 % *) | 0.34 / 0.30 (−10 % *) | 3.29 / 3.49 | none |
+| stairs up L14 | 0.110 / 0.117 | 0.78 / 0.84 (+8 % *) | 0.59 / 0.49 (−17 % *) | 0.35 / 0.32 (−9 % *) | 3.61 / 4.54 (+26 % *) | slightly *better* hidden (energy −22 % *) |
+| stairs down L14 | 0.074 / 0.072 | 0.80 / 0.82 (+3 % *) | 0.56 / 0.49 (−13 % *) | 0.32 / 0.29 (−10 % *) | 3.05 / 3.24 | slip +8 % *, short swings +11 % * |
+| rough L14 | 0.091 / 0.084 (−7 % *) | 0.79 / 0.84 (+7 % *) | 0.56 / 0.47 (−17 % *) | 0.33 / 0.31 (−8 % *) | 3.08 / 2.97 (−4 % *) | speed error +21 % *, short swings +21 % *, energy +13 % * |
+
+Falls: 1 / 256 (B0, bumps), otherwise 0. Reading: at 0.3 m/s both arms are outside what they were trained for — they
+reach ≈ 0.25 m/s on flat ground and 0.18–0.23 on terrain, and **half of all stances already slide on flat ground**
+(0.04 / 0.02 at 0.15 m/s), 73–84 % on terrain, so the slip metrics are saturated. The oracle rocks 13–24 % less and
+lands ≈ 10 % softer, but by the same amount on flat ground, where H* is zero: a gait difference, not foresight. The
+reliance on H* is no larger than at 0.15 m/s (slope and rough yes, bumps and stairs no). **An untrained speed does not
+open a gap between the arms**; whether a wider *trained* speed range would is a training question (a long run), not
+answered here.
+
+**Per-leg height oracle `O-leg` (implemented, smoke-tested, not trained).**
+- Why not a subset of H*: H* already holds the height at the landing spot, but relative to the ground at the nominal
+  foothold — the shape of the terrain, not how far below the body it is. `h_leg` (12-D, mirror `legs:2`) gives, per
+  leg and **relative to the body** (base z + rest-pose toe z, so 0 on flat ground at the nominal stance): the ground at
+  the expected landing spot (3 cm ahead of the nominal foothold, where §2.3.16 measured the landings) and the highest
+  ground on the swing line (−6 … +9 cm forward).
+- Code: `layout.S2L_ACTOR_BLOCKS` = S2 layout ⊕ `h_leg` (1,281-D), `ARM_BLOCK["O-leg"]`, `layout.ARM_ACTOR` (widest
+  layout, used wherever an arm's block columns are looked up: `S1PPO`, `eval_headroom.py`); fill in
+  `HexapodS1Env.refresh_proprio`; `load_policy.configure` takes the actor width from the checkpoint. Run with
+  `--task Hexapod-S1R-v0 env.arm=O-leg env.actor_dim=1281`. H* stays zero-held for this arm.
+- Checks: `test_s1.py` passes; mirror of `h_leg` = right / left leg swap (checked); 60-iteration smoke run
+  (`…/hexapod_s1r/*s1r_smoke_O-leg`, log `logs/eval/redesign/smoke_s1r_oleg.log`): no error, width 1,281, `h_leg` out of
+  the frozen set and H* in it (144), normaliser after the fold: mean 2–3 mm, std 7 mm (terrain level ≈ 2), reward 360.
+- **Not started:** the 8,000-iteration run (≈ 10 h). Proposal put to the user: same recipe as §2.3.17's arms, compared
+  against the existing B0 and O-geo, hide test at 2,000 and 4,000, stop at 4,000 if stairs / bumps show no reliance.
+
+**O-leg run started 2026-10-05 23:25 (user go: per-leg input only, capped at 6,000 iterations, everything else as §2.3.17):**
+`python scripts/rsl_rl/train.py --task Hexapod-S1R-v0 --headless --num_envs 4096 --seed 43 --max_iterations 6000 --warmstart <π_S0 model_12200.pt> env.arm=O-leg env.actor_dim=1281 --run_name s1r_O-leg_seed43`;
+run dir `logs/rsl_rl/hexapod_s1r/2026-10-05_23-25-14_s1r_O-leg_seed43`, log `logs/s1r_O-leg_seed43.log`. The reward ramp
+stays at 2,400 iterations, so the run matches B0 and O-geo iteration for iteration; the comparison uses their
+`model_6000.pt`. Queued: hide test at 2,000 / 4,000 (tags `oleg2000`, `oleg4000`), then the 20-cell set on the final
+O-leg checkpoint, B0 @ 6,000 and O-geo @ 6,000 (tags `oleg6k`, `b06k`, `ogeo6k`).
+
+### 2.3.19 Per-leg height oracle vs blind at 6,000 iterations (2026-10-06)
+
+**Run.** O-leg `logs/rsl_rl/hexapod_s1r/2026-10-05_23-25-14_s1r_O-leg_seed43/model_5999.pt` (6,000 iterations, 7.8 h, no
+error; command in §2.3.18). **Evaluation:** `logs/eval/redesign/run_gate2.sh oleg6k=<O-leg model_5999> b06k=<B0
+model_6000> ogeo6k=<O-geo yawfix model_6000>` — the 20 cells, 256 deterministic episodes, 0.15 m/s, eval seed 0, layout
+seed 1; JSON `gate2_{oleg6k,b06k,ogeo6k}_<cell>.json`. **0 falls in all 60 cells.** Absolute paired differences are
+reported (the terrain-excess form is retired, §2.3.17).
+
+**Hide tests of O-leg** (`run_gate1.sh`, tags `oleg2000`, `oleg4000`; hidden − live, * = CI excludes 0): 15° up μ 0.25:
+speed error +31 % * → +162 % *, slides −1 % → +25 % *; stairs down: slides +11 % * / +13 % *, lateral drift +56 % * /
++34 % *; stairs up: speed error +49 % * / +71 % * (0.01–0.02 m/s in absolute terms); bumps and rough: ≤ 8 % except speed
+error; **flat: slides +17 % * / +86 % * (0.03 → 0.06), speed error +11–14 % *** — `h_leg` is body-referenced, so on flat
+ground it still tells the policy its height above the ground, and the policy uses that. Reliance is weaker than O-geo's
+at the same iterations and concentrated on the slope. No hide test was run on the final checkpoint.
+
+**Oracle relative to B0 at 6,000** (paired by env; ranges over the three levels 9 / 14 / 17; * = CI excludes 0 on every
+level of the range, (*) on some):
+
+| Terrain | Arm | Stances sliding > 1 cm | Rocking | Roll wobble | Tilt vs ground | Short swings | Landing speed | Energy per metre |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| flat (control) | O-leg | −22 * | −16 * | −58 * | −27 * | +17 * | −6 * | +22 * |
+| | O-geo | +1 | −9 * | −17 * | +2 * | +27 * | −2 * | +33 * |
+| rough | O-leg | −1 … +1 | −7 … −10 * | −3 … −7 (*) | −4 … −11 (*) | −5 … −8 * | −3 … −6 * | +12 … +14 * |
+| | O-geo | −2 … −4 (*) | −13 … −14 * | −10 … −14 * | −11 … −16 * | −10 … −16 * | −1 … −3 (*) | +21 … +27 * |
+| stairs down | O-leg | +4 … +9 * | −6 … −9 * | −9 … +1 | −13 … −4 (*) | −4 … +6 (*) | −8 … −9 * | +12 … +15 * |
+| | O-geo | +1 … +4 (*) | −10 … −11 * | −6 … −10 (*) | +11 … −16 (*) | −7 … +2 (*) | −2 … −5 * | +28 … +37 * |
+| stairs up | O-leg | +6 … +10 * | −3 … −5 (*) | −3 … +2 | −6 … +46 | −2 … +1 | −2 … −4 (*) | +15 … +18 * |
+| | O-geo | +11 … +14 * | −5 * | −5 … −8 (*) | −6 … −15 (*) | −4 … −11 (*) | +1 … +4 (*) | +24 … +28 * |
+| bumps | O-leg | −6 … +1 (*) | −9 … −14 * | −4 … −10 (*) | −24 … +1 (*) | 0 … −5 | −6 * | +13 … +23 * |
+| | O-geo | +3 … +9 (*) | −7 … −13 * | −2 … −14 (*) | −25 … +28 (*) | −3 … −13 (*) | −1 … −2 (*) | +27 … +33 * |
+| 15° up / down, μ 0.25 | O-leg | −2 / +7 * | −12 * / −13 * | −8 * / −21 * | −11 * / −10 * | −34 * / +2 | −16 * / −6 * | +8 * / +25 * |
+| | O-geo | −9 * / −8 * | −11 * / −18 * | −24 * / −34 * | −18 * / −30 * | −25 * / +3 | +3 * / −6 * | +19 * / +32 * |
+
+Clear differences over the 19 terrain cells (better / worse) — O-leg: rocking 15 / 0, landing speed 18 / 0, impact
+16 / 0, tilt 9 / 1, roll wobble 8 / 1, stances sliding 2 / 10, speed error 3 / 15 (≤ 0.009 m/s in absolute terms),
+lateral drift 0 / 11, energy 0 / 19. O-geo: rocking 18 / 0, roll wobble 12 / 0, tilt 10 / 1, short swings 9 / 2, lateral
+drift 8 / 0, stances sliding 5 / 6, speed error 3 / 15, energy 0 / 19.
+
+Reading (one seed per arm):
+1. **The per-leg input does not open stairs or bumps.** There O-leg slides slightly *more* than B0 (+4 … +10 % on
+   stairs), and its smaller rocking, softer landing and lower impact appear by the same amount on flat ground (−16 %,
+   −6 %, −6 %) — a calmer, more expensive gait (+22 % energy on flat), not a response to the terrain.
+2. **The 144-D block remains the better oracle on rough ground** (rocking / wobble / tilt / short swings −10 … −16 %,
+   against −3 … −11 % for O-leg and a flat offset of −9 % / −17 % / +2 % / +27 %); on slopes both are steadier than B0.
+3. Both oracles pay 12–37 % more energy per metre on every cell, flat included.
+4. Across §2.3.15–2.3.19 — the corrected patches, the redesigned reward, two representations of the ground, 0.15 and
+   0.3 m/s — the pattern is stable: **knowing the ground ahead gives this robot a moderate gain in body steadiness on
+   rough ground and slopes at ≤ 0.2 m/s, nothing on discrete steps, and no gain in slip or tracking beyond the size of
+   the gait difference between two single-seed runs.** B0 never falls on any of the 20 cells.

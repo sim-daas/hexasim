@@ -320,6 +320,8 @@ class HexapodS1Env(HexapodS0bEnv):
         la = torch.tensor(layout.SCAN_LAT, device=self.device)
         self._scan_off = torch.stack(torch.meshgrid(f, la, indexing="ij"), dim=-1).view(-1, 2)  # (77, 2)
         self._grid_off = torch.tensor(layout.LOCAL_GRID, device=self.device)  # (9, 2)
+        self._leg_line_off = torch.tensor([(f, 0.0) for f in layout.LEG_LINE_FWD], device=self.device)  # (6, 2)
+        self._leg_land = layout.LEG_LAND_INDEX
         self._prev_contact = torch.zeros(self.num_envs, 6, dtype=torch.bool, device=self.device)
         self._prev_toe = torch.zeros(self.num_envs, 6, 3, device=self.device)
         self._actor_zero = torch.zeros(
@@ -439,6 +441,14 @@ class HexapodS1Env(HexapodS0bEnv):
         elif self._arm_block == "h_star":  # H* = terrain height at the strip points − height at the nominal foothold
             h = self.terrain_z(strip_xy) - self.terrain_z(anchor_w)[..., None]
             self.s1_actor_obs[:, self._layout["h_star"]] = h.flatten(1)
+        elif self._arm_block == "h_leg":
+            # Per leg, relative to where a body at this height expects flat ground (base z + rest-pose toe z, so both
+            # values are 0 on flat ground at the nominal stance): the ground at the expected landing spot, and the
+            # highest ground on the swing line through the nominal foothold (phase2-progress §2.3.18).
+            line = self.terrain_z(anchor_w[:, :, None] + self._yaw_offsets_w(self._leg_line_off)[:, None])  # (N, 6, 6)
+            rel = line - (root[:, 2:3] + self.nominal_toe_b[:, 2])[..., None]
+            h = torch.stack((rel[..., self._leg_land], rel.max(dim=-1).values), dim=-1)  # (N, 6, 2)
+            self.s1_actor_obs[:, self._layout["h_leg"]] = h.flatten(1)
 
     def step(self, action: torch.Tensor):
         ret = super().step(action)

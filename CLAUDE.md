@@ -179,7 +179,9 @@ code before relying on any line here.
   (`…/hexapod_s1r/2026-10-05_00-07-06_s1r_O-geo_seed43_yawfix`) passes gate 1 (relies on H* on rough / stairs / slopes); vs B0
   (`…/2026-10-05_10-31-40_s1r_B0_seed43`) gate 2 is **not passed**: moderate advantage on rough ground and slopes only, +14–28 %
   energy per metre, one seed per arm; the terrain-excess statistic is fragile when flat baselines differ — report absolute
-  paired differences beside the flat control. Next step is the user's decision. Baseline / economy drivers and
+  paired differences beside the flat control. `O-leg` (`env.arm=O-leg env.actor_dim=1281`, per-leg body-referenced heights,
+  §2.3.18–19) at 6,000: no advantage on stairs / bumps; a 0.3 m/s check opens no gap. Next step is the user's decision; **no long
+  run without discussing the plan with the user first**. Baseline / economy drivers and
   outputs in `logs/eval/redesign/`. Task list with status in `research_progress.md` (Phase 2.3). `Hexapod-S2-v0` = S1 + H* (1,269-D, `layout.S2_ACTOR_BLOCKS`; S1 stays 1,125-D) +
   12-entry material library (soft_soil, wet_clay; S1 keeps 10, D39/D40) + clock dropout; arms via `env.arm=B0|O-mat|O-geo`
   (`layout.ARM_BLOCK`); `train.py --branch_from <trunk>` widens the checkpoint (`s1_ppo.widen_checkpoint`). Evaluation:

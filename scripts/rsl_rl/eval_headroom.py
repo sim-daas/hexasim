@@ -137,7 +137,7 @@ oracle = None
 if args.ablate_oracle:  # zero would be far out of distribution for M* (μ ≈ 0.7, log k ≈ 5.4): use the mean instead
     from hexasim.tasks.manager_based.hexasim.mdp import layout  # noqa: PLC0415
 
-    oracle = layout.S2_ACTOR[layout.ARM_BLOCK[cfg.arm]]
+    oracle = layout.ARM_ACTOR[layout.ARM_BLOCK[cfg.arm]]
     oracle_mean = pol.obs_normalizer._mean[0, oracle].clone()
 robot, sensor = env.scene["robot"], env.scene["contact_forces"]
 dev, dt, T = env.device, env.step_dt, int(env.max_episode_length)

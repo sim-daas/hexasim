@@ -81,6 +81,14 @@ CONTRACT_P_BLOCKS: tuple[Block, ...] = (
 # (``hexasim.rl.s1_ppo.widen_checkpoint``); the S1 task keeps the 1,125-D layout.
 S2_ACTOR_BLOCKS: tuple[Block, ...] = (*ACTOR_BLOCKS, Block("h_star", 144, "strip:1", False))
 
+# Redesign follow-up (phase2-progress §2.3.18): the S2 layout ⊕ h_leg for the "O-leg" oracle — per leg, the ground at
+# the expected landing spot and the highest ground along the swing path, both **relative to the body** (H* is relative
+# to the ground at the nominal foothold, so it carries the shape of the terrain but not how far below the body it is).
+S2L_ACTOR_BLOCKS: tuple[Block, ...] = (*S2_ACTOR_BLOCKS, Block("h_leg", 12, "legs:2", False))
+# Swing line of h_leg: forward offsets from the nominal foothold, m; the feet land ≈ 3 cm ahead of it (§2.3.16).
+LEG_LINE_FWD = (-0.06, -0.03, 0.0, 0.03, 0.06, 0.09)
+LEG_LAND_INDEX = 3
+
 OLD_ACTOR_DIM = 117  # π_S0
 
 
@@ -99,9 +107,11 @@ def total(blocks: tuple[Block, ...]) -> int:
 ACTOR = offsets(ACTOR_BLOCKS)
 S2_ACTOR = offsets(S2_ACTOR_BLOCKS)  # ⊇ ACTOR: same offsets, plus h_star
 S2_ACTOR_DIM = total(S2_ACTOR_BLOCKS)
-BLOCKS_BY_DIM = {total(b): b for b in (ACTOR_BLOCKS, S2_ACTOR_BLOCKS)}  # actor layout from the observation width
+# Actor layout from the observation width.
+BLOCKS_BY_DIM = {total(b): b for b in (ACTOR_BLOCKS, S2_ACTOR_BLOCKS, S2L_ACTOR_BLOCKS)}
 # Blocks an arm reads beyond the blind (B0) layout; every other non-S1 block is held at exactly zero.
-ARM_BLOCK = {"B0": None, "O-mat": "m_star", "O-geo": "h_star"}
+ARM_BLOCK = {"B0": None, "O-mat": "m_star", "O-geo": "h_star", "O-leg": "h_leg"}
+ARM_ACTOR = offsets(S2L_ACTOR_BLOCKS)  # widest layout (⊇ S2_ACTOR, same offsets): an arm block's columns
 CONTRACT_P = offsets(CONTRACT_P_BLOCKS)
 ACTOR_DIM = total(ACTOR_BLOCKS)
 CONTRACT_P_DIM = total(CONTRACT_P_BLOCKS)

@@ -146,7 +146,7 @@ class S1PPO(S0PPO):
             # else is needed here — the critic and the optimiser are new (no stale statistics or Adam moments, §2.3.9).
             block = layout.ARM_BLOCK[self.env.cfg.arm]
             if block and self.iteration == 0:
-                cols = layout.S2_ACTOR[block]
+                cols = layout.ARM_ACTOR[block]
                 self._frozen = self._frozen[(self._frozen < cols.start) | (self._frozen >= cols.stop)]
             self._snapshot()
         for cols in self._live_pending:  # blocks going live at the branch: statistics from this batch
@@ -209,7 +209,7 @@ class S1PPO(S0PPO):
         held = torch.ones(self._width, dtype=torch.bool)
         held[: layout.ACTOR["m_star"].start] = False
         if layout.ARM_BLOCK[env.cfg.arm]:
-            held[layout.S2_ACTOR[layout.ARM_BLOCK[env.cfg.arm]]] = False
+            held[layout.ARM_ACTOR[layout.ARM_BLOCK[env.cfg.arm]]] = False
         assert self.actor.mlp[0].weight[:, held].abs().max() == 0.0, f"arm {env.cfg.arm}: a zero-held block got weight"
         if self.ramp_iters > 0:
             loss["reward_ramp"] = self._ramp()
@@ -262,5 +262,5 @@ class S1PPO(S0PPO):
             self.actor.requires_grad_(False)
             self.actor_freeze_iters = self.iteration + self.reburn_iters
             if layout.ARM_BLOCK[env.cfg.arm]:
-                self._live_pending = [layout.S2_ACTOR[layout.ARM_BLOCK[env.cfg.arm]]]
+                self._live_pending = [layout.ARM_ACTOR[layout.ARM_BLOCK[env.cfg.arm]]]
         return ret

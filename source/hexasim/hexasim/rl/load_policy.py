@@ -30,6 +30,7 @@ def task_for(ck: dict) -> str:
 def configure(cfg, ck: dict) -> None:
     if "s1_state" in ck:
         cfg.aux.window = ck["s1_state"]["window"]
+        cfg.actor_dim = ck["actor_state_dict"]["mlp.0.weight"].shape[1]  # the layout follows the checkpoint's width
         cfg.arm = ck["s1_state"].get("arm", "B0")  # S1 trunks predate the field (they are B0-layout)
 
 
