@@ -18,9 +18,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import trimesh
 
 import isaaclab.terrains as terrain_gen
 from isaaclab.terrains.height_field import hf_terrains
+from isaaclab.terrains.trimesh import mesh_terrains
 from isaaclab.utils.configclass import configclass
 from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
 
@@ -88,16 +90,42 @@ S0B_TERRAIN_CFG = terrain_gen.TerrainGeneratorCfg(
 
 # Evaluation-only single-type terrains for the stress sweep (phase2-progress §2.1.20): level ℓ at
 # difficulty (ℓ + U)/15 exactly as in training, so levels 0–9 match the training rows and 10–14 extend them.
-EVAL_TERRAIN_TYPES = S0B_TERRAIN_CFG.sub_terrains
+def floored_gap_terrain(difficulty: float, cfg: MeshFlooredGapTerrainCfg):
+    """Isaac Lab's gap ring is bottomless (the height-map rays would miss): add a floor 15 cm down, below toe reach."""
+    meshes, origin = mesh_terrains.gap_terrain(difficulty, cfg)
+    floor = trimesh.creation.box(
+        (cfg.size[0], cfg.size[1], 0.02),
+        trimesh.transformations.translation_matrix((0.5 * cfg.size[0], 0.5 * cfg.size[1], -0.16)),
+    )
+    return meshes + [floor], origin
+
+
+@configclass
+class MeshFlooredGapTerrainCfg(terrain_gen.MeshGapTerrainCfg):
+    function: str = "{DIR}.terrain:floored_gap_terrain"
+
+
+# "gap" is evaluation-only (phase2-progress §2.3.21): a ring gap around the 1 m spawn platform, 0.2 cm of width per
+# level on the same (ℓ + U)/15 scale as the step heights (level 25 = 5 cm, level 50 = 10 cm).
+EVAL_TERRAIN_TYPES = {**S0B_TERRAIN_CFG.sub_terrains, "gap": MeshFlooredGapTerrainCfg(gap_width_range=(0.0, 0.03))}
 
 
 LEVELS_EVAL = 21  # 0–14 as designed; 15–20 the held-out suite beyond the cap (difficulty up to 21/15)
 
 
-def single_type_generator(name: str) -> terrain_gen.TerrainGeneratorCfg:
+def single_type_generator(name: str, level: int | None = None) -> terrain_gen.TerrainGeneratorCfg:
     """Levels 0–20 of one terrain type, 4 columns (evaluation). Difficulty (ℓ + U)/15 as in training, so parameters
-    extrapolate linearly past level 14: at level 20 rough ±3.0 cm, slopes ≈ 19.7°, bumps and stairs 4.0 cm."""
+    extrapolate linearly past level 14: at level 20 rough ±3.0 cm, slopes ≈ 19.7°, bumps and stairs 4.0 cm.
+
+    ``level``: that level alone as row 0 (levels past 20: level 25 = 5 cm, 40 = 8 cm bumps and stairs)."""
     sub = EVAL_TERRAIN_TYPES[name].replace(proportion=1.0)
+    if level is not None:
+        return S0B_TERRAIN_CFG.replace(
+            num_rows=1,
+            num_cols=4,
+            difficulty_range=(level / LEVELS_DESIGNED, (level + 1) / LEVELS_DESIGNED),
+            sub_terrains={name: sub},
+        )
     return S0B_TERRAIN_CFG.replace(
         num_rows=LEVELS_EVAL,
         num_cols=4,

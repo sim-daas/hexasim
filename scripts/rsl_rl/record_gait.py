@@ -39,6 +39,27 @@ parser.add_argument("--tag", default=None, help="name for the video file and the
 parser.add_argument("--cmd", type=float, default=0.15, help="forward speed command in m/s, S0b tasks only (default: 0.15)")
 parser.add_argument("--yaw_cmd", type=float, default=0.0, help="yaw speed command in rad/s, S0b tasks only (default: 0.0)")
 parser.add_argument(
+    "--controller",
+    default="policy",
+    choices=["policy", "cpg"],
+    help="policy: the checkpoint's trained actor (default). cpg: open-loop tripod CPG + analytic IK baseline "
+    "(hexasim.control) — fixed-phase foot trajectory, no terrain sensing, no learning; for comparison videos "
+    "only, never evidence of a deployable gait. --ckpt is still required: it selects the task/terrain/DR config "
+    "to match, the policy weights inside it are simply unused.",
+)
+parser.add_argument(
+    "--cpg_freq",
+    type=float,
+    default=None,
+    help="--controller cpg: stepping frequency, Hz; stride = --cmd / this. Default: clamp(--cmd / 0.20, 0.8, "
+    "2.5) — the v_x -> frequency relationship HexapodEnv._clock_frequency uses for the policy's clock, evaluated "
+    "once from the commanded (not achieved) speed, so the baseline's nominal cadence matches what the policy "
+    "would see at the same --cmd.",
+)
+parser.add_argument(
+    "--cpg_step_height", type=float, default=0.04, help="--controller cpg: swing toe lift, metres (default: 0.04)"
+)
+parser.add_argument(
     "--terrain_type",
     default=None,
     choices=["flat", "rough", "slope_down", "slope_up", "bumps", "stairs_down", "stairs_up"],
@@ -130,6 +151,8 @@ app = AppLauncher(args).app
 import gymnasium as gym  # noqa: E402
 import hexasim.tasks  # noqa: E402, F401
 import torch  # noqa: E402
+from hexasim.control.cpg_gait import OpenLoopTripodGait  # noqa: E402
+from hexasim.control.leg_kinematics import inverse_kinematics  # noqa: E402
 from hexasim.rl.load_policy import configure, eval_physx_buffers, load_env_state, task_for  # noqa: E402
 from hexasim.tasks.manager_based.hexasim import demo_look  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp import pin_command, pin_terrain_level  # noqa: E402
@@ -245,21 +268,42 @@ ck = torch.load(args.ckpt, map_location=base.device, weights_only=False)
 load_env_state(base, ck)
 with torch.inference_mode():
     obs, _ = env.reset()
-policy = MLPModel(
-    TensorDict({"policy": obs["policy"]}, batch_size=[1]),
-    {"actor": ["policy"]},
-    "actor",
-    18,
-    [256, 128, 64],
-    "elu",
-    True,
-    {"class_name": "GaussianDistribution", "init_std": 1.0},
-).to(base.device)
-policy.load_state_dict(ck["actor_state_dict"])
-policy.eval()
+policy = None
+if args.controller == "policy":
+    policy = MLPModel(
+        TensorDict({"policy": obs["policy"]}, batch_size=[1]),
+        {"actor": ["policy"]},
+        "actor",
+        18,
+        [256, 128, 64],
+        "elu",
+        True,
+        {"class_name": "GaussianDistribution", "init_std": 1.0},
+    ).to(base.device)
+    policy.load_state_dict(ck["actor_state_dict"])
+    policy.eval()
 
 robot = base.scene["robot"]
 groups = {t: [i for i, n in enumerate(robot.joint_names) if n.endswith("_" + t)] for t in ("coxa", "femur", "tibia")}
+gait = None
+if args.controller == "cpg":
+    cpg_freq = args.cpg_freq if args.cpg_freq is not None else max(0.8, min(2.5, args.cmd / 0.20))
+    p_rest = coxa_leg_geometry(base)[0].clone()
+    q_current = robot.data.joint_pos.torch.clone()
+    joint_limits = robot.data.joint_pos_limits.torch[0]
+    default_joint_pos = robot.data.default_joint_pos.torch.clone()
+    action_scale = cfg.actions.joint_pos.scale
+    gait = OpenLoopTripodGait(p_rest, args.cmd, cpg_freq, args.cpg_step_height, env.unwrapped.step_dt)
+    print(
+        f"[record_gait] CPG baseline: freq {cpg_freq:.3f} Hz, stride {gait.stride * 100:.1f} cm, "
+        f"step height {args.cpg_step_height * 100:.1f} cm — open-loop, no terrain sensing."
+    )
+    if gait.stride_clamped:
+        print(
+            f"[record_gait] CPG stride capped {gait.raw_stride * 100:.1f} -> {gait.stride * 100:.1f} cm "
+            "(cmd/freq would overlap adjacent-leg swing paths); walks slower than --cmd, not a bug."
+        )
+fall_count = 0
 acc = {k: torch.zeros(6, device=base.device) for k in ("coxa", "femur", "tibia", "x", "y", "z", "reach", "tib_lat")}
 vx = 0.0
 n = 0
@@ -274,7 +318,15 @@ with torch.inference_mode():
             eye=(anchor + torch.tensor(eye)).tolist(),
             target=(anchor + torch.tensor(lookat)).tolist(),
         )
-        obs, *_ = env.step(policy(TensorDict({"policy": obs["policy"]}, batch_size=[1])))
+        if args.controller == "cpg":
+            q_current = inverse_kinematics(gait.target_toe_body(), q_current, joint_limits)
+            action = (q_current - default_joint_pos) / action_scale
+            gait.step()
+        else:
+            action = policy(TensorDict({"policy": obs["policy"]}, batch_size=[1]))
+        obs, _, terminated, _, _ = env.step(action)
+        if terminated[0]:
+            fall_count += 1
         if t < steps // 5:  # let the gait settle before averaging
             continue
         n += 1
@@ -295,7 +347,10 @@ with torch.inference_mode():
         vx += robot.data.root_lin_vel_b.torch[0, 0].item()
 
 deg = 57.2958
-print(f"\nGAIT {args.tag} ({task}, cmd {args.cmd if s0b else 'n/a'}): mean v_x {vx / n:.3f} m/s, {n} steps averaged")
+print(
+    f"\nGAIT {args.tag} ({task}, {args.controller}, cmd {args.cmd if s0b else 'n/a'}): "
+    f"mean v_x {vx / n:.3f} m/s, {fall_count} falls, {n} steps averaged"
+)
 print("leg      coxa°  femur°  tibia°   toe x   toe y   toe z   reach  tibia_lat")
 for k, leg in enumerate(LEG_NAMES):
     print(

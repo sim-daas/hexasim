@@ -14,7 +14,9 @@ Two kinds of course:
             spawn, ``--length`` m long (``mdp.materials.strip_course``). Window = from 0.5 m before the strip to its
             end. ``--start -100 --length 1000`` makes the whole ground the strip material (soft-ground V tests).
   shape     no ``--strip``: ``--terrain`` bumps / stairs_up / stairs_down / rough at ``--level`` (0–14 training, 15–20
-            held out), training spawns, material field with ``--layout_seed``. Window = the whole episode.
+            held out; past 20 that level alone: 25 = 5 cm, 40 = 8 cm steps), or ``gap`` (ring gap around the spawn
+            platform, 0.2 cm of width per level); training spawns, material field with ``--layout_seed``. Window = the
+            whole episode.
 
 Per-episode metrics (JSON lists, one value per env, for the episode bootstrap; NaN = no sample):
   fall        terminated
@@ -88,7 +90,11 @@ from hexasim.rl.load_policy import configure, eval_physx_buffers, load_env_state
 from hexasim.tasks.manager_based.hexasim.mdp import pin_command, pin_terrain_level  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp.materials import strip_course  # noqa: E402
 from hexasim.tasks.manager_based.hexasim.mdp.rewards import joint_leg_index, toe_pos_w  # noqa: E402
-from hexasim.tasks.manager_based.hexasim.mdp.terrain import EVAL_TERRAIN_TYPES, single_type_generator  # noqa: E402
+from hexasim.tasks.manager_based.hexasim.mdp.terrain import (  # noqa: E402
+    EVAL_TERRAIN_TYPES,
+    LEVELS_EVAL,
+    single_type_generator,
+)
 from rsl_rl.models import MLPModel  # noqa: E402
 from tensordict import TensorDict  # noqa: E402
 
@@ -107,6 +113,7 @@ cfg.seed = args.seed
 cfg.curriculum = None
 cfg.events.terrain_materials.params["seed"] = args.layout_seed
 pin_command(cfg, args.cmd)
+beyond = args.strip is None and (args.level >= LEVELS_EVAL or args.terrain == "gap")
 if args.strip is not None:
     sub = MeshPlaneTerrainCfg() if args.terrain == "flat" else EVAL_TERRAIN_TYPES[args.terrain]
     cfg.scene.terrain.terrain_generator = cfg.scene.terrain.terrain_generator.replace(
@@ -114,9 +121,10 @@ if args.strip is not None:
     )
     cfg.events.reset_robot_base.params["pose_range"].update(x=(0.0, 0.0), y=(0.0, 0.0), yaw=(0.0, 0.0))
 else:
-    cfg.scene.terrain.terrain_generator = single_type_generator(args.terrain)
+    # Levels past the 21-row suite (5–8 cm steps, gaps; phase2-progress §2.3.21) are built alone, as row 0.
+    cfg.scene.terrain.terrain_generator = single_type_generator(args.terrain, args.level if beyond else None)
 env = gym.make(task, cfg=cfg).unwrapped
-pin_terrain_level(env, 0 if args.strip is not None else args.level)
+pin_terrain_level(env, 0 if args.strip is not None or beyond else args.level)
 load_env_state(env, ck)
 if args.strip is not None:
     strip_course(env, args.start, args.length, low=tuple(args.strip), high=tuple(args.base))

@@ -3319,3 +3319,173 @@ Reading (one seed per arm):
    0.3 m/s — the pattern is stable: **knowing the ground ahead gives this robot a moderate gain in body steadiness on
    rough ground and slopes at ≤ 0.2 m/s, nothing on discrete steps, and no gain in slip or tracking beyond the size of
    the gait difference between two single-seed runs.** B0 never falls on any of the 20 cells.
+
+### 2.3.20 Why the blind arm is this good, what related work tested, and the direction agreed (2026-10-06)
+
+**Status: discussion record and plan. Nothing run, no code changed, no long run approved.**
+
+**Diagnosis (from §2.3.4, §2.3.13–2.3.19 and `mdp/terrain.py`).**
+1. **The training terrain is capped below the swing height.** Level 14: stairs 3 cm risers, bumps 3 cm, rough
+   ± 2.25 cm; held-out level 20: 4 cm, ± 3.0 cm. Swing apex 3.8–4.5 cm. A fixed swing clears every obstacle without
+   knowing it is there — the cap was chosen for that reason (§2.1). This is why stairs and bumps never separate the arms.
+2. **The robot reacts cheaply.** Statically stable tripod, 3.2 kg, 0.15 m/s at 50 Hz = 3 mm of travel per control step;
+   a contact felt one step late costs almost nothing. Flat-ground friction is harmless down to μ 0.05 (§2.3.4).
+3. **The reward pins what a height map would change (user's hypothesis, plausible, not measured).** `cpg_z_target`
+   prescribes the lift curve (4 cm), the two-sided `touchdown_reach` prescribes the foothold; tracking + alive are
+   ≈ 100 % of the return. A correctly placed height block with the clock terms removed has never been run (§2.3.12 had
+   the clock removed but misplaced patches; §2.3.16–19 had correct patches with the clock on).
+4. Not capacity: the oracle reads H* through the plain first layer (gate 1, §2.3.16), a linear read predicts landing
+   height at R² 0.4–0.6. O-leg ≈ B0 (§2.3.19) is 12 numbers against 144, one seed each, with its differences present on
+   flat ground too.
+5. Correction recorded: the first pilot (§2.3.12) did **not** show a superior oracle gait — the oracles ignored their
+   block, O-mat failed the tracking gate, O-geo had 20–33 % more short swings; the lower lift appeared after the clock
+   left and is within one-seed spread.
+6. An oracle is the ceiling for its information: arm F can at best match a combined shape + material oracle, not beat it.
+
+**Related work checked (web, 2026-10-06).** Full text read for the first three rows; the rest abstract / search snippet
+only and to be read before being cited.
+
+| Paper | Robot | Input | Terrain | Speed | Blind vs sighted |
+| --- | --- | --- | --- | --- | --- |
+| Agarwal et al., CoRL 2022 (arXiv 2211.07638) | Unitree A1 quadruped, hip height 28 cm | depth camera | stairs ≤ 24 cm, curbs ≤ 26 cm, gaps ≤ 26 cm, stepping stones | 0.35 m/s | distance before falling, vision / blind: slopes 44 / 35 m, stairs 31–42 / 17 m, stepping stones 19–21 / 1 m |
+| Natural and Robust Hexapod Locomotion (arXiv 2511.03167) | hexapod 25.5 kg, 30 cm tall | blind | stairs 3–20 cm, slopes 5–30°, 15 cm outdoor steps | 0.3–0.5 m/s | no sighted arm; blind climbs 20 cm |
+| CPG + DRL on JetHexa (Biomimetics 2026, PMC13509619) | small servo hexapod, 18 DOF | blind | stairs up / down + raised blocks, 4.7 m route, heights not given | 0.3–0.5 m/s | no sighted arm; 88 % route completion |
+| Versatile Locomotion Skills for Hexapod Robots (arXiv 2412.10628) — **not read** | hexapod, depth camera + VIO | vision | stairs, obstacle avoidance, squeezing under | ? | closest prior work; blind baseline unknown |
+| Miki et al., Sci. Robot. 2022 (ANYmal) — **numbers not retrieved** | | | | | |
+| Blind hexapod, RL + CPG (Symmetry 2025, 10.3390/sym17071058) — **snippet only** | | blind | stairs 8 cm, rough 12 cm (= COM height), slopes 16–18° | | |
+
+Reading: (i) on slopes and mild roughness blind is close to sighted even on a quadruped at 0.35 m/s — our result agrees;
+(ii) vision pays on stairs near leg length (≈ 85 % of hip height) and blind hexapods climb ≈ 2/3 of body height; our 3 cm
+risers are far inside the blind-sufficient range; (iii) the largest blind deficit is on gaps / stepping stones (foothold
+choice, not torque); (iv) terrain, not speed, separates the arms — the speed lever (§2.3.18, former option 3) is dropped,
+also because this hardware saturates at ≈ 0.25 m/s. No paper found that measures the blind / sighted crossover on a
+small servo hexapod (search not exhaustive).
+
+**Direction agreed (user, 2026-10-06).** The paper stays a hexapod paper around VP-JEPA; its claim may change (user: full
+flexibility). Working claim: *vision helps once the terrain exceeds what a fixed swing absorbs; the crossover is measured
+on this platform.* The hardware bench is not done, so physical limits come from datasheet link and actuator numbers,
+checked in simulation.
+- **(a) Raise terrain difficulty above the swing apex — the main lever.**
+- **Parts of (b) that (a) requires:** the lift target becomes a floor instead of a prescribed 4 cm curve
+  (`cpg_z_target`), and the two-sided `touchdown_reach` loosens, otherwise the reward punishes the adaptation the oracle
+  should make. Not adopted from (b): lowering the swing height to create a gap (handicaps the blind arm, which would
+  learn to lift high always).
+- **Energy must count:** without a price on lift the blind arm lifts high everywhere and matches the oracle. Energy per
+  metre is at least a headline metric; whether it enters the reward (excluded in §2.3.18) is reopened, undecided.
+- **(c) Gaps / stepping stones, later:** largest effect in the literature, within AX-12A torque.
+
+**Before officially moving on (both short, no training; not started — user: wait):**
+1. **Static reach and torque check** from datasheet link lengths and AX-12A limits, extending
+   `scripts/tests/static_torque_envelope.py`: tallest step and widest gap the robot can physically clear (lever-arm
+   torques, not `applied_torque`). Sets the ceiling for (a) and (c).
+2. **Find where the existing B0 breaks** (`…/hexapod_s1r/2026-10-05_10-31-40_s1r_B0_seed43/model_7999.pt`): evaluation
+   only, steps / bumps of 5–8 cm (evaluation generator extended past level 20) and gaps, up to the limit from step 1.
+
+**Then decide (user):** B0 fails somewhere the robot can physically go → that terrain is the headroom task (reward
+changes above, economy check, pre-registered rule, one blind + one oracle run — plan to be discussed before any long
+run). B0 never fails within the physical limit → write up "proprioception suffices on this platform up to X" with the
+blind baselines and this headroom study (§2.3.12 no-go and the §2.3.16 heading bug included).
+
+### 2.3.21 The two checks before moving on: static reach / torque envelope, and where the existing B0 breaks (2026-10-06)
+
+**Status: both run (user go-ahead 2026-10-06). No training. The decision of §2.3.20 is the user's.**
+
+**Code added (evaluation only; training terrain and rewards untouched).**
+- `scripts/tests/static_reach_envelope.py` — pure kinematics, no Kit. Uses the sim-validated leg model
+  (`hexasim.control.leg_kinematics`, toe error < 0.01 mm against `toe_pos_w`). A separate file, not an extension of
+  `static_torque_envelope.py`, because that one starts Kit; the torque rule is the same (lever arm × load).
+- `mdp/terrain.py`: `single_type_generator(name, level)` builds one level alone as row 0 on the unchanged
+  (ℓ + U)/15 scale (level 25 = 5 cm, 40 = 8 cm bumps and stairs); `EVAL_TERRAIN_TYPES["gap"]` = Isaac Lab's ring gap
+  around the 1 m spawn platform with a floor added 15 cm down (the stock gap is bottomless and the height-map rays
+  miss), 0.2 cm of width per level. `S0B_TERRAIN_CFG` is not changed (`EVAL_TERRAIN_TYPES` is now a copy plus `gap`).
+- `eval_headroom.py`: `--level` > 20 or `--terrain gap` uses the single-level generator. Levels ≤ 20 take the old path.
+- Drivers: `logs/eval/redesign/run_break.sh`, `break_summary.py`.
+
+#### Check 1 — static reach and torque
+
+`python scripts/tests/static_reach_envelope.py` (60 % of stall, spec §4.2 gate) and `--frac 1.0`.
+
+*Model.* Level body, quasi-static, tripod stance: each stance toe carries weight / 3 = 11.0 N (3.22 kg + 0.15 kg mast)
+straight up. A toe pose carries load if femur and tibia holding torque (horizontal lever arm × load) are within the
+limit and the toe is outside the femur joint. Joint limits = the action clip (coxa ± 55°, femur −98…+90°, tibia
+−45…+125°), 1.5° grid. Self-check inside the script: the S0a rest pose gives 12 % of stall and 17.0 cm toe depth, the
+values measured in simulation (§2.0, §2.1).
+
+| Body height (root above the feet) | Step, level body | Fore-aft stroke at 60 % stall: corner legs / middle legs | Gap at 60 % | Gap at 100 % |
+| --- | --- | --- | --- | --- |
+| 10 cm | 5.7 cm | 13.1 / 21.8 cm | 11.1 cm | 16.8 cm |
+| 14 cm | 9.7 cm | 13.0 / 21.6 cm | 11.0 cm | 16.9 cm |
+| 17 cm (rest pose) | 12.7 cm | 13.4 / 21.8 cm | 11.4 cm | 12.9 cm |
+| 18 cm | 13.7 cm | 12.6 / 20.9 cm | 10.6 cm | 10.6 cm |
+| 19 cm | 14.7 cm | 9.5 / 16.2 cm | 7.5 cm | 7.5 cm |
+
+- **Step = body height − base plate (3.3 cm below the root) − 1 cm margin.** Torque does not limit the step: a
+  vertical load is held at any toe depth down to 19.3 cm. The limit is the belly and leg length. The unloaded toe
+  reaches 19 cm above the root, so swing height is not the limit either.
+- **Gap = the shortest leg stroke − 1 cm margin on each edge** (a foot is carried one stroke per step). The corner legs
+  set it. At the rest height the limit is torque (11.4 cm at 60 %, 12.9 cm at stall); above 18 cm it is reach.
+- **Ceilings: ≈ 12–13 cm step, ≈ 11 cm gap.** Both are optimistic: no body pitch, no dynamics, no friction limit, no
+  leg–leg or leg–body collision check, stall torque is the provisional datasheet value (bench not done), and climbing
+  a 12 cm step with a level body needs the low feet at full depth. Treat them as "not possible beyond", not "possible up to".
+
+#### Check 2 — where the existing blind arm breaks
+
+`logs/eval/redesign/run_break.sh b0=logs/rsl_rl/hexapod_s1r/2026-10-05_10-31-40_s1r_B0_seed43/model_7999.pt`, then
+`python logs/eval/redesign/break_summary.py b0`. 256 deterministic episodes per cell, 10 s, 0.15 m/s, eval seed 0,
+material layout 1, training spawns (random yaw). The checkpoint was trained on ≤ 3 cm. Flat control
+(`gate2_b0_flat.json`): v_x 0.145 m/s, cost of transport 1.93. One cell (stairs up 5 cm) died at Kit start-up
+(exit 139) and was re-run alone with the same command.
+
+v_x is the mean over the whole episode. The first riser / gap edge is ≈ 0.5 m from the spawn, so a robot that is fully
+blocked there still shows ≈ 0.05 m/s: **"v_x < 1/3 of the command" reads as "stopped at the first obstacle"**.
+
+| Terrain | Size | Falls | Mean v_x (m/s) | Episodes < 2/3 cmd | Episodes < 1/3 cmd | Short swings | Cost of transport |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Bumps | 4 cm | 0 % | 0.136 | 2 % | 0 % | 23 % | 2.2 |
+| | 5 cm | 0.4 % | 0.133 | 5 % | 0 % | 24 % | 2.2 |
+| | 6 cm | 0 % | 0.125 | 13 % | 1 % | 26 % | 2.5 |
+| | 7 cm | 0 % | 0.120 | 20 % | 2 % | 29 % | 2.7 |
+| | 8 cm | 0.8 % | 0.116 | 22 % | 4 % | 30 % | 3.0 |
+| Stairs down | 4 cm | 0 % | 0.134 | 1 % | 0 % | 28 % | 2.2 |
+| | 5 cm | 0 % | 0.131 | 0 % | 0 % | 33 % | 2.3 |
+| | 6 cm | 0 % | 0.122 | 3 % | 0 % | 38 % | 2.4 |
+| | 7 cm | 0 % | 0.110 | 18 % | 4 % | 43 % | 3.0 |
+| | 8 cm | 0 % | 0.095 | 45 % | 9 % | 44 % | 4.7 |
+| **Stairs up** | 4 cm | 0 % | 0.127 | 6 % | 0 % | 32 % | 2.5 |
+| | 5 cm | 0 % | 0.097 | 43 % | 11 % | 39 % | 3.9 |
+| | 6 cm | 0 % | 0.070 | 80 % | 29 % | 42 % | 6.1 |
+| | 7 cm | 0 % | 0.056 | 94 % | 41 % | 45 % | 7.5 |
+| | 8 cm | 0 % | 0.050 | 97 % | 48 % | 45 % | 8.3 |
+| **Gap** | 5 cm | 0 % | 0.114 | 25 % | 9 % | 33 % | 3.3 |
+| | 8 cm | 0 % | 0.065 | 73 % | 41 % | 52 % | 8.1 |
+| | 10 cm | 0 % | 0.053 | 82 % | 54 % | 55 % | 10.0 |
+| | 12 cm | 0.8 % | 0.044 | 91 % | 62 % | 53 % | 10.1 |
+| | 15 cm | 10.5 % | 0.038 | 97 % | 67 % | 56 % | 8.5 |
+
+Reading:
+1. **The blind arm does not fall; it stops.** Falls stay ≤ 1 % everywhere except the 15 cm gap, which is beyond the
+   static limit. The failure is lost progress, so falls are the wrong primary metric on this terrain — progress
+   (distance or share of episodes past the obstacle) and energy per metre are.
+2. **Stairs up break first: between 4 cm (fine) and 5–6 cm.** The swing apex is 3.8–4.5 cm, as §2.3.20 item 1
+   predicted. At 6 cm 80 % of episodes lose a third of their speed; at 8 cm half stop at the first riser. The
+   physical ceiling is ≈ 12 cm, so **5–8 cm risers are 40–65 % of what the robot can climb**.
+3. **Gaps break between 5 cm and 8 cm**; the static limit is ≈ 11 cm. 8–10 cm gaps are inside the physical range and
+   stop 41–54 % of episodes.
+4. **Bumps and stairs down degrade gently** (8 cm: − 20 % and − 34 % speed, cost of transport × 1.5 and × 2.4).
+   A step down is absorbed by the stance legs; a wall in front of the swing foot is not.
+
+Limits of this check:
+- **A stall of this checkpoint is "untrained", not "blind cannot".** It never saw more than 3 cm, and its reward
+  prescribes a 4 cm lift. A blind arm trained on 5–8 cm with the lift as a floor may simply learn to lift higher
+  everywhere (§2.3.20, energy must count). Only B0 against an oracle, both trained on this terrain, measures headroom.
+- Metrics only: no video and no per-leg traces were looked at. How it stalls (toe against the riser, feet in the gap,
+  turning away) is inferred from v_x and the short-swing share, not observed.
+- One checkpoint, one seed, one command speed. The ring-gap course is crossed at whatever yaw the robot spawned with,
+  corners included; a straight trench across the path would be a cleaner course for a trained comparison.
+- In the gap cells `sink`, `height` and the tilt metrics use the terrain height, which is the pit floor over the gap;
+  only falls, v_x, swings and energy were read from those cells.
+
+**Outcome against the §2.3.20 rule:** the existing B0 fails inside the physical range on two terrains — stairs up of
+5–8 cm and gaps of 8–10 cm. By that rule this terrain is the candidate headroom task (reward changes of §2.3.20,
+economy check, pre-registered rule, one blind + one oracle run). **Not started: the plan is to be discussed with the
+user before any long run.**
